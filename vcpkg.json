@@ -1,0 +1,12 @@
+{
+  "name": "pointforge",
+  "version": "0.1.0",
+  "description": "Out-of-core point cloud importer and streaming viewer (LAS/LAZ, E57, PLY, PTS/XYZ).",
+  "dependencies": [
+    "sdl2",
+    "glew",
+    "glm",
+    "laszip",
+    "libe57format"
+  ]
+}

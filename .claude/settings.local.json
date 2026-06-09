@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//e/UnrealProject/Build/**)",
+      "Read(//e/UnrealProject/Build/LasBuild/**)",
+      "PowerShell(\"E root exists: \" + \\(Test-Path \"E:\\\\\"\\); Get-PSDrive -PSProvider FileSystem | Select-Object Name,Root,Used | Format-Table -AutoSize; \"--- E:\\\\UnrealProject ---\"; Test-Path \"E:\\\\UnrealProject\")",
+      "WebSearch",
+      "WebFetch(domain:dev.epicgames.com)",
+      "WebFetch(domain:cesium.com)",
+      "WebFetch(domain:www.magnopus.com)",
+      "WebFetch(domain:community.cesium.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:forums.unrealengine.com)",
+      "WebFetch(domain:py3dtiles.org)",
+      "WebFetch(domain:aecmag.com)",
+      "WebFetch(domain:www.vrwiki.cs.brown.edu)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:pointcloudplugin.com)",
+      "WebFetch(domain:www.fab.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:copc.io)",
+      "WebFetch(domain:www.cg.tuwien.ac.at)",
+      "WebFetch(domain:issues.unrealengine.com)",
+      "WebFetch(domain:web.archive.org)",
+      "WebFetch(domain:dq8iqaixvew1d.cloudfront.net)"
+    ]
+  }
+}

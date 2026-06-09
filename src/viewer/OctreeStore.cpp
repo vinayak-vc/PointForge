@@ -1,0 +1,169 @@
+#include "viewer/OctreeStore.h"
+#include "common/Log.h"
+#include <cmath>
+#include <cstring>
+#include <utility>
+
+namespace pf {
+
+OctreeStore::~OctreeStore() {
+    stop_ = true;
+    cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+}
+
+bool OctreeStore::load(const std::string& dir) {
+    // meta.bin
+    {
+        std::ifstream f(dir + "/meta.bin", std::ios::binary);
+        if (!f) { logError("OctreeStore: missing meta.bin in " + dir); return false; }
+        f.read(reinterpret_cast<char*>(&meta_), sizeof(meta_));
+        if (!f || std::memcmp(meta_.magic, "PFO1", 4) != 0) {
+            logError("OctreeStore: bad meta.bin magic/size"); return false;
+        }
+    }
+    // hierarchy.bin
+    {
+        std::ifstream f(dir + "/hierarchy.bin", std::ios::binary | std::ios::ate);
+        if (!f) { logError("OctreeStore: missing hierarchy.bin"); return false; }
+        std::streamsize bytes = f.tellg();
+        f.seekg(0);
+        nodes_.resize((size_t)bytes / sizeof(NodeRecord));
+        f.read(reinterpret_cast<char*>(nodes_.data()), bytes);
+        if (nodes_.size() != meta_.nodeCount)
+            logWarn("OctreeStore: nodeCount mismatch (meta " +
+                    std::to_string(meta_.nodeCount) + " vs file " +
+                    std::to_string(nodes_.size()) + ")");
+    }
+
+    octreePath_ = dir + "/octree.bin";
+    quant_.scale  = { meta_.scale[0],  meta_.scale[1],  meta_.scale[2]  };
+    quant_.offset = { meta_.offset[0], meta_.offset[1], meta_.offset[2] };
+    hasColor_ = meta_.hasColor != 0;
+    center_ = glm::dvec3(meta_.cubeMin[0] + meta_.cubeSize * 0.5,
+                         meta_.cubeMin[1] + meta_.cubeSize * 0.5,
+                         meta_.cubeMin[2] + meta_.cubeSize * 0.5);
+
+    computeCubes();
+
+    worker_ = std::thread(&OctreeStore::workerLoop, this);
+    logInfo("OctreeStore: loaded " + std::to_string(nodes_.size()) + " nodes, " +
+            std::to_string(meta_.pointCount) + " points");
+    return true;
+}
+
+void OctreeStore::computeCubes() {
+    cubes_.assign(nodes_.size(), NodeCube{});
+    if (nodes_.empty()) return;
+
+    // Iterative DFS from the root, assigning each node its cube via childCube().
+    struct Item { uint32_t idx; double min[3]; double size; };
+    std::vector<Item> stack;
+    Item root;
+    root.idx = meta_.rootNodeIndex;
+    root.min[0] = meta_.cubeMin[0]; root.min[1] = meta_.cubeMin[1]; root.min[2] = meta_.cubeMin[2];
+    root.size = meta_.cubeSize;
+    stack.push_back(root);
+
+    while (!stack.empty()) {
+        Item it = stack.back(); stack.pop_back();
+        if (it.idx >= nodes_.size()) continue;
+        NodeCube& nc = cubes_[it.idx];
+        nc.min[0] = it.min[0]; nc.min[1] = it.min[1]; nc.min[2] = it.min[2];
+        nc.size = it.size;
+
+        const NodeRecord& rec = nodes_[it.idx];
+        for (int o = 0; o < 8; ++o) {
+            if (rec.children[o] == kNoChild) continue;
+            Item ch; ch.idx = rec.children[o];
+            childCube(it.min, it.size, o, ch.min, ch.size);
+            stack.push_back(ch);
+        }
+    }
+}
+
+double OctreeStore::nodeSpacing(uint8_t level) const {
+    return meta_.rootSpacing / std::pow(2.0, (double)level);
+}
+
+GpuVertex OctreeStore::convert(const PackedPoint& p) const {
+    Vec3d w = quant_.unpack(p);
+    GpuVertex v;
+    v.x = (float)(w.x - center_.x);
+    v.y = (float)(w.y - center_.y);
+    v.z = (float)(w.z - center_.z);
+    if (hasColor_) {
+        v.r = (uint8_t)(p.r >> 8);
+        v.g = (uint8_t)(p.g >> 8);
+        v.b = (uint8_t)(p.b >> 8);
+    } else {
+        uint8_t g = (uint8_t)(p.intensity >> 8);
+        if (g == 0) g = 180; // visible default when no colour/intensity
+        v.r = v.g = v.b = g;
+    }
+    v.a = 255;
+    return v;
+}
+
+void OctreeStore::requestLoad(uint32_t nodeIndex) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (inflight_.count(nodeIndex)) return;
+    inflight_.insert(nodeIndex);
+    requestQueue_.push_back(nodeIndex);
+    cv_.notify_one();
+}
+
+bool OctreeStore::popResult(LoadResult& out) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (ready_.empty()) return false;
+    out = std::move(ready_.back());
+    ready_.pop_back();
+    return true;
+}
+
+void OctreeStore::markEvicted(uint32_t nodeIndex) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    inflight_.erase(nodeIndex);
+}
+
+size_t OctreeStore::pendingRequests() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return requestQueue_.size();
+}
+
+void OctreeStore::workerLoop() {
+    std::ifstream in(octreePath_, std::ios::binary);
+    if (!in) { logError("OctreeStore worker: cannot open " + octreePath_); return; }
+
+    std::vector<PackedPoint> raw;
+    for (;;) {
+        uint32_t idx;
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.wait(lk, [&]{ return stop_ || !requestQueue_.empty(); });
+            if (stop_) return;
+            idx = requestQueue_.front();
+            requestQueue_.pop_front();
+        }
+        if (idx >= nodes_.size()) continue;
+        const NodeRecord& rec = nodes_[idx];
+
+        raw.resize(rec.pointCount);
+        if (rec.pointCount) {
+            in.seekg((std::streamoff)rec.byteOffset);
+            in.read(reinterpret_cast<char*>(raw.data()), rec.byteSize);
+        }
+
+        LoadResult res;
+        res.nodeIndex = idx;
+        res.verts.resize(rec.pointCount);
+        for (uint32_t i = 0; i < rec.pointCount; ++i) res.verts[i] = convert(raw[i]);
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            ready_.push_back(std::move(res));
+        }
+    }
+}
+
+} // namespace pf
