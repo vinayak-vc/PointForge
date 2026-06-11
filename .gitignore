@@ -11,3 +11,6 @@ vcpkg_installed/
 .vs/
 .cache/
 compile_commands.json
+
+# Claude Code session settings (local)
+.claude/
