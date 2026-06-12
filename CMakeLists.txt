@@ -71,6 +71,18 @@ else()
     endif()
 endif()
 
+# --- Zstd (payload compression) ---
+find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
+find_library(ZSTD_LIB NAMES zstd libzstd)
+if(ZSTD_INCLUDE_DIR AND ZSTD_LIB)
+    list(APPEND PF_OPTIONAL_INCS ${ZSTD_INCLUDE_DIR})
+    list(APPEND PF_OPTIONAL_LIBS ${ZSTD_LIB})
+    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+    message(STATUS "Zstd: ${ZSTD_LIB}")
+else()
+    message(WARNING "Zstd not found -> Node compression disabled")
+endif()
+
 message(STATUS "PointForge optional format libs: ${PF_OPTIONAL_LIBS}")
 message(STATUS "PointForge format defines:       ${PF_OPTIONAL_DEFS}")
 

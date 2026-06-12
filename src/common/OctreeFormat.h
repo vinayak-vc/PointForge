@@ -18,7 +18,7 @@ namespace pf {
 
 struct FileMetadata {
     char     magic[4];        // "PFO1"
-    uint32_t version;         // = 1
+    uint32_t version;         // = 2
     uint64_t pointCount;      // total points across all nodes
     double   bbMin[3];        // true AABB of the data (world coords)
     double   bbMax[3];
@@ -31,6 +31,8 @@ struct FileMetadata {
     uint32_t hasColor;        // 1 if colour is meaningful
     uint32_t nodeCount;       // number of NodeRecord entries in hierarchy.bin
     uint32_t rootNodeIndex;   // index of the root node within hierarchy.bin
+    uint32_t hasClassification; // 1 if classification codes are meaningful (v2+)
+    uint32_t compressionType;   // 0 = none, 1 = zstd per-node (v2+)
 };
 
 // Child indices are stored explicitly (not as a contiguous firstChild + rank),

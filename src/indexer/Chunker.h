@@ -16,6 +16,7 @@ struct ChunkSet {
     Quantization quant;           // scale/offset used for PackedPoint
     uint64_t     pointCount = 0;
     bool         hasColor = false;
+    bool         hasClassification = false;
 
     int          gridDepth = 0;   // L; grid is (2^L)^3 cells
     int          gridDim = 1;     // 2^L

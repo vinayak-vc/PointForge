@@ -11,6 +11,7 @@ struct IndexOptions {
     int      maxDepth      = 24;     // hard cap on octree depth
     uint64_t flushBudget   = 16u * 1024u * 1024u; // chunker memory budget (points)
     bool     keepChunks    = false;  // keep intermediate chunk files for debugging
+    bool     compress      = false;  // zstd per-node compression of octree.bin payloads
 };
 
 // Full importer pipeline: chunk -> build chunk subtrees -> build coarse tree ->

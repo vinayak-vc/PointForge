@@ -73,6 +73,7 @@ bool runChunker(const std::string& inputPath,
     std::vector<char>     created(cellCount, 0);
     uint64_t buffered = 0, total = 0;
     bool anyColor = false;
+    bool anyClassification = false;
 
     auto flushAll = [&]() {
         for (size_t c = 0; c < cellCount; ++c) {
@@ -97,6 +98,7 @@ bool runChunker(const std::string& inputPath,
         for (size_t i = 0; i < n; ++i) {
             const Point& p = buf[i];
             if (p.hasColor) anyColor = true;
+            if (p.classification != 0) anyClassification = true;
 
             int gx = (int)((p.position.x - out.cubeMin.x) / cellSize);
             int gy = (int)((p.position.y - out.cubeMin.y) / cellSize);
@@ -117,6 +119,7 @@ bool runChunker(const std::string& inputPath,
 
     out.pointCount = total;
     out.hasColor = anyColor;
+    out.hasClassification = anyClassification;
 
     // ---- collect occupied chunks -----------------------------------------
     for (size_t c = 0; c < cellCount; ++c) {

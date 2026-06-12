@@ -16,6 +16,10 @@
 #include <fstream>
 #include <algorithm>
 
+#ifdef PF_WITH_ZSTD
+#include <zstd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace pf {
@@ -97,25 +101,51 @@ std::unique_ptr<LocalNode> buildSubtree(std::vector<PackedPoint>&& pts,
 // Serialize a chunk subtree depth-first (children before parent) into octree.bin,
 // appending NodeRecords to `hierarchy`. Returns the global index of `node`.
 uint32_t serialize(const LocalNode* node, FILE* payload, uint64_t& offset,
-                   std::vector<NodeRecord>& hierarchy) {
+                   std::vector<NodeRecord>& hierarchy, bool compress) {
     NodeRecord rec{};
     rec.level = (uint8_t)node->level;
     rec.childMask = 0;
     for (int o = 0; o < 8; ++o) {
         if (node->child[o]) {
-            rec.children[o] = serialize(node->child[o].get(), payload, offset, hierarchy);
+            rec.children[o] = serialize(node->child[o].get(), payload, offset, hierarchy, compress);
             rec.childMask |= (uint8_t)(1u << o);
         } else {
             rec.children[o] = kNoChild;
         }
     }
     const uint32_t count = (uint32_t)node->retained.size();
-    const uint32_t bytes = count * (uint32_t)sizeof(PackedPoint);
+    const size_t rawBytes = count * sizeof(PackedPoint);
     rec.pointCount = count;
     rec.byteOffset = offset;
-    rec.byteSize = bytes;
-    if (count) std::fwrite(node->retained.data(), sizeof(PackedPoint), count, payload);
-    offset += bytes;
+
+    if (count > 0) {
+#ifdef PF_WITH_ZSTD
+        if (compress) {
+            size_t bound = ZSTD_compressBound(rawBytes);
+            std::vector<uint8_t> cbuf(bound);
+            size_t cSize = ZSTD_compress(cbuf.data(), bound,
+                                         node->retained.data(), rawBytes, 3);
+            if (!ZSTD_isError(cSize) && cSize < rawBytes) {
+                std::fwrite(cbuf.data(), 1, cSize, payload);
+                rec.byteSize = (uint32_t)cSize;
+                offset += cSize;
+            } else {
+                // Compression didn't help — write raw
+                std::fwrite(node->retained.data(), sizeof(PackedPoint), count, payload);
+                rec.byteSize = (uint32_t)rawBytes;
+                offset += rawBytes;
+            }
+        } else
+#endif
+        {
+            (void)compress; // suppress warning when PF_WITH_ZSTD is not defined
+            std::fwrite(node->retained.data(), sizeof(PackedPoint), count, payload);
+            rec.byteSize = (uint32_t)rawBytes;
+            offset += rawBytes;
+        }
+    } else {
+        rec.byteSize = 0;
+    }
 
     uint32_t idx = (uint32_t)hierarchy.size();
     hierarchy.push_back(rec);
@@ -181,12 +211,36 @@ uint32_t buildCoarse(std::vector<PackedPoint>&& pts, const CoarseCtx& ctx,
     }
 
     const uint32_t count = (uint32_t)retained.size();
-    const uint32_t bytes = count * (uint32_t)sizeof(PackedPoint);
+    const size_t rawBytes = count * sizeof(PackedPoint);
     rec.pointCount = count;
     rec.byteOffset = *ctx.offset;
-    rec.byteSize = bytes;
-    if (count) std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
-    *ctx.offset += bytes;
+
+    if (count > 0) {
+#ifdef PF_WITH_ZSTD
+        if (ctx.opts->compress) {
+            size_t bound = ZSTD_compressBound(rawBytes);
+            std::vector<uint8_t> cbuf(bound);
+            size_t cSize = ZSTD_compress(cbuf.data(), bound,
+                                         retained.data(), rawBytes, 3);
+            if (!ZSTD_isError(cSize) && cSize < rawBytes) {
+                std::fwrite(cbuf.data(), 1, cSize, ctx.payload);
+                rec.byteSize = (uint32_t)cSize;
+                *ctx.offset += cSize;
+            } else {
+                std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
+                rec.byteSize = (uint32_t)rawBytes;
+                *ctx.offset += rawBytes;
+            }
+        } else
+#endif
+        {
+            std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
+            rec.byteSize = (uint32_t)rawBytes;
+            *ctx.offset += rawBytes;
+        }
+    } else {
+        rec.byteSize = 0;
+    }
 
     uint32_t idx = (uint32_t)ctx.hierarchy->size();
     ctx.hierarchy->push_back(rec);
@@ -255,7 +309,7 @@ bool buildOctree(const std::string& inputPath,
         // collect the chunk-root sample for the coarse build
         coarse.insert(coarse.end(), subtree->retained.begin(), subtree->retained.end());
 
-        uint32_t rootIdx = serialize(subtree.get(), payload, offset, hierarchy);
+        uint32_t rootIdx = serialize(subtree.get(), payload, offset, hierarchy, opts.compress);
         chunkRoots[ch.index] = rootIdx;
 
         if ((++done % 64) == 0)
@@ -291,7 +345,7 @@ bool buildOctree(const std::string& inputPath,
     // ---- metadata ---------------------------------------------------------
     FileMetadata meta{};
     std::memcpy(meta.magic, "PFO1", 4);
-    meta.version = 1;
+    meta.version = 2;
     meta.pointCount = cs.pointCount;
     meta.bbMin[0] = cs.bounds.min.x; meta.bbMin[1] = cs.bounds.min.y; meta.bbMin[2] = cs.bounds.min.z;
     meta.bbMax[0] = cs.bounds.max.x; meta.bbMax[1] = cs.bounds.max.y; meta.bbMax[2] = cs.bounds.max.z;
@@ -304,6 +358,8 @@ bool buildOctree(const std::string& inputPath,
     meta.hasColor = cs.hasColor ? 1u : 0u;
     meta.nodeCount = (uint32_t)hierarchy.size();
     meta.rootNodeIndex = rootNodeIndex;
+    meta.hasClassification = cs.hasClassification ? 1u : 0u;
+    meta.compressionType = opts.compress ? 1u : 0u;
 
     bool ok = writeMetaBin(outDir, meta) &&
               writeMetadataJson(outDir, meta) &&

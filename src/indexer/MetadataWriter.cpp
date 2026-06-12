@@ -35,7 +35,9 @@ bool writeMetadataJson(const std::string& outDir, const FileMetadata& m) {
         "  \"bytesPerPoint\": %u,\n"
         "  \"hasColor\": %u,\n"
         "  \"nodeCount\": %u,\n"
-        "  \"rootNodeIndex\": %u\n"
+        "  \"rootNodeIndex\": %u,\n"
+        "  \"hasClassification\": %u,\n"
+        "  \"compressionType\": %u\n"
         "}\n",
         m.version,
         (unsigned long long)m.pointCount,
@@ -44,7 +46,8 @@ bool writeMetadataJson(const std::string& outDir, const FileMetadata& m) {
         m.scale[0], m.scale[1], m.scale[2],
         m.offset[0], m.offset[1], m.offset[2],
         m.rootSpacing,
-        m.bytesPerPoint, m.hasColor, m.nodeCount, m.rootNodeIndex);
+        m.bytesPerPoint, m.hasColor, m.nodeCount, m.rootNodeIndex,
+        m.hasClassification, m.compressionType);
     std::fclose(f);
     return true;
 }

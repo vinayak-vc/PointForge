@@ -7,11 +7,13 @@
 
 namespace pf {
 
-// Fixed on-disk per-point record used by v1 of the octree format.
-// Layout (little-endian, tightly packed, 20 bytes):
+// Fixed on-disk per-point record used by v2 of the octree format.
+// Layout (little-endian, tightly packed, 22 bytes):
 //   int32  x, y, z      quantized position = round((world - offset) / scale)
 //   uint16 r, g, b
 //   uint16 intensity
+//   uint8  classification   (ASPRS LAS class code, 0–255)
+//   uint8  pad              (alignment; reserved for future use)
 //
 // Positions are stored relative to `offset` with `scale` (LAS convention) so we
 // keep full source precision without paying for doubles on disk or on the GPU.
@@ -20,10 +22,12 @@ struct PackedPoint {
     int32_t  x, y, z;
     uint16_t r, g, b;
     uint16_t intensity;
+    uint8_t  classification;
+    uint8_t  pad;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(PackedPoint) == 20, "PackedPoint must be tightly packed to 20 bytes");
+static_assert(sizeof(PackedPoint) == 22, "PackedPoint must be tightly packed to 22 bytes");
 
 constexpr uint32_t kBytesPerPoint = sizeof(PackedPoint);
 
@@ -39,6 +43,8 @@ struct Quantization {
         out.z = static_cast<int32_t>(std::llround((p.position.z - offset.z) / scale.z));
         out.r = p.r; out.g = p.g; out.b = p.b;
         out.intensity = p.intensity;
+        out.classification = p.classification;
+        out.pad = 0;
         return out;
     }
 
@@ -50,3 +56,4 @@ struct Quantization {
 };
 
 } // namespace pf
+

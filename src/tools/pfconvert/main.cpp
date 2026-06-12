@@ -20,6 +20,7 @@ static void usage() {
         "  --max-depth <n>       hard octree depth cap (default 24)\n"
         "  --flush <points>      chunker memory budget in points (default 16M)\n"
         "  --keep-chunks         keep intermediate chunk files (debug)\n"
+        "  --compress            zstd-compress each node payload in octree.bin\n"
         "  --verbose             debug logging\n\n"
         "Supported inputs: .las .laz .e57 .ply .pts .xyz .txt .csv\n");
 }
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-depth")    opts.maxDepth = std::atoi(next("--max-depth"));
         else if (a == "--flush")        opts.flushBudget = std::strtoull(next("--flush"), nullptr, 10);
         else if (a == "--keep-chunks")  opts.keepChunks = true;
+        else if (a == "--compress")     opts.compress = true;
         else if (a == "--verbose")      setLogLevel(LogLevel::Debug);
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { logError("unknown argument: " + a); usage(); return 1; }

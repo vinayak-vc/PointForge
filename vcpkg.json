@@ -7,6 +7,7 @@
     "glew",
     "glm",
     "laszip",
-    "libe57format"
+    "libe57format",
+    "zstd"
   ]
 }
