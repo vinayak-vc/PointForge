@@ -15,9 +15,15 @@ OctreeStore::~OctreeStore() {
 bool OctreeStore::load(const std::string& dir) {
     // meta.bin
     {
-        std::ifstream f(dir + "/meta.bin", std::ios::binary);
+        std::ifstream f(dir + "/meta.bin", std::ios::binary | std::ios::ate);
         if (!f) { logError("OctreeStore: missing meta.bin in " + dir); return false; }
-        f.read(reinterpret_cast<char*>(&meta_), sizeof(meta_));
+        std::streamsize len = f.tellg();
+        f.seekg(0);
+        if (len < 104 || len > sizeof(meta_)) {
+            logError("OctreeStore: bad meta.bin size"); return false;
+        }
+        std::memset(&meta_, 0, sizeof(meta_)); // zero init for v1
+        f.read(reinterpret_cast<char*>(&meta_), len);
         if (!f || std::memcmp(meta_.magic, "PFO1", 4) != 0) {
             logError("OctreeStore: bad meta.bin magic/size"); return false;
         }
