@@ -10,15 +10,16 @@ glm::vec3 Camera::front() const {
     float sy = std::sin(glm::radians(yaw));
     float cp = std::cos(glm::radians(pitch));
     float sp = std::sin(glm::radians(pitch));
-    return glm::normalize(glm::vec3(cy * cp, sp, sy * cp));
+    // Z-up: yaw=0 looks +Y. Moving mouse right increases yaw (clockwise -> +X)
+    return glm::normalize(glm::vec3(sy * cp, cy * cp, sp));
 }
 
 glm::vec3 Camera::right() const {
-    return glm::normalize(glm::cross(front(), glm::vec3(0, 1, 0)));
+    return glm::normalize(glm::cross(front(), glm::vec3(0, 0, 1))); // Z is up
 }
 
 glm::mat4 Camera::view() const {
-    return glm::lookAt(position, position + front(), glm::vec3(0, 1, 0));
+    return glm::lookAt(position, position + front(), glm::vec3(0, 0, 1)); // Z is up
 }
 
 glm::mat4 Camera::proj() const {

@@ -108,8 +108,8 @@ int main(int argc, char** argv) {
     // ---- camera initial framing ------------------------------------------
     Camera cam;
     const double cubeSize = store.meta().cubeSize;
-    cam.position = glm::vec3(0.0f, 0.0f, (float)cubeSize);
-    cam.yaw = -90.0f; cam.pitch = 0.0f;
+    cam.position = glm::vec3(0.0f, -(float)cubeSize, 0.0f);
+    cam.yaw = 0.0f; cam.pitch = 0.0f;
     cam.nearZ = (float)std::max(0.01, cubeSize / 5000.0);
     cam.farZ  = (float)(cubeSize * 8.0);
     cam.moveSpeed = (float)(cubeSize / 8.0);
@@ -134,6 +134,7 @@ int main(int argc, char** argv) {
         // ---- timing -------------------------------------------------------
         Uint64 now = SDL_GetPerformanceCounter();
         float dt = (float)((double)(now - prevTicks) / (double)SDL_GetPerformanceFrequency());
+        if (dt > 0.1f) dt = 0.1f;
         prevTicks = now;
         ++frame;
 
@@ -145,13 +146,18 @@ int main(int argc, char** argv) {
             else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_RESIZED) {
                 winW = e.window.data1; winH = e.window.data2;
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
-                mouseLook = true; SDL_SetRelativeMouseMode(SDL_TRUE);
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    mouseLook = true; SDL_SetRelativeMouseMode(SDL_TRUE);
+                    SDL_GetRelativeMouseState(nullptr, nullptr); // clear accumulated motion
+                }
             } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_RIGHT) {
                 mouseLook = false; SDL_SetRelativeMouseMode(SDL_FALSE);
             } else if (e.type == SDL_MOUSEMOTION && mouseLook) {
                 cam.addYawPitch((float)e.motion.xrel, -(float)e.motion.yrel);
             } else if (e.type == SDL_MOUSEWHEEL) {
-                pointSize = std::max(1.0f, pointSize + (e.wheel.y > 0 ? 1.0f : -1.0f));
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    pointSize = std::max(1.0f, pointSize + (e.wheel.y > 0 ? 1.0f : -1.0f));
+                }
             }
         }
 
@@ -160,12 +166,19 @@ int main(int argc, char** argv) {
             const Uint8* ks = SDL_GetKeyboardState(nullptr);
             float speed = cam.moveSpeed * dt * (ks[SDL_SCANCODE_LSHIFT] ? 5.0f : 1.0f);
             glm::vec3 fwd = cam.front(), rgt = cam.right();
-            if (ks[SDL_SCANCODE_W]) cam.moveLocal(fwd * speed);
-            if (ks[SDL_SCANCODE_S]) cam.moveLocal(-fwd * speed);
-            if (ks[SDL_SCANCODE_D]) cam.moveLocal(rgt * speed);
-            if (ks[SDL_SCANCODE_A]) cam.moveLocal(-rgt * speed);
-            if (ks[SDL_SCANCODE_E]) cam.moveLocal(glm::vec3(0, 1, 0) * speed);
-            if (ks[SDL_SCANCODE_Q]) cam.moveLocal(glm::vec3(0, -1, 0) * speed);
+            glm::vec3 moveDir(0.0f);
+            
+            if (ks[SDL_SCANCODE_W]) moveDir += fwd;
+            if (ks[SDL_SCANCODE_S]) moveDir -= fwd;
+            if (ks[SDL_SCANCODE_D]) moveDir += rgt;
+            if (ks[SDL_SCANCODE_A]) moveDir -= rgt;
+            if (ks[SDL_SCANCODE_E]) moveDir += glm::vec3(0, 0, 1);
+            if (ks[SDL_SCANCODE_Q]) moveDir -= glm::vec3(0, 0, 1);
+            
+            if (glm::length(moveDir) > 0.0f) {
+                moveDir = glm::normalize(moveDir);
+                cam.moveLocal(moveDir * speed);
+            }
         }
 
         // ---- absorb finished async loads ---------------------------------
