@@ -30,7 +30,8 @@ bool runChunker(const std::string& inputPath,
                 const std::string& chunkDir,
                 int gridDepth,
                 ChunkSet& out,
-                uint64_t flushPointBudget) {
+                uint64_t flushPointBudget,
+                std::function<void(float, const std::string&)> progressCb) {
     // ---- determine bounds (and count if available) -----------------------
     AABB bounds;
     {
@@ -44,9 +45,14 @@ bool runChunker(const std::string& inputPath,
             std::vector<Point> buf(kReadBatch);
             size_t n;
             uint64_t seen = 0;
+            uint64_t expectedPoints = r->pointCount();
             while ((n = r->read(buf.data(), buf.size())) > 0) {
                 for (size_t i = 0; i < n; ++i) bounds.expand(buf[i].position);
                 seen += n;
+                if (progressCb && (seen % (1024 * 1024) < buf.size() || seen == expectedPoints)) {
+                    float pct = expectedPoints > 0 ? (float)seen / expectedPoints : 0.0f;
+                    progressCb(pct * 0.1f, "Scanning bounds: " + std::to_string(seen) + " points");
+                }
             }
             logInfo("Chunker: bounds pass saw " + std::to_string(seen) + " points");
         }
@@ -71,9 +77,14 @@ bool runChunker(const std::string& inputPath,
     std::vector<std::vector<PackedPoint>> buffers(cellCount);
     std::vector<uint64_t> counts(cellCount, 0);
     std::vector<char>     created(cellCount, 0);
-    uint64_t buffered = 0, total = 0;
+    uint64_t buffered = 0, total = 0, globalSeen = 0, inRAM = 0;
     bool anyColor = false;
-    bool anyClassification = false;
+    out.hasClassification = false;
+
+    PointReaderPtr r = openPointReader(inputPath);
+    if (!r) return false;
+    uint64_t totalPts = r->pointCount();
+    if (totalPts == 0) totalPts = out.pointCount; // fallback if reader doesn't know
 
     auto flushAll = [&]() {
         for (size_t c = 0; c < cellCount; ++c) {
@@ -88,17 +99,16 @@ bool runChunker(const std::string& inputPath,
             buffers[c].shrink_to_fit();
         }
         buffered = 0;
+        inRAM = 0;
     };
 
-    PointReaderPtr r = openPointReader(inputPath);
-    if (!r) return false;
     std::vector<Point> buf(kReadBatch);
     size_t n;
     while ((n = r->read(buf.data(), buf.size())) > 0) {
         for (size_t i = 0; i < n; ++i) {
             const Point& p = buf[i];
             if (p.hasColor) anyColor = true;
-            if (p.classification != 0) anyClassification = true;
+            if (p.classification != 0) out.hasClassification = true;
 
             int gx = (int)((p.position.x - out.cubeMin.x) / cellSize);
             int gy = (int)((p.position.y - out.cubeMin.y) / cellSize);
@@ -113,13 +123,20 @@ bool runChunker(const std::string& inputPath,
             ++buffered;
             ++total;
         }
-        if (buffered >= flushPointBudget) flushAll();
+        inRAM += n;
+        globalSeen += n;
+        
+        if (progressCb && (globalSeen % (1024 * 512) < buf.size() || globalSeen == totalPts)) {
+            float pct = totalPts > 0 ? (float)globalSeen / totalPts : 0.0f;
+            progressCb(0.1f + pct * 0.4f, "Chunking: " + std::to_string(globalSeen) + " points");
+        }
+
+        if (inRAM >= flushPointBudget) flushAll();
     }
     flushAll();
 
     out.pointCount = total;
     out.hasColor = anyColor;
-    out.hasClassification = anyClassification;
 
     // ---- collect occupied chunks -----------------------------------------
     for (size_t c = 0; c < cellCount; ++c) {

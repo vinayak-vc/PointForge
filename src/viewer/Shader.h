@@ -16,6 +16,8 @@ public:
     void setMat4(const char* name, const float* m) const;
     void setFloat(const char* name, float v) const;
     void setInt(const char* name, int v) const;
+    void setVec2(const char* name, float x, float y) const;
+    void setVec3(const char* name, float x, float y, float z) const;
 
 private:
     static GLuint compile(GLenum type, const std::string& src, const std::string& label);

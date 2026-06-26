@@ -128,10 +128,11 @@ add_library(pfcore STATIC
     src/indexer/Chunker.cpp
     src/indexer/OctreeIndexer.cpp
     src/indexer/MetadataWriter.cpp
+    src/common/FileDialog.cpp
 )
 target_include_directories(pfcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(pfcore PRIVATE ${PF_OPTIONAL_INCS})
-target_link_libraries(pfcore PUBLIC glm::glm ${PF_OPTIONAL_LIBS})
+target_link_libraries(pfcore PUBLIC glm::glm ${PF_OPTIONAL_LIBS} ole32)
 target_compile_definitions(pfcore PUBLIC ${PF_OPTIONAL_DEFS})
 
 # ---------------------------------------------------------------------------
@@ -143,7 +144,7 @@ target_link_libraries(pfconvert PRIVATE pfcore)
 # ---------------------------------------------------------------------------
 # pfview — the streaming viewer
 # ---------------------------------------------------------------------------
-add_executable(pfview
+add_executable(pfview WIN32
     src/viewer/main.cpp
     src/viewer/Camera.cpp
     src/viewer/Shader.cpp

@@ -14,6 +14,8 @@ public:
     float nearZ = 0.05f;
     float farZ  = 100000.0f;
     float aspect = 16.0f / 9.0f;
+    bool  isOrtho = false;
+    float orthoSize = 100.0f; // Half-height of ortho view
     float moveSpeed = 10.0f;     // units/sec
     float lookSpeed = 0.15f;     // degrees/pixel
 

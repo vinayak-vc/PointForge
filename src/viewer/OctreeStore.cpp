@@ -4,12 +4,31 @@
 #include <cstring>
 #include <utility>
 
+#ifdef PF_WITH_ZSTD
+#include <zstd.h>
+#endif
+
 namespace pf {
 
 OctreeStore::~OctreeStore() {
-    stop_ = true;
+    clear();
+}
+
+void OctreeStore::clear() {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        stop_ = true;
+    }
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
+    
+    std::lock_guard<std::mutex> lk(mtx_);
+    inflight_.clear();
+    requestQueue_.clear();
+    ready_.clear();
+    nodes_.clear();
+    octreePath_.clear();
+    stop_ = false; // Reset for next load
 }
 
 bool OctreeStore::load(const std::string& dir) {
@@ -156,8 +175,22 @@ void OctreeStore::workerLoop() {
 
         raw.resize(rec.pointCount);
         if (rec.pointCount) {
+            size_t expectedRawBytes = rec.pointCount * sizeof(PackedPoint);
             in.seekg((std::streamoff)rec.byteOffset);
-            in.read(reinterpret_cast<char*>(raw.data()), rec.byteSize);
+            if (rec.byteSize < expectedRawBytes) {
+#ifdef PF_WITH_ZSTD
+                std::vector<uint8_t> cbuf(rec.byteSize);
+                in.read(reinterpret_cast<char*>(cbuf.data()), rec.byteSize);
+                size_t dSize = ZSTD_decompress(raw.data(), expectedRawBytes, cbuf.data(), rec.byteSize);
+                if (ZSTD_isError(dSize) || dSize != expectedRawBytes) {
+                    logError("OctreeStore: ZSTD decompress failed");
+                }
+#else
+                logError("OctreeStore: compressed node found, but built without ZSTD support");
+#endif
+            } else {
+                in.read(reinterpret_cast<char*>(raw.data()), rec.byteSize);
+            }
         }
 
         LoadResult res;

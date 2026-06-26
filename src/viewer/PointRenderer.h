@@ -12,6 +12,9 @@ class PointRenderer {
 public:
     ~PointRenderer();
 
+    // Destroy all GPU resources and clear node mappings
+    void clear();
+
     bool isResident(uint32_t idx) const { return nodes_.count(idx) != 0; }
     void upload(uint32_t idx, const std::vector<GpuVertex>& verts);
     void draw(uint32_t idx, uint64_t frame);   // assumes shader + uniforms bound

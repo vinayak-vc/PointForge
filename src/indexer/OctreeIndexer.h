@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <functional>
 
 namespace pf {
 
@@ -12,6 +13,9 @@ struct IndexOptions {
     uint64_t flushBudget   = 16u * 1024u * 1024u; // chunker memory budget (points)
     bool     keepChunks    = false;  // keep intermediate chunk files for debugging
     bool     compress      = false;  // zstd per-node compression of octree.bin payloads
+    
+    // Optional callback for progress updates: progressCb(fraction_0_to_1, status_message)
+    std::function<void(float, const std::string&)> progressCb = nullptr;
 };
 
 // Full importer pipeline: chunk -> build chunk subtrees -> build coarse tree ->

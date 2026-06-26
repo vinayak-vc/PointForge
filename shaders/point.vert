@@ -11,6 +11,7 @@ uniform float uAttenuation;  // 0 = constant pixel size, 1 = perspective attenua
 uniform float uViewportH;    // viewport height in pixels (for attenuation)
 
 out vec3 vColor;
+out vec3 vWorldPos;
 
 void main() {
     vec4 clip = uMVP * vec4(inPos, 1.0);
@@ -24,4 +25,5 @@ void main() {
     gl_PointSize = clamp(size, 1.0, 64.0);
 
     vColor = inColor;
+    vWorldPos = inPos;
 }

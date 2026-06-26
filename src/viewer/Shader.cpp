@@ -70,5 +70,11 @@ void Shader::setFloat(const char* name, float v) const {
 void Shader::setInt(const char* name, int v) const {
     glUniform1i(glGetUniformLocation(program_, name), v);
 }
+void Shader::setVec2(const char* name, float x, float y) const {
+    glUniform2f(glGetUniformLocation(program_, name), x, y);
+}
+void Shader::setVec3(const char* name, float x, float y, float z) const {
+    glUniform3f(glGetUniformLocation(program_, name), x, y, z);
+}
 
 } // namespace pf

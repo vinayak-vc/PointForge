@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <functional>
 
 namespace pf {
 
@@ -43,6 +44,7 @@ bool runChunker(const std::string& inputPath,
                 const std::string& chunkDir,
                 int gridDepth,
                 ChunkSet& out,
-                uint64_t flushPointBudget = 16u * 1024u * 1024u);
+                uint64_t flushPointBudget = 16u * 1024u * 1024u,
+                std::function<void(float, const std::string&)> progressCb = nullptr);
 
 } // namespace pf

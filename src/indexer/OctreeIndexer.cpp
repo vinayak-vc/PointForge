@@ -272,7 +272,7 @@ bool buildOctree(const std::string& inputPath,
 
     // ---- phase A+B: chunking ---------------------------------------------
     ChunkSet cs;
-    if (!runChunker(inputPath, chunkDir, opts.gridDepth, cs, opts.flushBudget)) {
+    if (!runChunker(inputPath, chunkDir, opts.gridDepth, cs, opts.flushBudget, opts.progressCb)) {
         logError("buildOctree: chunking failed");
         return false;
     }
@@ -312,9 +312,16 @@ bool buildOctree(const std::string& inputPath,
         uint32_t rootIdx = serialize(subtree.get(), payload, offset, hierarchy, opts.compress);
         chunkRoots[ch.index] = rootIdx;
 
-        if ((++done % 64) == 0)
-            logInfo("buildOctree: indexed " + std::to_string(done) + "/" +
-                    std::to_string(cs.chunks.size()) + " chunks");
+        if ((++done % 64) == 0 || done == cs.chunks.size()) {
+            std::string msg = "buildOctree: indexed " + std::to_string(done) + "/" +
+                              std::to_string(cs.chunks.size()) + " chunks";
+            logInfo(msg);
+            if (opts.progressCb) {
+                float pct = cs.chunks.empty() ? 1.0f : (float)done / cs.chunks.size();
+                // Subtree building maps from 0.5 to 1.0
+                opts.progressCb(0.5f + pct * 0.5f, msg);
+            }
+        }
     }
 
     // ---- phase C2: coarse tree -------------------------------------------

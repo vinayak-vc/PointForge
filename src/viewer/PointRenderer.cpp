@@ -5,7 +5,14 @@
 namespace pf {
 
 PointRenderer::~PointRenderer() {
-    for (auto& kv : nodes_) destroy(kv.second);
+    clear();
+}
+
+void PointRenderer::clear() {
+    for (auto& pair : nodes_) destroy(pair.second);
+    nodes_.clear();
+    totalBytes_ = 0;
+    totalPoints_ = 0;
 }
 
 void PointRenderer::destroy(GpuNode& n) {

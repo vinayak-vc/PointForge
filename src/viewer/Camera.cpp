@@ -23,6 +23,10 @@ glm::mat4 Camera::view() const {
 }
 
 glm::mat4 Camera::proj() const {
+    if (isOrtho) {
+        float right = orthoSize * aspect;
+        return glm::ortho(-right, right, -orthoSize, orthoSize, nearZ, farZ);
+    }
     return glm::perspective(glm::radians(fovY), aspect, nearZ, farZ);
 }
 

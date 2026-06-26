@@ -40,6 +40,9 @@ class OctreeStore {
 public:
     ~OctreeStore();
 
+    // Reset store and stop worker threads to allow loading a new point cloud safely
+    void clear();
+
     bool load(const std::string& dir);
 
     const FileMetadata&            meta()  const { return meta_; }
