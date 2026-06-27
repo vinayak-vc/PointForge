@@ -16,6 +16,7 @@
 #include "viewer/Shader.h"
 #include "viewer/OctreeStore.h"
 #include "viewer/PointRenderer.h"
+#include "viewer/Controller.h"
 #include "viewer/EmbeddedShaders.h"
 #include "viewer/EmbeddedImage.h"
 #include "common/Log.h"
@@ -121,7 +122,9 @@ int main(int argc, char** argv) {
     if (argc >= 2) initialDir = argv[1];
 
     // ---- SDL + GL context -------------------------------------------------
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) { logError(std::string("SDL_Init: ") + SDL_GetError()); return 1; }
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
+        logError(std::string("SDL_Init: ") + SDL_GetError()); return 1;
+    }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -263,6 +266,15 @@ int main(int argc, char** argv) {
     float edlStrength = 1.0f;
     float edlRadius = 1.5f;
 
+    // ---- controller (gamepad / custom joystick) ---------------------------
+    GameInput pad;
+    pad.openFirst();
+    bool  padEnabled  = true;
+    float padLookSens = 120.0f;    // deg/sec at full stick deflection
+    float padMoveSens = 1.0f;      // multiplier on cam.moveSpeed
+    bool  padInvertY  = false;
+    bool  uiNavMode   = false;     // true = controller drives the UI, not the camera
+
     // ---- measurement (CPU point picking, multi-segment polyline) ----------
     bool measureMode = false;
     std::vector<glm::dvec3> measurePts;   // picked vertices, world coords
@@ -311,6 +323,8 @@ int main(int argc, char** argv) {
         uiScale = autoUiScale;
         darkTheme = true;
         enableEDL = false; edlStrength = 1.0f; edlRadius = 1.5f;
+        padEnabled = true; pad.deadzone = 0.18f; padLookSens = 120.0f;
+        padMoveSens = 1.0f; padInvertY = false;
     };
 
     auto saveSettings = [&]() {
@@ -338,6 +352,13 @@ int main(int argc, char** argv) {
         fprintf(f, "edlStrength=%f\n", edlStrength);
         fprintf(f, "edlRadius=%f\n", edlRadius);
         fprintf(f, "autoLoadLast=%d\n", (int)autoLoadLast);
+        fprintf(f, "padEnabled=%d\n", (int)padEnabled);
+        fprintf(f, "padDeadzone=%f\n", pad.deadzone);
+        fprintf(f, "padLookSens=%f\n", padLookSens);
+        fprintf(f, "padMoveSens=%f\n", padMoveSens);
+        fprintf(f, "padInvertY=%d\n", (int)padInvertY);
+        fprintf(f, "jAxes=%d,%d,%d,%d\n", pad.jAxisX, pad.jAxisY, pad.jAxisRX, pad.jAxisRY);
+        fprintf(f, "jBtns=%d,%d,%d,%d,%d,%d\n", pad.jBtnA, pad.jBtnB, pad.jBtnLB, pad.jBtnRB, pad.jBtnBack, pad.jBtnStart);
         for (const auto& r : recentDirs) fprintf(f, "recent=%s\n", r.c_str());
         fclose(f);
     };
@@ -370,6 +391,13 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "edlStrength=%f", &f1) == 1) edlStrength = f1;
             else if (sscanf(line, "edlRadius=%f", &f1) == 1) edlRadius = f1;
             else if (sscanf(line, "autoLoadLast=%d", &i) == 1) autoLoadLast = (i != 0);
+            else if (sscanf(line, "padEnabled=%d", &i) == 1) padEnabled = (i != 0);
+            else if (sscanf(line, "padDeadzone=%f", &f1) == 1) pad.deadzone = f1;
+            else if (sscanf(line, "padLookSens=%f", &f1) == 1) padLookSens = f1;
+            else if (sscanf(line, "padMoveSens=%f", &f1) == 1) padMoveSens = f1;
+            else if (sscanf(line, "padInvertY=%d", &i) == 1) padInvertY = (i != 0);
+            else if (sscanf(line, "jAxes=%d,%d,%d,%d", &pad.jAxisX, &pad.jAxisY, &pad.jAxisRX, &pad.jAxisRY) == 4) {}
+            else if (sscanf(line, "jBtns=%d,%d,%d,%d,%d,%d", &pad.jBtnA, &pad.jBtnB, &pad.jBtnLB, &pad.jBtnRB, &pad.jBtnBack, &pad.jBtnStart) == 6) {}
             else if (strncmp(line, "recent=", 7) == 0) {
                 std::string v = line + 7;
                 while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
@@ -451,6 +479,7 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
+            pad.onDeviceEvent(e);
             if (e.type == SDL_QUIT) running = false;
             else if (e.type == SDL_DROPFILE) {
                 std::string dropFile = e.drop.file;
@@ -544,6 +573,47 @@ int main(int argc, char** argv) {
             if (glm::length(moveDir) > 0.0f) {
                 moveDir = glm::normalize(moveDir);
                 cam.position += moveDir * speed;
+            }
+        }
+
+        // ---- controller input --------------------------------------------
+        if (padEnabled && pad.connected()) {
+            pad.poll();
+            // Drive ImGui nav with the gamepad only in UI mode (GameController only;
+            // imgui's SDL2 backend reads the controller itself).
+            if (uiNavMode) ImGui::GetIO().ConfigFlags |=  ImGuiConfigFlags_NavEnableGamepad;
+            else           ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+
+            // Mode toggle: Start (Xbox) or B (custom) flips camera <-> UI control.
+            if (pad.pressed(PAD_START) || pad.pressed(PAD_B)) uiNavMode = !uiNavMode;
+
+            if (!uiNavMode && octreeLoaded) {
+                const PadState& s = pad.cur();
+                float boost = (pad.held(PAD_RB) ? 5.0f : 1.0f);
+                float mv = cam.moveSpeed * dt * camSpeedMultiplier * padMoveSens * boost;
+
+                // Custom 1-stick controllers have no right stick: hold LB to make
+                // the left stick steer (look) instead of move.
+                bool lookWithLeft = !pad.isGameController() && pad.held(PAD_LB);
+                float invY = padInvertY ? -1.0f : 1.0f;
+
+                if (lookWithLeft) {
+                    cam.addYawPitch(s.lx * padLookSens * dt, -s.ly * invY * padLookSens * dt);
+                } else {
+                    glm::vec3 fwd = cam.front(), rgt = cam.right();
+                    cam.position += (rgt * s.lx - fwd * s.ly) * mv;   // left stick = move
+                    // Right stick = look (Xbox); absent on custom pads -> zero.
+                    cam.addYawPitch(s.rx * padLookSens * dt, -s.ry * invY * padLookSens * dt);
+                }
+                // Triggers / D-pad vertical = down / up.
+                float up = s.rt - s.lt + (pad.held(PAD_DU) ? 1.0f : 0.0f) - (pad.held(PAD_DD) ? 1.0f : 0.0f);
+                cam.position += glm::vec3(0, 0, 1) * up * mv;
+
+                // Action buttons.
+                if (pad.pressed(PAD_A)) frameAllReq = true;          // A = frame all
+                if (pad.pressed(PAD_Y)) measureMode = !measureMode;  // Y = toggle measure
+                if (pad.pressed(PAD_X)) pendingShot = true;          // X = screenshot
+                if (pad.pressed(PAD_BACK)) showUI = !showUI;         // Back = toggle UI
             }
         }
 
@@ -1051,6 +1121,48 @@ int main(int argc, char** argv) {
                     ImGui::TreePop();
                 }
 
+                if (ImGui::TreeNode("Controller")) {
+                    if (ImGui::Checkbox("Enable controller", &padEnabled)) settingsChanged = true;
+                    if (pad.connected()) {
+                        ImGui::Text("Device: %s", pad.name());
+                        ImGui::Text("Type: %s", pad.isGameController() ? "Gamepad (auto-mapped)" : "Raw joystick");
+                        ImGui::TextColored(uiNavMode ? ImVec4(0.4f, 0.8f, 1, 1) : ImVec4(0.6f, 1, 0.6f, 1),
+                                           "Active: %s", uiNavMode ? "UI navigation" : "Camera");
+                    } else {
+                        ImGui::TextDisabled("No controller detected");
+                        if (ImGui::Button("Rescan")) pad.openFirst();
+                    }
+                    ImGui::Checkbox("UI navigation mode", &uiNavMode);
+                    ImGui::SetItemTooltip("Sticks drive the UI instead of the camera. Start/B toggles.");
+                    if (ImGui::SliderFloat("Deadzone", &pad.deadzone, 0.0f, 0.5f)) settingsChanged = true;
+                    if (ImGui::SliderFloat("Look sens", &padLookSens, 20.0f, 360.0f, "%.0f deg/s")) settingsChanged = true;
+                    if (ImGui::SliderFloat("Move sens", &padMoveSens, 0.1f, 5.0f, "%.1fx")) settingsChanged = true;
+                    if (ImGui::Checkbox("Invert look Y", &padInvertY)) settingsChanged = true;
+
+                    if (pad.connected() && !pad.isGameController()) {
+                        ImGui::SeparatorText("Custom mapping (raw joystick)");
+                        ImGui::TextDisabled("Live values (move stick / press buttons to find indices):");
+                        for (int i = 0; i < pad.rawAxisCount(); ++i)
+                            ImGui::Text("  axis %d: % .2f", i, pad.rawAxis(i));
+                        std::string down;
+                        for (int i = 0; i < pad.rawButtonCount(); ++i)
+                            if (pad.rawButton(i)) down += std::to_string(i) + " ";
+                        ImGui::Text("  buttons down: %s", down.empty() ? "-" : down.c_str());
+                        bool ch = false;
+                        ch |= ImGui::InputInt("Move X axis", &pad.jAxisX);
+                        ch |= ImGui::InputInt("Move Y axis", &pad.jAxisY);
+                        ch |= ImGui::InputInt("LB button",  &pad.jBtnLB);
+                        ch |= ImGui::InputInt("Button A",   &pad.jBtnA);
+                        ch |= ImGui::InputInt("Button B",   &pad.jBtnB);
+                        if (ch) settingsChanged = true;
+                        ImGui::TextWrapped("Hold LB + stick = look. A = frame all. B = toggle UI mode.");
+                    } else {
+                        ImGui::TextWrapped("Left stick: move | Right stick: look | Triggers: down/up | "
+                                           "RB: boost | A: frame | Y: measure | X: shot | Back: UI | Start: UI mode");
+                    }
+                    ImGui::TreePop();
+                }
+
                 if (settingsChanged) {
                     saveSettings();
                 }
@@ -1257,6 +1369,10 @@ int main(int argc, char** argv) {
                         ImGui::SameLine(0, 18);
                         ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", pend);
                     }
+                    if (padEnabled && pad.connected()) {
+                        ImGui::SameLine(0, 18);
+                        ImGui::TextColored(ImVec4(0.6f, 0.9f, 1, 1), "Pad:%s", uiNavMode ? "UI" : "Cam");
+                    }
                 } else {
                     ImGui::TextDisabled("No cloud loaded  -  press F1 for help");
                 }
@@ -1276,6 +1392,12 @@ int main(int argc, char** argv) {
                 ImGui::BulletText("Ctrl + Wheel    Point size");
                 ImGui::BulletText("WASD / Q E      Fly  (Shift = fast)");
                 ImGui::BulletText("F               Frame all");
+                ImGui::SeparatorText("Controller");
+                ImGui::BulletText("Left stick      Move");
+                ImGui::BulletText("Right stick     Look  (custom: hold LB + stick)");
+                ImGui::BulletText("Triggers        Down / up");
+                ImGui::BulletText("A / Y / X       Frame / measure / screenshot");
+                ImGui::BulletText("Start (or B)    Toggle UI navigation mode");
                 ImGui::SeparatorText("Tools");
                 ImGui::BulletText("Measure mode    LMB picks points");
                 ImGui::SeparatorText("View");

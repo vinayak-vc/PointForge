@@ -1,6 +1,25 @@
 # AI Handoff
 
-## Latest Session — UX overhaul
+## Latest Session — Controller support
+Branch `Controller-support`. Added gamepad / joystick input via SDL (no new dep):
+- New `src/viewer/Controller.{h,cpp}` — `GameInput` wraps `SDL_GameController`
+  (Xbox, auto-mapped) and falls back to raw `SDL_Joystick` for custom HIDs
+  (axes/buttons by configurable index). Deadzone, edge-detected buttons, hotplug.
+- `main.cpp`: `SDL_INIT_GAMECONTROLLER|JOYSTICK`, per-frame poll + apply.
+  - Camera: left stick move, right stick look, triggers down/up, RB boost.
+    Custom 1-stick pads: hold LB + stick to look.
+  - UI: `ImGuiConfigFlags_NavEnableGamepad` toggled by **UI-nav mode**
+    (Start/B). Xbox drives ImGui nav natively; raw joysticks use button actions.
+  - Actions: A=frame-all, Y=measure, X=screenshot, Back=toggle UI.
+  - Settings panel "Controller": enable, deadzone, look/move sens, invert-Y,
+    live raw axis/button monitor + index rebinding for custom devices. Persisted.
+- Status bar shows `Pad:Cam/UI`; F1 help lists controller controls.
+
+Limitation: raw-joystick ImGui nav is not auto-fed (Xbox only); custom pads get
+button actions + camera. Not tested with a physical device this session — verify
+mappings live (the rebind panel exists for non-standard axis/button indices).
+
+## Previous Session — UX overhaul
 Implemented a broad UX pass on `pfview` (single-file `ViitorXPCViewer`):
 - **Navigation**: LMB-drag orbit, double-click focus, wheel zoom-to-cursor
   (point size moved to Ctrl+wheel), `F` frame-all, `F11` fullscreen. Camera

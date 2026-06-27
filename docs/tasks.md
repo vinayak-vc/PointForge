@@ -23,6 +23,8 @@
 - `[x]` Eye-Dome Lighting (EDL) post-process (FBO + fullscreen pass)
 - `[x]` Recent files (MRU) + auto-load last + convert Cancel button
 - `[x]` Screenshot (F12, BMP), reset confirmation, clear-clipping, top toolbar
+- `[x]` Controller support: Xbox gamepad (SDL_GameController) + raw joystick fallback
+        (camera, actions, ImGui UI-nav mode, deadzone/sens config, live rebind panel)
 
 ## In Progress
 - (none)
