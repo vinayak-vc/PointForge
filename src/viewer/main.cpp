@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -98,6 +99,23 @@ static GLuint loadTextureBMP(SDL_RWops* rw, int freeRw) {
     return tex;
 }
 
+// Save the current GL framebuffer to a BMP (no image-library dependency).
+static bool saveScreenshotBMP(const char* path, int w, int h) {
+    if (w <= 0 || h <= 0) return false;
+    std::vector<unsigned char> px((size_t)w * h * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    // GL is bottom-up; SDL surface is top-down -> flip rows.
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ABGR8888);
+    if (!s) return false;
+    for (int y = 0; y < h; ++y)
+        std::memcpy((unsigned char*)s->pixels + (size_t)y * s->pitch,
+                    px.data() + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
+    bool ok = SDL_SaveBMP(s, path) == 0;
+    SDL_FreeSurface(s);
+    return ok;
+}
+
 int main(int argc, char** argv) {
     std::string initialDir = "";
     if (argc >= 2) initialDir = argv[1];
@@ -162,10 +180,7 @@ int main(int argc, char** argv) {
     // ---- assets -----------------------------------------------------------
     OctreeStore store;
     bool octreeLoaded = false;
-    if (!initialDir.empty()) {
-        if (store.load(initialDir)) { octreeLoaded = true; }
-        else { logError("Failed to load octree from " + initialDir); }
-    }
+    // (initial / auto-load happens after settings + helpers are set up below)
 
     // Shaders are embedded in the binary (EmbeddedShaders.h) so the viewer is a
     // single self-contained exe with no external shaders/ folder.
@@ -177,6 +192,39 @@ int main(int argc, char** argv) {
 
     PointRenderer renderer;
     GLuint watermarkTex = loadTextureBMP(SDL_RWFromConstMem(kVxBmp, (int)kVxBmpLen), 1);
+
+    // ---- post-process (offscreen FBO + EDL fullscreen pass) ---------------
+    Shader edlShader;
+    if (!edlShader.loadFromSource(kEdlVertSrc, kEdlFragSrc)) {
+        logError("Failed to compile embedded EDL shader");
+        return 3;
+    }
+    GLuint quadVao = 0; glGenVertexArrays(1, &quadVao); // empty VAO for fullscreen triangle
+    GLuint edlFbo = 0, edlColorTex = 0, edlDepthTex = 0;
+    int fboW = 0, fboH = 0;
+    auto ensureFbo = [&](int w, int h) {
+        if (w == fboW && h == fboH && edlFbo) return;
+        if (!edlFbo) glGenFramebuffers(1, &edlFbo);
+        if (!edlColorTex) glGenTextures(1, &edlColorTex);
+        if (!edlDepthTex) glGenTextures(1, &edlDepthTex);
+        glBindTexture(GL_TEXTURE_2D, edlColorTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, edlDepthTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindFramebuffer(GL_FRAMEBUFFER, edlFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, edlColorTex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, edlDepthTex, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        fboW = w; fboH = h;
+    };
 
     // ---- camera initial framing ------------------------------------------
     Camera cam;
@@ -211,6 +259,9 @@ int main(int argc, char** argv) {
     float focalDistance = 10.0f;
     float camSpeedMultiplier = 1.0f;
     float uiScale = autoUiScale;
+    bool  enableEDL = false;       // eye-dome lighting post-process
+    float edlStrength = 1.0f;
+    float edlRadius = 1.5f;
 
     // ---- measurement (CPU point picking, multi-segment polyline) ----------
     bool measureMode = false;
@@ -234,8 +285,19 @@ int main(int argc, char** argv) {
     // ---- HUD / help -------------------------------------------------------
     bool showHelp = false;           // F1 toggles the controls overlay
     bool showStatusBar = true;       // always-on bottom status strip
+    bool pendingShot = false;        // F12 / button -> save a screenshot
+    int  shotCounter = 0;
     glm::dvec3 hoverWorld(0.0);      // world point under the cursor this frame
     bool hoverValid = false;
+
+    // ---- loading (recent files / auto-load) -------------------------------
+    std::vector<std::string> recentDirs;   // most-recent first, capped
+    bool autoLoadLast = false;
+    auto addRecent = [&](const std::string& dir) {
+        recentDirs.erase(std::remove(recentDirs.begin(), recentDirs.end(), dir), recentDirs.end());
+        recentDirs.insert(recentDirs.begin(), dir);
+        if (recentDirs.size() > 8) recentDirs.resize(8);
+    };
 
     auto resetSettings = [&]() {
         pointSize = 2.0f; sseBudget = 1.5f; gpuBudgetMB = 1024;
@@ -248,6 +310,7 @@ int main(int argc, char** argv) {
         camSpeedMultiplier = 1.0f;
         uiScale = autoUiScale;
         darkTheme = true;
+        enableEDL = false; edlStrength = 1.0f; edlRadius = 1.5f;
     };
 
     auto saveSettings = [&]() {
@@ -271,6 +334,11 @@ int main(int argc, char** argv) {
         fprintf(f, "camSpeedMultiplier=%f\n", camSpeedMultiplier);
         fprintf(f, "uiScale=%f\n", uiScale);
         fprintf(f, "darkTheme=%d\n", (int)darkTheme);
+        fprintf(f, "enableEDL=%d\n", (int)enableEDL);
+        fprintf(f, "edlStrength=%f\n", edlStrength);
+        fprintf(f, "edlRadius=%f\n", edlRadius);
+        fprintf(f, "autoLoadLast=%d\n", (int)autoLoadLast);
+        for (const auto& r : recentDirs) fprintf(f, "recent=%s\n", r.c_str());
         fclose(f);
     };
 
@@ -298,6 +366,15 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "camSpeedMultiplier=%f", &f1) == 1) camSpeedMultiplier = f1;
             else if (sscanf(line, "uiScale=%f", &f1) == 1) uiScale = f1;
             else if (sscanf(line, "darkTheme=%d", &i) == 1) darkTheme = (i != 0);
+            else if (sscanf(line, "enableEDL=%d", &i) == 1) enableEDL = (i != 0);
+            else if (sscanf(line, "edlStrength=%f", &f1) == 1) edlStrength = f1;
+            else if (sscanf(line, "edlRadius=%f", &f1) == 1) edlRadius = f1;
+            else if (sscanf(line, "autoLoadLast=%d", &i) == 1) autoLoadLast = (i != 0);
+            else if (strncmp(line, "recent=", 7) == 0) {
+                std::string v = line + 7;
+                while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+                if (!v.empty() && recentDirs.size() < 8) recentDirs.push_back(v);
+            }
         }
         fclose(f);
     };
@@ -305,6 +382,28 @@ int main(int argc, char** argv) {
     loadSettings();
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
+
+    // Load an octree directory, reset view, record it as recent.
+    auto loadOctree = [&](const std::string& dir) -> bool {
+        store.clear();
+        renderer.clear();
+        if (store.load(dir)) {
+            octreeLoaded = true;
+            setupCamera();
+            addRecent(dir);
+            saveSettings();
+#ifdef _WIN32
+            MessageBeep(MB_ICONINFORMATION);
+#endif
+            return true;
+        }
+        pf::logError("Could not load octree from " + dir);
+        return false;
+    };
+
+    // Initial cloud: CLI arg wins, else auto-load the most recent if enabled.
+    if (!initialDir.empty()) loadOctree(initialDir);
+    else if (autoLoadLast && !recentDirs.empty()) loadOctree(recentDirs.front());
 
     // Fit the whole cloud in view (keeps current orientation, centres on pivot).
     auto frameAll = [&]() {
@@ -328,6 +427,7 @@ int main(int argc, char** argv) {
     std::atomic<bool> isConverting(false);
     std::atomic<bool> convertDone(false);
     std::atomic<bool> convertSuccess(false);
+    std::atomic<bool> cancelConvert(false);
     std::thread convertThread;
     
     std::atomic<float> convertProgress(0.0f);
@@ -357,15 +457,7 @@ int main(int argc, char** argv) {
                 SDL_free(e.drop.file);
                 std::error_code ec;
                 if (std::filesystem::is_directory(dropFile, ec)) {
-                    store.clear();
-                    renderer.clear();
-                    if (store.load(dropFile)) {
-                        octreeLoaded = true;
-                        setupCamera();
-#ifdef _WIN32
-                        MessageBeep(MB_ICONINFORMATION);
-#endif
-                    }
+                    loadOctree(dropFile);
                 } else if (std::filesystem::is_regular_file(dropFile, ec)) {
                     convInput = dropFile;
                     convOutput = "";
@@ -412,6 +504,8 @@ int main(int argc, char** argv) {
             } else if (e.type == SDL_KEYDOWN) {
                 if (e.key.keysym.sym == SDLK_F5) {
                     showUI = !showUI;
+                } else if (e.key.keysym.sym == SDLK_F12) {
+                    pendingShot = true;                         // F12 = screenshot
                 } else if (e.key.keysym.sym == SDLK_F1) {
                     showHelp = !showHelp;                       // F1 = controls help
                 } else if (e.key.keysym.sym == SDLK_f) {
@@ -465,6 +559,11 @@ int main(int argc, char** argv) {
         size_t visibleNodes = 0, drawnNodes = 0;
         uint64_t drawnPoints = 0;
         if (octreeLoaded) {
+            // Render the scene into an offscreen FBO so depth is sampleable both
+            // for the EDL post-pass and for cursor depth queries.
+            ensureFbo(winW, winH);
+            glBindFramebuffer(GL_FRAMEBUFFER, edlFbo);
+            glViewport(0, 0, winW, winH);
             glClearColor(clearColor[0], clearColor[1], clearColor[2], 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -635,6 +734,26 @@ int main(int argc, char** argv) {
                 hoverValid = !ImGui::GetIO().WantCaptureMouse &&
                              worldUnderCursor(mxp, myp, hoverWorld);
             }
+
+            // ---- post-process pass: FBO -> screen (copy, or EDL shading) -----
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, winW, winH);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glDisable(GL_DEPTH_TEST);
+            edlShader.use();
+            edlShader.setInt("uColor", 0);
+            edlShader.setInt("uDepth", 1);
+            edlShader.setVec2("uTexel", 1.0f / (float)winW, 1.0f / (float)winH);
+            edlShader.setFloat("uStrength", edlStrength);
+            edlShader.setFloat("uRadius", edlRadius);
+            edlShader.setInt("uEdlOn", enableEDL ? 1 : 0);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, edlColorTex);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, edlDepthTex);
+            glBindVertexArray(quadVao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glActiveTexture(GL_TEXTURE0);
+            glEnable(GL_DEPTH_TEST);
         } else {
             glViewport(0, 0, winW, winH);
             glClearColor(clearColor[0], clearColor[1], clearColor[2], 1.0f);
@@ -740,12 +859,7 @@ int main(int argc, char** argv) {
             MessageBeep(MB_ICONINFORMATION);
 #endif
             if (convertSuccess && !convOutput.empty()) {
-                store.clear();
-                renderer.clear();
-                if (store.load(convOutput)) {
-                    octreeLoaded = true;
-                    setupCamera();
-                }
+                loadOctree(convOutput);
             }
         }
 
@@ -753,24 +867,34 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(ImVec2(350, octreeLoaded ? 500.0f : 350.0f), ImGuiCond_FirstUseEver);
             ImGui::Begin("PointForge Dashboard");
-        
+
+        // ---- top toolbar (common actions) --------------------------------
+        if (ImGui::Button("Open")) {
+            std::string folder = pf::openFolderDialog();
+            if (!folder.empty()) loadOctree(folder);
+        }
+        ImGui::SameLine(); if (ImGui::Button("Frame")) frameAll();
+        ImGui::SameLine(); ImGui::Checkbox("Measure", &measureMode);
+        ImGui::SameLine(); if (ImGui::Button("Shot")) pendingShot = true;
+        ImGui::SameLine(); if (ImGui::Button("Help")) showHelp = !showHelp;
+        ImGui::Separator();
+
         if (ImGui::CollapsingHeader("Viewer", ImGuiTreeNodeFlags_DefaultOpen)) {
             if (ImGui::Button("Browse & Load Octree Folder...")) {
                 std::string folder = pf::openFolderDialog();
-                if (!folder.empty()) {
-                    store.clear();
-                    renderer.clear();
-                    if (store.load(folder)) {
-                        octreeLoaded = true;
-                        setupCamera();
-#ifdef _WIN32
-                        MessageBeep(MB_ICONINFORMATION);
-#endif
-                    } else {
-                        pf::logError("Could not load octree from " + folder);
+                if (!folder.empty()) loadOctree(folder);
+            }
+            // Recent clouds + auto-load.
+            if (!recentDirs.empty()) {
+                ImGui::SameLine();
+                if (ImGui::BeginCombo("##recent", "Recent")) {
+                    for (size_t i = 0; i < recentDirs.size(); ++i) {
+                        if (ImGui::Selectable(recentDirs[i].c_str())) loadOctree(recentDirs[i]);
                     }
+                    ImGui::EndCombo();
                 }
             }
+            if (ImGui::Checkbox("Auto-load last on startup", &autoLoadLast)) saveSettings();
             ImGui::Separator();
             if (ImGui::SliderFloat("UI Scale", &uiScale, 0.5f, 3.0f, "%.2fx")) {
                 uiScale = std::clamp(uiScale, 0.5f, 4.0f);
@@ -790,10 +914,19 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 bool settingsChanged = false;
 
-                if (ImGui::Button("Reset to Defaults")) {
-                    resetSettings();
-                    settingsChanged = true;
-                    if (octreeLoaded) setupCamera();
+                if (ImGui::Button("Reset to Defaults")) ImGui::OpenPopup("Reset?");
+                if (ImGui::BeginPopupModal("Reset?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::TextUnformatted("Reset all viewer settings to defaults?");
+                    if (ImGui::Button("Yes", ImVec2(80, 0))) {
+                        resetSettings();
+                        applyUiScale(uiScale);
+                        if (octreeLoaded) setupCamera();
+                        saveSettings();
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
                 }
 
                 ImGui::Separator();
@@ -841,6 +974,13 @@ int main(int argc, char** argv) {
                         if (ImGui::SliderFloat("Eye Separation (IPD)", &eyeSeparation, 0.01f, 0.2f)) settingsChanged = true;
                         if (ImGui::SliderFloat("Focal Distance", &focalDistance, 1.0f, 100.0f)) settingsChanged = true;
                     }
+
+                    if (ImGui::Checkbox("Eye-Dome Lighting", &enableEDL)) settingsChanged = true;
+                    ImGui::SetItemTooltip("Shades depth edges for much better depth perception on uncoloured clouds.");
+                    if (enableEDL) {
+                        if (ImGui::SliderFloat("EDL strength", &edlStrength, 0.1f, 5.0f)) settingsChanged = true;
+                        if (ImGui::SliderFloat("EDL radius", &edlRadius, 0.5f, 4.0f)) settingsChanged = true;
+                    }
                     ImGui::TreePop();
                 }
                 
@@ -870,6 +1010,11 @@ int main(int argc, char** argv) {
                         float ext = (float)store.cube(store.rootIndex()).size * 2.0f;
                         if (ImGui::SliderFloat3("Min", clipMin, -ext, ext)) settingsChanged = true;
                         if (ImGui::SliderFloat3("Max", clipMax, -ext, ext)) settingsChanged = true;
+                        if (ImGui::Button("Reset Planes")) {
+                            clipMin[0] = clipMin[1] = clipMin[2] = -ext;
+                            clipMax[0] = clipMax[1] = clipMax[2] =  ext;
+                            settingsChanged = true;
+                        }
                     }
                     ImGui::TreePop();
                 }
@@ -1045,22 +1190,26 @@ int main(int argc, char** argv) {
                 }
                 ImGui::TextColored(ImVec4(0, 1, 0, 1), "%s", statusMsg.c_str());
                 ImGui::SameLine();
-                ImGui::ProgressBar(convertProgress.load(), ImVec2(300, 15));
+                ImGui::ProgressBar(convertProgress.load(), ImVec2(220, 15));
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) cancelConvert = true;
             } else {
                 if (ImGui::Button("Convert!", ImVec2(100, 30))) {
                     if (!convInput.empty() && !convOutput.empty()) {
                         isConverting = true;
                         convertDone = false;
+                        cancelConvert = false;
                         convertProgress = 0.0f;
                         convertStatus = "Starting...";
-                        
+
                         pf::IndexOptions opts = customOpts;
+                        opts.cancel = &cancelConvert;
                         opts.progressCb = [&convertProgress, &convertStatusMutex, &convertStatus](float pct, const std::string& msg) {
                             convertProgress = pct;
                             std::lock_guard<std::mutex> lk(convertStatusMutex);
                             convertStatus = msg;
                         };
-                        
+
                         convertThread = std::thread([input = convInput, outDir = convOutput, opts, &convertSuccess, &isConverting, &convertDone]() {
                             bool success = pf::buildOctree(input, outDir, opts);
                             convertSuccess = success;
@@ -1140,6 +1289,18 @@ int main(int argc, char** argv) {
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        if (pendingShot) {
+            pendingShot = false;
+            char fn[64];
+            snprintf(fn, sizeof(fn), "screenshot_%04d.bmp", ++shotCounter);
+            if (saveScreenshotBMP(fn, winW, winH)) {
+                logInfo(std::string("Saved ") + fn);
+#ifdef _WIN32
+                MessageBeep(MB_OK);
+#endif
+            }
+        }
 
         SDL_GL_SwapWindow(window);
     }

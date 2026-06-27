@@ -1,14 +1,22 @@
 # Roadmap
 
+## Done (shipped)
+- **CPU Point Picking & Distance Measurement** — multi-segment polyline measure.
+- **Improved Caching** — frame-stamped streaming-queue purge.
+- **UI Scaling** — DPI auto-detect + UI Scale slider.
+- **Eye-Dome Lighting (EDL)** — depth-edge post-process for uncoloured clouds.
+- **Navigation overhaul** — orbit, focus, zoom-to-cursor, frame-all.
+- **Single-file static release** — `ViitorXPCViewer.exe`, zero DLLs.
+
 ## Short-term Goals
-- **CPU Point Picking & Distance Measurement**: Allow the user to query individual point coordinates, select them, and measure spatial distance directly in the viewer.
-- **Improved Caching**: Automatically purge old or unused chunk queues to free up resources.
-- **UI Scaling**: Implement custom DPI scaling for `imgui` so it looks better on high resolution monitors.
+- **On-disk cache management**: auto-purge old `PointForgeCache_*` converted dirs.
+- **Color-by attribute polish**: editable elevation/intensity ranges + ramps.
+- **Convert cancel coverage**: extend cooperative cancel to Phase A/B.
 
 ## Mid-term Goals
 - **Animation Paths**: Allow users to keyframe camera paths and render out video frames.
 - **Cross-section / Slicing Export**: Export clipped cross-sections to standard CAD or image formats.
-- **Advanced Lighting / Eye-Dome Lighting (EDL)**: Implement better depth perception for uncolored point clouds.
+- **EDL quality**: linearised-depth response, configurable neighbour kernel.
 
 ## Long-term Goals
 - **Multi-user Sync**: Stream point cloud states between multiple viewers simultaneously.

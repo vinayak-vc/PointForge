@@ -296,6 +296,10 @@ bool buildOctree(const std::string& inputPath,
 
     size_t done = 0;
     for (const auto& ch : cs.chunks) {
+        if (opts.cancel && opts.cancel->load()) {
+            logWarn("buildOctree: cancelled by user");
+            return false;
+        }
         std::vector<PackedPoint> pts = loadChunk(ch.path);
         if (pts.empty()) continue;
 

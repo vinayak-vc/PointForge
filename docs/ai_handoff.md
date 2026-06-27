@@ -1,6 +1,30 @@
 # AI Handoff
 
-## Recent Work
+## Latest Session — UX overhaul
+Implemented a broad UX pass on `pfview` (single-file `ViitorXPCViewer`):
+- **Navigation**: LMB-drag orbit, double-click focus, wheel zoom-to-cursor
+  (point size moved to Ctrl+wheel), `F` frame-all, `F11` fullscreen. Camera
+  gained `orbit()`/`lookAt()`; cursor interaction uses GPU depth readback.
+- **HUD**: always-on status bar (FPS / points / GPU MB / mode / live cursor XYZ /
+  loading), `F1` controls overlay, slider tooltips.
+- **Measure**: multi-segment polyline (per-segment + total length), snap preview,
+  undo / clear / copy-to-clipboard.
+- **Visual**: Quality preset, colour-by Intensity + Classification (GpuVertex now
+  carries both; shader modes 3/4 + ASPRS palette), elevation/intensity colour-bar
+  legend, light/dark theme.
+- **EDL**: eye-dome lighting post-process — scene now renders to an offscreen FBO,
+  fullscreen pass copies or shades depth edges. Strength/radius UI.
+- **Loading**: recent-files (MRU) dropdown, auto-load-last toggle, convert Cancel
+  button (cooperative `IndexOptions::cancel`).
+- **QoL**: `F12` screenshot (BMP), reset-to-defaults confirmation, clear-clipping,
+  top toolbar (Open/Frame/Measure/Shot/Help).
+
+Touched: `Camera.*`, `OctreeStore.*` (GpuVertex), `PointRenderer.cpp` (attribs),
+`Shader.*`, `EmbeddedShaders.h` (point + EDL), `OctreeIndexer.*` (cancel),
+`main.cpp`. All build (dynamic + static single-file). Not yet tested against a
+real cloud — verify orbit/measure/EDL/colour modes on actual data.
+
+## Prior Work
 Implemented four roadmap tasks in the desktop `pfview` viewer / `pfcore` and
 fixed on-disk-format doc drift. Followed the AGENTS.md workflow (read
 architecture/roadmap/handoff first; updated tasks.md + decisions.md).

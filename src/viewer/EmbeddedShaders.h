@@ -117,4 +117,48 @@ void main() {
 }
 )GLSL";
 
+// ---- Post-process: fullscreen triangle + Eye-Dome Lighting -----------------
+// One pass that copies the offscreen colour buffer to the screen and, when
+// uEdlOn, darkens depth discontinuities for much better depth perception on
+// uncoloured clouds. No vertex buffer needed (gl_VertexID fullscreen triangle).
+inline const char* kEdlVertSrc = R"GLSL(#version 330 core
+out vec2 vUv;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    vUv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)GLSL";
+
+inline const char* kEdlFragSrc = R"GLSL(#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform sampler2D uColor;
+uniform sampler2D uDepth;
+uniform vec2  uTexel;     // 1/width, 1/height
+uniform float uStrength;  // EDL darkening strength
+uniform float uRadius;    // neighbour sample distance in pixels
+uniform int   uEdlOn;
+
+void main() {
+    vec3 c = texture(uColor, vUv).rgb;
+    if (uEdlOn == 0) { fragColor = vec4(c, 1.0); return; }
+
+    float d = texture(uDepth, vUv).r;
+    if (d >= 1.0) { fragColor = vec4(c, 1.0); return; } // background
+
+    // Sum positive depth differences to 4 neighbours -> response at silhouettes.
+    vec2 o[4] = vec2[4](vec2(1,0), vec2(-1,0), vec2(0,1), vec2(0,-1));
+    float sum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        float dn = texture(uDepth, vUv + o[i] * uTexel * uRadius).r;
+        sum += max(0.0, d - dn);
+    }
+    float response = sum * 0.25;
+    float shade = exp(-uStrength * response * 4000.0);
+    fragColor = vec4(c * shade, 1.0);
+}
+)GLSL";
+
 } // namespace pf

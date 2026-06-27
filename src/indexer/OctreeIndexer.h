@@ -2,6 +2,7 @@
 #include <string>
 #include <cstdint>
 #include <functional>
+#include <atomic>
 
 namespace pf {
 
@@ -16,6 +17,10 @@ struct IndexOptions {
     
     // Optional callback for progress updates: progressCb(fraction_0_to_1, status_message)
     std::function<void(float, const std::string&)> progressCb = nullptr;
+
+    // Optional cooperative cancel: if set and it becomes true, buildOctree aborts
+    // at the next chunk boundary and returns false. Owned by the caller.
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 // Full importer pipeline: chunk -> build chunk subtrees -> build coarse tree ->
