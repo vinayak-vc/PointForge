@@ -130,6 +130,9 @@ GpuVertex OctreeStore::convert(const PackedPoint& p) const {
         v.r = v.g = v.b = g;
     }
     v.a = 255;
+    v.intensity = p.intensity;
+    v.classification = p.classification;
+    v.pad = 0;
     return v;
 }
 

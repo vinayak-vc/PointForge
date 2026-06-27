@@ -149,9 +149,12 @@ int main(int argc, char** argv) {
         if (SDL_GetDisplayDPI(SDL_GetWindowDisplayIndex(window), &ddpi, nullptr, nullptr) == 0 && ddpi > 0.0f)
             autoUiScale = std::clamp(ddpi / 96.0f, 0.5f, 4.0f);
     }
+    bool darkTheme = true;
+    // Re-apply style from the clean base: theme colours, then DPI size scaling.
     auto applyUiScale = [&](float s) {
         ImGuiStyle& st = ImGui::GetStyle();
-        st = baseStyle;
+        st = baseStyle;                      // restores default (dark) sizes + colours
+        if (!darkTheme) ImGui::StyleColorsLight(&st); // override colours only
         st.ScaleAllSizes(s);
         ImGui::GetIO().FontGlobalScale = s;
     };
@@ -209,12 +212,30 @@ int main(int argc, char** argv) {
     float camSpeedMultiplier = 1.0f;
     float uiScale = autoUiScale;
 
-    // ---- measurement (CPU point picking) ----------------------------------
+    // ---- measurement (CPU point picking, multi-segment polyline) ----------
     bool measureMode = false;
-    int  measureCount = 0;            // 0 = none, 1 = A set, 2 = A+B set
-    glm::dvec3 measureA(0.0), measureB(0.0);
-    bool pendingPick = false;         // a click is waiting to be resolved this frame
+    std::vector<glm::dvec3> measurePts;   // picked vertices, world coords
+    bool pendingPick = false;             // a click is waiting to be resolved this frame
     int  pickX = 0, pickY = 0;
+    auto measureTotal = [&]() -> double {
+        double t = 0.0;
+        for (size_t i = 1; i < measurePts.size(); ++i)
+            t += glm::length(measurePts[i] - measurePts[i - 1]);
+        return t;
+    };
+
+    // ---- navigation (orbit / focus / zoom-to-cursor) ----------------------
+    glm::vec3 pivot(0.0f);            // orbit pivot in centred space (cube centre = origin)
+    bool orbitDrag = false;          // LMB held -> turntable orbit
+    bool pendingFocus = false; int focusX = 0, focusY = 0;   // double-click to focus
+    bool pendingZoom  = false; float zoomDelta = 0.0f; int zoomX = 0, zoomY = 0;
+    bool frameAllReq  = false;       // 'F' / button -> fit whole cloud
+
+    // ---- HUD / help -------------------------------------------------------
+    bool showHelp = false;           // F1 toggles the controls overlay
+    bool showStatusBar = true;       // always-on bottom status strip
+    glm::dvec3 hoverWorld(0.0);      // world point under the cursor this frame
+    bool hoverValid = false;
 
     auto resetSettings = [&]() {
         pointSize = 2.0f; sseBudget = 1.5f; gpuBudgetMB = 1024;
@@ -226,6 +247,7 @@ int main(int argc, char** argv) {
         stereoSBS = false; eyeSeparation = 0.05f; focalDistance = 10.0f;
         camSpeedMultiplier = 1.0f;
         uiScale = autoUiScale;
+        darkTheme = true;
     };
 
     auto saveSettings = [&]() {
@@ -248,6 +270,7 @@ int main(int argc, char** argv) {
         fprintf(f, "clipMax=%f,%f,%f\n", clipMax[0], clipMax[1], clipMax[2]);
         fprintf(f, "camSpeedMultiplier=%f\n", camSpeedMultiplier);
         fprintf(f, "uiScale=%f\n", uiScale);
+        fprintf(f, "darkTheme=%d\n", (int)darkTheme);
         fclose(f);
     };
 
@@ -274,6 +297,7 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "clipMax=%f,%f,%f", &f1, &f2, &f3) == 3) { clipMax[0]=f1; clipMax[1]=f2; clipMax[2]=f3; }
             else if (sscanf(line, "camSpeedMultiplier=%f", &f1) == 1) camSpeedMultiplier = f1;
             else if (sscanf(line, "uiScale=%f", &f1) == 1) uiScale = f1;
+            else if (sscanf(line, "darkTheme=%d", &i) == 1) darkTheme = (i != 0);
         }
         fclose(f);
     };
@@ -281,6 +305,17 @@ int main(int argc, char** argv) {
     loadSettings();
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
+
+    // Fit the whole cloud in view (keeps current orientation, centres on pivot).
+    auto frameAll = [&]() {
+        if (!octreeLoaded) return;
+        double cs = store.cube(store.rootIndex()).size;
+        float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
+        pivot = glm::vec3(0.0f);                 // cube centre in centred space
+        cam.position = pivot - cam.front() * dist;
+        cam.lookAt(pivot);
+        cam.orthoSize = (float)(cs * 0.6);
+    };
 
     bool running = true;
     bool mouseLook = false;
@@ -338,9 +373,18 @@ int main(int argc, char** argv) {
             } else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_RESIZED) {
                 winW = e.window.data1; winH = e.window.data2;
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                if (measureMode && octreeLoaded && !ImGui::GetIO().WantCaptureMouse) {
-                    pendingPick = true; pickX = e.button.x; pickY = e.button.y;
+                if (octreeLoaded && !ImGui::GetIO().WantCaptureMouse) {
+                    if (measureMode) {
+                        pendingPick = true; pickX = e.button.x; pickY = e.button.y;
+                    } else {
+                        orbitDrag = true;                       // LMB drag = orbit
+                        if (e.button.clicks == 2) {             // double-click = focus
+                            pendingFocus = true; focusX = e.button.x; focusY = e.button.y;
+                        }
+                    }
                 }
+            } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
+                orbitDrag = false;
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
                 if (!ImGui::GetIO().WantCaptureMouse) {
                     mouseLook = true; SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -348,16 +392,31 @@ int main(int argc, char** argv) {
                 }
             } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_RIGHT) {
                 mouseLook = false; SDL_SetRelativeMouseMode(SDL_FALSE);
-            } else if (e.type == SDL_MOUSEMOTION && mouseLook) {
-                cam.addYawPitch((float)e.motion.xrel, -(float)e.motion.yrel);
+            } else if (e.type == SDL_MOUSEMOTION) {
+                if (mouseLook) {
+                    cam.addYawPitch((float)e.motion.xrel, -(float)e.motion.yrel);
+                } else if (orbitDrag && octreeLoaded) {
+                    cam.orbit((float)e.motion.xrel, -(float)e.motion.yrel, pivot);
+                }
             } else if (e.type == SDL_MOUSEWHEEL) {
                 if (!ImGui::GetIO().WantCaptureMouse) {
-                    pointSize = std::max(1.0f, pointSize + (e.wheel.y > 0 ? 1.0f : -1.0f));
+                    if (SDL_GetModState() & KMOD_CTRL) {
+                        // Ctrl+wheel adjusts point size (was plain wheel).
+                        pointSize = std::clamp(pointSize + (e.wheel.y > 0 ? 1.0f : -1.0f), 1.0f, 16.0f);
+                    } else if (octreeLoaded) {
+                        // Plain wheel = zoom toward cursor (resolved after render).
+                        pendingZoom = true; zoomDelta = (float)e.wheel.y;
+                        SDL_GetMouseState(&zoomX, &zoomY);
+                    }
                 }
             } else if (e.type == SDL_KEYDOWN) {
                 if (e.key.keysym.sym == SDLK_F5) {
                     showUI = !showUI;
+                } else if (e.key.keysym.sym == SDLK_F1) {
+                    showHelp = !showHelp;                       // F1 = controls help
                 } else if (e.key.keysym.sym == SDLK_f) {
+                    frameAllReq = true;                         // 'F' = frame all
+                } else if (e.key.keysym.sym == SDLK_F11) {
                     Uint32 flags = SDL_GetWindowFlags(window);
                     if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
                         SDL_SetWindowFullscreen(window, 0);
@@ -526,9 +585,55 @@ int main(int argc, char** argv) {
                 double tolPerDist = (ssF > 0.0) ? (6.0 / ssF) : 0.01; // ~6px pick disc
                 glm::dvec3 hit;
                 if (store.pickPoint(ro, rd, tolPerDist, hit)) {
-                    if (measureCount == 1) { measureB = hit; measureCount = 2; }
-                    else { measureA = hit; measureCount = 1; }
+                    measurePts.push_back(hit);   // append vertex to the polyline
                 }
+            }
+
+            // ---- depth-buffer cursor query (cheap; reuses this frame's depth) --
+            // Returns the world-space surface point under pixel (mx,my), or false
+            // if the cursor is over empty background. Used for focus + zoom.
+            auto worldUnderCursor = [&](int mx, int my, glm::dvec3& outWorld) -> bool {
+                if (mx < 0 || my < 0 || mx >= winW || my >= winH) return false;
+                float depth = 1.0f;
+                glReadPixels(mx, winH - 1 - my, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+                if (depth >= 1.0f) return false; // background
+                cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
+                float ndcX = 2.0f * mx / (float)winW - 1.0f;
+                float ndcY = 1.0f - 2.0f * my / (float)winH;
+                float ndcZ = 2.0f * depth - 1.0f;
+                glm::vec4 p = glm::inverse(cam.viewProj()) * glm::vec4(ndcX, ndcY, ndcZ, 1.0f);
+                if (std::fabs(p.w) < 1e-9f) return false;
+                outWorld = glm::dvec3(glm::vec3(p) / p.w) + store.cubeCenter();
+                return true;
+            };
+
+            if (pendingFocus) {
+                pendingFocus = false;
+                glm::dvec3 w;
+                if (worldUnderCursor(focusX, focusY, w)) {
+                    pivot = glm::vec3(w - store.cubeCenter());
+                    float d = glm::length(cam.position - pivot);
+                    cam.position = pivot - cam.front() * d; // centre the pivot, keep distance
+                }
+            }
+            if (pendingZoom) {
+                pendingZoom = false;
+                glm::dvec3 w;
+                glm::vec3 tgt = worldUnderCursor(zoomX, zoomY, w)
+                                  ? glm::vec3(w - store.cubeCenter())
+                                  : cam.position + cam.front();
+                pivot = tgt;                                  // future orbit centres here
+                float factor = (zoomDelta > 0.0f) ? 0.8f : 1.25f; // wheel up = closer
+                cam.position = tgt + (cam.position - tgt) * factor;
+                if (cam.isOrtho) cam.orthoSize = std::max(0.01f, cam.orthoSize * factor);
+            }
+            if (frameAllReq) { frameAllReq = false; frameAll(); }
+
+            // Live world coordinate under the cursor (for the status bar).
+            {
+                int mxp = 0, myp = 0; SDL_GetMouseState(&mxp, &myp);
+                hoverValid = !ImGui::GetIO().WantCaptureMouse &&
+                             worldUnderCursor(mxp, myp, hoverWorld);
             }
         } else {
             glViewport(0, 0, winW, winH);
@@ -551,8 +656,8 @@ int main(int argc, char** argv) {
             ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min, p_max, ImVec2(0,0), ImVec2(1,1), col);
         }
 
-        // ---- measurement overlay (project picked points to screen) ----------
-        if (octreeLoaded && measureCount >= 1) {
+        // ---- measurement overlay (project polyline to screen) ---------------
+        if (octreeLoaded && (!measurePts.empty() || measureMode)) {
             cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
             glm::mat4 mvp = cam.viewProj();
             glm::dvec3 ctr = store.cubeCenter();
@@ -565,22 +670,67 @@ int main(int argc, char** argv) {
                 return true;
             };
             ImDrawList* dl = ImGui::GetForegroundDrawList();
-            ImVec2 sa, sb;
-            bool okA = project(measureA, sa);
-            bool okB = (measureCount == 2) && project(measureB, sb);
             const ImU32 cMark = IM_COL32(255, 220, 40, 255);
             const ImU32 cLine = IM_COL32(255, 220, 40, 200);
             const ImU32 cText = IM_COL32(255, 255, 255, 255);
-            if (okA) { dl->AddCircleFilled(sa, 5.0f, cMark); dl->AddCircle(sa, 8.0f, cMark, 0, 2.0f); }
-            if (okB) { dl->AddCircleFilled(sb, 5.0f, cMark); dl->AddCircle(sb, 8.0f, cMark, 0, 2.0f); }
-            if (okA && okB) {
-                dl->AddLine(sa, sb, cLine, 2.0f);
-                double dist = glm::length(measureB - measureA);
-                char dbuf[64];
-                snprintf(dbuf, sizeof(dbuf), "%.3f m", dist);
-                ImVec2 mid((sa.x + sb.x) * 0.5f, (sa.y + sb.y) * 0.5f);
-                dl->AddText(ImVec2(mid.x + 6, mid.y - 6), cText, dbuf);
+            const ImU32 cSnap = IM_COL32(80, 200, 255, 255);
+
+            // Segments + per-segment length labels.
+            ImVec2 prev;
+            bool prevOk = false;
+            for (size_t i = 0; i < measurePts.size(); ++i) {
+                ImVec2 s;
+                bool ok = project(measurePts[i], s);
+                if (ok) { dl->AddCircleFilled(s, 5.0f, cMark); dl->AddCircle(s, 8.0f, cMark, 0, 2.0f); }
+                if (ok && prevOk) {
+                    dl->AddLine(prev, s, cLine, 2.0f);
+                    double d = glm::length(measurePts[i] - measurePts[i - 1]);
+                    char db[48]; snprintf(db, sizeof(db), "%.3f m", d);
+                    dl->AddText(ImVec2((prev.x + s.x) * 0.5f + 6, (prev.y + s.y) * 0.5f - 6), cText, db);
+                }
+                prev = s; prevOk = ok;
             }
+            // Snap preview: marker at the surface point under the cursor.
+            if (measureMode && hoverValid) {
+                ImVec2 s;
+                if (project(hoverWorld, s)) dl->AddCircle(s, 7.0f, cSnap, 0, 2.0f);
+            }
+        }
+
+        // ---- colour legend (elevation / intensity) --------------------------
+        if (octreeLoaded && (colorMode == 1 || colorMode == 3)) {
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            float bx = (float)winW - 38.0f, by = 120.0f, bh = 180.0f, bw = 16.0f;
+            auto turboCol = [](float v) {
+                v = std::clamp(v, 0.0f, 1.0f);
+                float r = std::clamp(3.24f * v - 2.15f, 0.0f, 1.0f);
+                float g = std::clamp(-5.5f * v * v + 6.32f * v - 0.72f, 0.0f, 1.0f);
+                float b = std::clamp(-4.5f * v * v + 1.25f * v + 0.88f, 0.0f, 1.0f);
+                return IM_COL32((int)(r * 255), (int)(g * 255), (int)(b * 255), 255);
+            };
+            const int N = 32;
+            for (int i = 0; i < N; ++i) {
+                float t0 = (float)i / N, t1 = (float)(i + 1) / N;
+                dl->AddRectFilled(ImVec2(bx, by + bh * (1.0f - t1)),
+                                  ImVec2(bx + bw, by + bh * (1.0f - t0)),
+                                  turboCol((t0 + t1) * 0.5f));
+            }
+            dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(255, 255, 255, 180));
+            ImU32 tc = IM_COL32(255, 255, 255, 220);
+            char hi[32], lo[32]; const char* title;
+            if (colorMode == 1) {
+                double zmin = store.cube(store.rootIndex()).min[2];
+                double zmax = zmin + store.cube(store.rootIndex()).size;
+                snprintf(hi, sizeof(hi), "%.1f", zmax);
+                snprintf(lo, sizeof(lo), "%.1f", zmin);
+                title = "Z (m)";
+            } else {
+                snprintf(hi, sizeof(hi), "max"); snprintf(lo, sizeof(lo), "0");
+                title = "Intensity";
+            }
+            dl->AddText(ImVec2(bx - 2, by - 18), tc, title);
+            dl->AddText(ImVec2(bx + bw + 4, by - 6), tc, hi);
+            dl->AddText(ImVec2(bx + bw + 4, by + bh - 6), tc, lo);
         }
 
         if (convertDone) {
@@ -648,21 +798,44 @@ int main(int argc, char** argv) {
 
                 ImGui::Separator();
                 if (ImGui::TreeNode("Rendering")) {
+                    static int qualityIdx = 1;
+                    const char* quals[] = { "Low", "Medium", "High", "Ultra" };
+                    if (ImGui::Combo("Quality", &qualityIdx, quals, IM_ARRAYSIZE(quals))) {
+                        switch (qualityIdx) {
+                            case 0: sseBudget = 4.0f; gpuBudgetMB = 512;  break;
+                            case 1: sseBudget = 2.0f; gpuBudgetMB = 1024; break;
+                            case 2: sseBudget = 1.0f; gpuBudgetMB = 2048; break;
+                            case 3: sseBudget = 0.5f; gpuBudgetMB = 4096; break;
+                        }
+                        settingsChanged = true;
+                    }
+                    ImGui::SetItemTooltip("One-knob preset for LOD detail + GPU budget.");
                     if (ImGui::SliderFloat("Point size", &pointSize, 1.0f, 16.0f)) settingsChanged = true;
+                    ImGui::SetItemTooltip("Splat size in pixels. Also: Ctrl+mouse wheel.");
                     if (ImGui::SliderFloat("LOD budget (px)", &sseBudget, 0.3f, 8.0f)) settingsChanged = true;
+                    ImGui::SetItemTooltip("Screen-space error target. Lower = more detail loaded (slower).");
                     if (ImGui::SliderInt("GPU budget (MB)", &gpuBudgetMB, 128, 8192)) settingsChanged = true;
+                    ImGui::SetItemTooltip("Max GPU memory for resident points before LRU eviction.");
                     if (ImGui::SliderInt("Uploads/frame", &uploadsPerFrame, 1, 256)) settingsChanged = true;
+                    ImGui::SetItemTooltip("Node VBO uploads per frame. Higher = faster streaming, more hitches.");
                     if (ImGui::Checkbox("Round points", &roundPoints)) settingsChanged = true;
                     ImGui::SameLine();
                     if (ImGui::Checkbox("Attenuate", &attenuate)) settingsChanged = true;
                     if (ImGui::ColorEdit3("Background", clearColor)) settingsChanged = true;
                     
-                    const char* modes[] = { "True Color", "Elevation", "Solid Color" };
+                    const char* modes[] = { "True Color", "Elevation", "Solid Color", "Intensity", "Classification" };
                     if (ImGui::Combo("Color Mode", &colorMode, modes, IM_ARRAYSIZE(modes))) settingsChanged = true;
+                    ImGui::SetItemTooltip("How points are coloured. Intensity/Classification use the LAS attributes.");
                     if (colorMode == 2) {
                         if (ImGui::ColorEdit3("Solid Color", solidColor)) settingsChanged = true;
                     }
-                    
+                    bool lightTheme = !darkTheme;
+                    if (ImGui::Checkbox("Light theme", &lightTheme)) {
+                        darkTheme = !lightTheme;
+                        applyUiScale(uiScale);   // re-apply colours + scale
+                        settingsChanged = true;
+                    }
+
                     if (ImGui::Checkbox("Stereoscopic (SBS)", &stereoSBS)) settingsChanged = true;
                     if (stereoSBS) {
                         if (ImGui::SliderFloat("Eye Separation (IPD)", &eyeSeparation, 0.01f, 0.2f)) settingsChanged = true;
@@ -679,6 +852,10 @@ int main(int argc, char** argv) {
                     if (ImGui::SliderFloat("Fly Speed", &camSpeedMultiplier, 0.1f, 10.0f, "%.1fx")) settingsChanged = true;
                     if (ImGui::Button("Reset View")) {
                         setupCamera();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Frame All (F)")) {
+                        frameAll();
                     }
                     ImGui::Text("Presets:");
                     if (ImGui::Button("Top")) { cam.yaw = -90; cam.pitch = 89; cam.position = store.cubeCenter() + glm::dvec3(0,0,store.cube(store.rootIndex()).size * 2); } ImGui::SameLine();
@@ -698,16 +875,34 @@ int main(int argc, char** argv) {
                 }
 
                 if (ImGui::TreeNode("Measure")) {
-                    ImGui::Checkbox("Measure mode (LMB picks)", &measureMode);
-                    ImGui::TextWrapped("Click two points to measure straight-line distance.");
-                    if (measureCount >= 1)
-                        ImGui::Text("A: %.2f, %.2f, %.2f", measureA.x, measureA.y, measureA.z);
-                    if (measureCount == 2) {
-                        ImGui::Text("B: %.2f, %.2f, %.2f", measureB.x, measureB.y, measureB.z);
+                    ImGui::Checkbox("Measure mode (LMB adds points)", &measureMode);
+                    ImGui::SetItemTooltip("Click successive points to build a polyline; total length sums all segments.");
+                    ImGui::TextWrapped("Points: %d", (int)measurePts.size());
+                    for (size_t i = 0; i < measurePts.size(); ++i)
+                        ImGui::Text("%2d: %.2f, %.2f, %.2f", (int)i + 1,
+                                    measurePts[i].x, measurePts[i].y, measurePts[i].z);
+                    if (measurePts.size() >= 2)
                         ImGui::TextColored(ImVec4(1, 0.86f, 0.16f, 1),
-                                           "Distance: %.3f m", glm::length(measureB - measureA));
+                                           "Total: %.3f m", measureTotal());
+                    if (ImGui::Button("Undo") && !measurePts.empty()) measurePts.pop_back();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear")) measurePts.clear();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Copy") && !measurePts.empty()) {
+                        std::string s;
+                        char ln[96];
+                        for (size_t i = 0; i < measurePts.size(); ++i) {
+                            snprintf(ln, sizeof(ln), "%.4f, %.4f, %.4f\n",
+                                     measurePts[i].x, measurePts[i].y, measurePts[i].z);
+                            s += ln;
+                        }
+                        if (measurePts.size() >= 2) {
+                            snprintf(ln, sizeof(ln), "total: %.4f m", measureTotal());
+                            s += ln;
+                        }
+                        SDL_SetClipboardText(s.c_str());
                     }
-                    if (ImGui::Button("Clear Measurement")) measureCount = 0;
+                    ImGui::SetItemTooltip("Copy all points + total length to the clipboard.");
                     ImGui::TreePop();
                 }
 
@@ -716,7 +911,9 @@ int main(int argc, char** argv) {
                 }
 
                 ImGui::Separator();
-                ImGui::TextWrapped("RMB drag: look   WASD: move   Q/E: down/up   Shift: fast");
+                ImGui::TextWrapped("LMB drag: orbit   2xLMB: focus   RMB drag: look   "
+                                   "wheel: zoom   Ctrl+wheel: point size   WASD/QE: fly   "
+                                   "Shift: fast   F: frame all   F11: fullscreen");
             } else {
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "No octree loaded. Load or convert one.");
             }
@@ -881,6 +1078,62 @@ int main(int argc, char** argv) {
                 
                 ImGui::EndChild();
                 ImGui::PopStyleColor();
+            }
+            ImGui::End();
+        }
+
+        // ---- always-on status bar ----------------------------------------
+        if (showStatusBar) {
+            float barH = ImGui::GetTextLineHeightWithSpacing() + 8.0f;
+            ImGui::SetNextWindowPos(ImVec2(0.0f, (float)winH - barH));
+            ImGui::SetNextWindowSize(ImVec2((float)winW, barH));
+            ImGui::SetNextWindowBgAlpha(0.70f);
+            ImGuiWindowFlags sf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoScrollbar;
+            if (ImGui::Begin("##statusbar", nullptr, sf)) {
+                ImGui::Text("FPS %.0f", dt > 0 ? 1.0f / dt : 0.0f); ImGui::SameLine(0, 18);
+                if (octreeLoaded) {
+                    const char* mode = mouseLook ? "Look" : (measureMode ? "Measure" : (orbitDrag ? "Orbit" : "Idle"));
+                    ImGui::Text("Pts %llu / %llu", (unsigned long long)drawnPoints,
+                                (unsigned long long)store.meta().pointCount); ImGui::SameLine(0, 18);
+                    ImGui::Text("GPU %.0f MB", renderer.residentBytes() / 1048576.0); ImGui::SameLine(0, 18);
+                    ImGui::Text("Mode %s", mode); ImGui::SameLine(0, 18);
+                    if (hoverValid)
+                        ImGui::Text("XYZ %.2f, %.2f, %.2f", hoverWorld.x, hoverWorld.y, hoverWorld.z);
+                    else
+                        ImGui::TextDisabled("XYZ --");
+                    size_t pend = store.pendingRequests();
+                    if (pend > 0) {
+                        ImGui::SameLine(0, 18);
+                        ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", pend);
+                    }
+                } else {
+                    ImGui::TextDisabled("No cloud loaded  -  press F1 for help");
+                }
+            }
+            ImGui::End();
+        }
+
+        // ---- controls help overlay (F1) ----------------------------------
+        if (showHelp) {
+            ImGui::SetNextWindowPos(ImVec2(winW * 0.5f, winH * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::Begin("Controls  (F1 to close)", &showHelp, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::SeparatorText("Navigation");
+                ImGui::BulletText("LMB drag        Orbit around pivot");
+                ImGui::BulletText("Double-click    Focus pivot on point");
+                ImGui::BulletText("RMB drag        Free look");
+                ImGui::BulletText("Wheel           Zoom to cursor");
+                ImGui::BulletText("Ctrl + Wheel    Point size");
+                ImGui::BulletText("WASD / Q E      Fly  (Shift = fast)");
+                ImGui::BulletText("F               Frame all");
+                ImGui::SeparatorText("Tools");
+                ImGui::BulletText("Measure mode    LMB picks points");
+                ImGui::SeparatorText("View");
+                ImGui::BulletText("F5              Toggle UI panel");
+                ImGui::BulletText("F11             Fullscreen");
+                ImGui::BulletText("F1              This help");
+                ImGui::BulletText("Esc Esc         Quit (double press)");
             }
             ImGui::End();
         }

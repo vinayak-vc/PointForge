@@ -16,11 +16,15 @@
 
 namespace pf {
 
-// GPU-ready vertex (16 bytes). Position is relative to the octree cube centre.
+// GPU-ready vertex (20 bytes). Position is relative to the octree cube centre.
+// intensity + classification are carried so the viewer can colour by them.
 #pragma pack(push, 1)
 struct GpuVertex {
-    float   x, y, z;
-    uint8_t r, g, b, a;
+    float    x, y, z;
+    uint8_t  r, g, b, a;
+    uint16_t intensity;
+    uint8_t  classification;
+    uint8_t  pad;
 };
 #pragma pack(pop)
 

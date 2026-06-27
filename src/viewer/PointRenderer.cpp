@@ -46,6 +46,14 @@ void PointRenderer::upload(uint32_t idx, const std::vector<GpuVertex>& verts) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GpuVertex),
                           (void*)offsetof(GpuVertex, r));
+    // location 2: intensity (uint16 -> normalised float 0..1).
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(GpuVertex),
+                          (void*)offsetof(GpuVertex, intensity));
+    // location 3: classification (uint8 -> float code 0..255, not normalised).
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GpuVertex),
+                          (void*)offsetof(GpuVertex, classification));
 
     glBindVertexArray(0);
 

@@ -28,6 +28,12 @@ public:
     void addYawPitch(float dYaw, float dPitch);
     void moveLocal(const glm::vec3& delta) { position += delta; }
 
+    // Point the camera at a target (sets yaw/pitch; position unchanged).
+    void lookAt(const glm::vec3& target);
+    // Orbit (turntable) around a pivot: rotate by dYaw/dPitch (scaled by
+    // lookSpeed) while keeping the pivot centred and the distance to it fixed.
+    void orbit(float dYaw, float dPitch, const glm::vec3& pivot);
+
     // Build a picking ray (in centred space) through pixel (mx, my) of a w×h
     // viewport. Works for both perspective and orthographic projection. Origin
     // lands on the near plane; dir is unit length and points into the scene.
