@@ -1,5 +1,9 @@
 /build/
+/build-static/
+/build-static-ninja/
+/release/
 /out/
+*.log
 *.o
 *.obj
 *.exe

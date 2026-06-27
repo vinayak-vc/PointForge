@@ -35,9 +35,14 @@ bool Shader::loadFromFiles(const std::string& vertPath, const std::string& fragP
     std::string vsrc = readFile(vertPath);
     std::string fsrc = readFile(fragPath);
     if (vsrc.empty() || fsrc.empty()) return false;
+    return loadFromSource(vsrc, fsrc);
+}
 
-    GLuint vs = compile(GL_VERTEX_SHADER, vsrc, vertPath);
-    GLuint fs = compile(GL_FRAGMENT_SHADER, fsrc, fragPath);
+bool Shader::loadFromSource(const std::string& vsrc, const std::string& fsrc) {
+    if (vsrc.empty() || fsrc.empty()) return false;
+
+    GLuint vs = compile(GL_VERTEX_SHADER, vsrc, "vertex");
+    GLuint fs = compile(GL_FRAGMENT_SHADER, fsrc, "fragment");
     if (!vs || !fs) return false;
 
     program_ = glCreateProgram();

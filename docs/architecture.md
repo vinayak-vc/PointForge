@@ -70,7 +70,7 @@ A converted cloud is a directory:
 ### `metadata.json`
 ```json
 {
-  "version": 1,
+  "version": 2,
   "pointCount": 4200000000,
   "boundingBox": { "min": [..], "max": [..] },     // true AABB (double)
   "cube":        { "min": [..], "size": 1234.5 },   // octree cube
@@ -78,11 +78,12 @@ A converted cloud is a directory:
   "offset": [..],
   "rootSpacing": 9.64,
   "attributes": [
-    { "name": "position", "type": "int32",  "components": 3 },
-    { "name": "rgb",      "type": "uint16", "components": 3 },
-    { "name": "intensity","type": "uint16", "components": 1 }
+    { "name": "position",      "type": "int32",  "components": 3 },
+    { "name": "rgb",           "type": "uint16", "components": 3 },
+    { "name": "intensity",     "type": "uint16", "components": 1 },
+    { "name": "classification","type": "uint8",  "components": 1 }
   ],
-  "bytesPerPoint": 20
+  "bytesPerPoint": 22   // sizeof(PackedPoint): int32*3 + uint16*4 + uint8*2
 }
 ```
 
@@ -92,26 +93,29 @@ dequantizes to float (relative to the cube centre to avoid precision loss on
 large UTM-style coordinates).
 
 ### `hierarchy.bin`
-A flat array of fixed-size node records, depth-first. Each record:
+A flat array of fixed-size node records, depth-first, root at index 0. Each
+record is the `NodeRecord` struct in `src/common/OctreeFormat.h` (the single
+source of truth; a `static_assert` pins the size):
 
 ```
-struct NodeRecord {        // 32 bytes, little-endian
-    uint8_t  name[1]...     // encoded path is implicit by index; see below
-    uint8_t  childMask;     // bit i set => child octant i exists
-    uint8_t  level;
-    uint8_t  _pad;
-    uint32_t pointCount;    // points stored *in this node*
-    uint64_t byteOffset;    // offset of this node's payload in octree.bin
-    uint32_t byteSize;      // payload size in bytes (== pointCount*bytesPerPoint)
-    uint32_t firstChild;    // index of first child record, or 0xFFFFFFFF
+struct NodeRecord {        // 52 bytes, little-endian, #pragma pack(1)
+    uint8_t  level;        // 0 = root
+    uint8_t  childMask;    // bit o set => children[o] != kNoChild (redundant, handy)
+    uint16_t reserved;
+    uint32_t pointCount;   // points stored *in this node*
+    uint64_t byteOffset;   // offset of this node's payload in octree.bin
+    uint32_t byteSize;     // payload size in bytes (raw, or compressed if < raw)
+    uint32_t children[8];  // global node index per octant, or kNoChild (0xFFFFFFFF)
 };
 ```
 
-`childMask` + `firstChild` lets the viewer walk the tree and know exactly which
-of the eight octants exist without probing. (For multi-billion-point clouds the
-hierarchy itself can be chunked into sub-trees; v1 keeps it as one file, which is
-fine into the low billions — ~32 bytes per node, and nodes are far fewer than
-points.)
+Child indices are stored **explicitly** (`children[8]`), not as a `firstChild` +
+contiguous-rank scheme: the out-of-core builder writes chunk subtrees and coarse
+nodes in separate phases, so a node's children are not necessarily contiguous on
+disk. `childMask` is a convenience mirror of which `children[o]` entries are set.
+(For multi-billion-point clouds the hierarchy itself can be chunked into
+sub-trees; v1 keeps it as one file, which is fine into the low billions —
+52 bytes per node, and nodes are far fewer than points.)
 
 ### `octree.bin`
 Concatenated payloads. Node `i`'s points are

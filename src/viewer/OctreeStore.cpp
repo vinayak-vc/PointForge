@@ -1,7 +1,9 @@
 #include "viewer/OctreeStore.h"
 #include "common/Log.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #ifdef PF_WITH_ZSTD
@@ -25,6 +27,7 @@ void OctreeStore::clear() {
     std::lock_guard<std::mutex> lk(mtx_);
     inflight_.clear();
     requestQueue_.clear();
+    requestFrame_.clear();
     ready_.clear();
     nodes_.clear();
     octreePath_.clear();
@@ -130,12 +133,44 @@ GpuVertex OctreeStore::convert(const PackedPoint& p) const {
     return v;
 }
 
-void OctreeStore::requestLoad(uint32_t nodeIndex) {
+void OctreeStore::requestLoad(uint32_t nodeIndex, uint64_t frame) {
     std::lock_guard<std::mutex> lk(mtx_);
+    requestFrame_[nodeIndex] = frame; // refresh "last wanted" even if already queued
     if (inflight_.count(nodeIndex)) return;
     inflight_.insert(nodeIndex);
     requestQueue_.push_back(nodeIndex);
     cv_.notify_one();
+}
+
+void OctreeStore::purgeStale(uint64_t frame, uint64_t maxAgeFrames, size_t maxReady) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // Drop queued-but-not-started loads the camera has moved past. Entries are
+    // removed from inflight_ too so they can be re-requested if seen again.
+    if (frame > maxAgeFrames) {
+        const uint64_t cutoff = frame - maxAgeFrames;
+        std::deque<uint32_t> kept;
+        for (uint32_t idx : requestQueue_) {
+            auto it = requestFrame_.find(idx);
+            if (it != requestFrame_.end() && it->second >= cutoff) {
+                kept.push_back(idx);
+            } else {
+                inflight_.erase(idx);
+                requestFrame_.erase(idx);
+            }
+        }
+        requestQueue_.swap(kept);
+    }
+    // Cap ready results: a fast-moving view can produce uploads quicker than the
+    // main thread drains them. Drop the oldest (front) — the newest are the most
+    // likely to still be on screen. markEvicted-style cleanup keeps inflight_ sane.
+    if (ready_.size() > maxReady) {
+        size_t drop = ready_.size() - maxReady;
+        for (size_t i = 0; i < drop; ++i) {
+            inflight_.erase(ready_[i].nodeIndex);
+            requestFrame_.erase(ready_[i].nodeIndex);
+        }
+        ready_.erase(ready_.begin(), ready_.begin() + drop);
+    }
 }
 
 bool OctreeStore::popResult(LoadResult& out) {
@@ -149,11 +184,38 @@ bool OctreeStore::popResult(LoadResult& out) {
 void OctreeStore::markEvicted(uint32_t nodeIndex) {
     std::lock_guard<std::mutex> lk(mtx_);
     inflight_.erase(nodeIndex);
+    requestFrame_.erase(nodeIndex);
 }
 
 size_t OctreeStore::pendingRequests() {
     std::lock_guard<std::mutex> lk(mtx_);
     return requestQueue_.size();
+}
+
+bool OctreeStore::readNodeInto(std::ifstream& in, const NodeRecord& rec,
+                               std::vector<PackedPoint>& raw) const {
+    raw.resize(rec.pointCount);
+    if (!rec.pointCount) return true;
+
+    const size_t expectedRawBytes = rec.pointCount * sizeof(PackedPoint);
+    in.seekg((std::streamoff)rec.byteOffset);
+    if (rec.byteSize < expectedRawBytes) {
+#ifdef PF_WITH_ZSTD
+        std::vector<uint8_t> cbuf(rec.byteSize);
+        in.read(reinterpret_cast<char*>(cbuf.data()), rec.byteSize);
+        size_t dSize = ZSTD_decompress(raw.data(), expectedRawBytes, cbuf.data(), rec.byteSize);
+        if (ZSTD_isError(dSize) || dSize != expectedRawBytes) {
+            logError("OctreeStore: ZSTD decompress failed");
+            return false;
+        }
+#else
+        logError("OctreeStore: compressed node found, but built without ZSTD support");
+        return false;
+#endif
+    } else {
+        in.read(reinterpret_cast<char*>(raw.data()), rec.byteSize);
+    }
+    return (bool)in;
 }
 
 void OctreeStore::workerLoop() {
@@ -173,25 +235,7 @@ void OctreeStore::workerLoop() {
         if (idx >= nodes_.size()) continue;
         const NodeRecord& rec = nodes_[idx];
 
-        raw.resize(rec.pointCount);
-        if (rec.pointCount) {
-            size_t expectedRawBytes = rec.pointCount * sizeof(PackedPoint);
-            in.seekg((std::streamoff)rec.byteOffset);
-            if (rec.byteSize < expectedRawBytes) {
-#ifdef PF_WITH_ZSTD
-                std::vector<uint8_t> cbuf(rec.byteSize);
-                in.read(reinterpret_cast<char*>(cbuf.data()), rec.byteSize);
-                size_t dSize = ZSTD_decompress(raw.data(), expectedRawBytes, cbuf.data(), rec.byteSize);
-                if (ZSTD_isError(dSize) || dSize != expectedRawBytes) {
-                    logError("OctreeStore: ZSTD decompress failed");
-                }
-#else
-                logError("OctreeStore: compressed node found, but built without ZSTD support");
-#endif
-            } else {
-                in.read(reinterpret_cast<char*>(raw.data()), rec.byteSize);
-            }
-        }
+        readNodeInto(in, rec, raw);
 
         LoadResult res;
         res.nodeIndex = idx;
@@ -203,6 +247,83 @@ void OctreeStore::workerLoop() {
             ready_.push_back(std::move(res));
         }
     }
+}
+
+// Slab test: does the ray (origin O, unit dir D) hit AABB [mn,mx]? Returns the
+// entry distance tEnter (>=0, clamped) so callers can prune by along-ray order.
+static bool rayAabb(const glm::dvec3& O, const glm::dvec3& D,
+                    const glm::dvec3& mn, const glm::dvec3& mx, double& tEnter) {
+    double t0 = 0.0, t1 = std::numeric_limits<double>::max();
+    for (int a = 0; a < 3; ++a) {
+        double d = D[a];
+        if (std::fabs(d) < 1e-12) {                 // ray parallel to slab
+            if (O[a] < mn[a] || O[a] > mx[a]) return false;
+        } else {
+            double inv = 1.0 / d;
+            double ta = (mn[a] - O[a]) * inv;
+            double tb = (mx[a] - O[a]) * inv;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::fmax(t0, ta);
+            t1 = std::fmin(t1, tb);
+            if (t0 > t1) return false;
+        }
+    }
+    tEnter = t0;
+    return true;
+}
+
+bool OctreeStore::pickPoint(const glm::vec3& rayOriginCentered, const glm::vec3& rayDir,
+                            double tolPerDist, glm::dvec3& hitWorld,
+                            uint64_t maxScanPoints) const {
+    if (nodes_.empty() || octreePath_.empty()) return false;
+
+    // Work in world space: cubes_ and unpacked points are world coords, but the
+    // camera ray arrives centred (world - cubeCentre), so re-add the centre.
+    const glm::dvec3 O = glm::dvec3(rayOriginCentered) + center_;
+    glm::dvec3 D = glm::normalize(glm::dvec3(rayDir));
+
+    std::ifstream in(octreePath_, std::ios::binary);
+    if (!in) { logError("OctreeStore::pickPoint: cannot open " + octreePath_); return false; }
+
+    std::vector<PackedPoint> raw;
+    uint64_t scanned = 0;
+    double bestT = std::numeric_limits<double>::max();
+    bool   found = false;
+
+    // Iterative DFS over nodes whose cube the ray intersects. The MNO stores
+    // points at every level, so we test points in each intersected node, not
+    // just leaves — the coarse levels still give a usable hit when zoomed out.
+    std::vector<uint32_t> stack;
+    stack.push_back(rootIndex());
+    while (!stack.empty() && scanned < maxScanPoints) {
+        uint32_t idx = stack.back(); stack.pop_back();
+        if (idx >= nodes_.size()) continue;
+        const NodeCube& nc = cubes_[idx];
+        glm::dvec3 mn(nc.min[0], nc.min[1], nc.min[2]);
+        glm::dvec3 mx = mn + glm::dvec3(nc.size);
+        double tEnter;
+        if (!rayAabb(O, D, mn, mx, tEnter)) continue;
+        if (tEnter > bestT) continue; // whole cube is past the current best hit
+
+        const NodeRecord& rec = nodes_[idx];
+        if (rec.pointCount && readNodeInto(in, rec, raw)) {
+            for (uint32_t i = 0; i < rec.pointCount; ++i) {
+                glm::dvec3 P(raw[i].x * quant_.scale.x + quant_.offset.x,
+                             raw[i].y * quant_.scale.y + quant_.offset.y,
+                             raw[i].z * quant_.scale.z + quant_.offset.z);
+                glm::dvec3 v = P - O;
+                double t = glm::dot(v, D);
+                if (t <= 0.0 || t >= bestT) continue;       // behind eye / not closer
+                double perp = glm::length(v - D * t);
+                if (perp <= t * tolPerDist) { bestT = t; hitWorld = P; found = true; }
+            }
+            scanned += rec.pointCount;
+        }
+
+        for (int o = 0; o < 8; ++o)
+            if (rec.children[o] != kNoChild) stack.push_back(rec.children[o]);
+    }
+    return found;
 }
 
 } // namespace pf

@@ -16,6 +16,8 @@
 #include "viewer/Shader.h"
 #include "viewer/OctreeStore.h"
 #include "viewer/PointRenderer.h"
+#include "viewer/EmbeddedShaders.h"
+#include "viewer/EmbeddedImage.h"
 #include "common/Log.h"
 #include "common/OctreeFormat.h"
 #include "common/FileDialog.h"
@@ -66,8 +68,9 @@ static bool aabbVisible(const Frustum& f, const glm::vec3& mn, const glm::vec3& 
     return true;
 }
 
-static GLuint loadTextureBMP(const char* path) {
-    SDL_Surface* surf = SDL_LoadBMP(path);
+static GLuint loadTextureBMP(SDL_RWops* rw, int freeRw) {
+    if (!rw) return 0;
+    SDL_Surface* surf = SDL_LoadBMP_RW(rw, freeRw);
     if (!surf) return 0;
     
     SDL_Surface* formatted = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
@@ -113,7 +116,7 @@ int main(int argc, char** argv) {
         winW, winH, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { logError(std::string("CreateWindow: ") + SDL_GetError()); return 1; }
 
-    SDL_Surface* icon = SDL_LoadBMP("C:\\UnrealProject\\PointForge\\images\\vx.bmp");
+    SDL_Surface* icon = SDL_LoadBMP_RW(SDL_RWFromConstMem(kVxBmp, (int)kVxBmpLen), 1);
     if (icon) {
         SDL_SetColorKey(icon, SDL_TRUE, SDL_MapRGB(icon->format, 255, 0, 255));
         SDL_SetWindowIcon(window, icon);
@@ -135,6 +138,24 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL2_InitForOpenGL(window, gl);
     ImGui_ImplOpenGL3_Init("#version 330");
 
+    // Snapshot the unscaled style so DPI scaling can be re-applied from a clean
+    // base each time (ScaleAllSizes is cumulative and must not stack).
+    const ImGuiStyle baseStyle = ImGui::GetStyle();
+    // Auto-detect the display DPI (96 dpi = 1.0x). Used as the default UI scale
+    // unless the config file overrides it.
+    float autoUiScale = 1.0f;
+    {
+        float ddpi = 96.0f;
+        if (SDL_GetDisplayDPI(SDL_GetWindowDisplayIndex(window), &ddpi, nullptr, nullptr) == 0 && ddpi > 0.0f)
+            autoUiScale = std::clamp(ddpi / 96.0f, 0.5f, 4.0f);
+    }
+    auto applyUiScale = [&](float s) {
+        ImGuiStyle& st = ImGui::GetStyle();
+        st = baseStyle;
+        st.ScaleAllSizes(s);
+        ImGui::GetIO().FontGlobalScale = s;
+    };
+
     // ---- assets -----------------------------------------------------------
     OctreeStore store;
     bool octreeLoaded = false;
@@ -143,17 +164,16 @@ int main(int argc, char** argv) {
         else { logError("Failed to load octree from " + initialDir); }
     }
 
-    // Locate shaders relative to the executable so the viewer can run from any cwd.
-    std::string base;
-    if (char* b = SDL_GetBasePath()) { base = b; SDL_free(b); }
+    // Shaders are embedded in the binary (EmbeddedShaders.h) so the viewer is a
+    // single self-contained exe with no external shaders/ folder.
     Shader shader;
-    if (!shader.loadFromFiles(base + "shaders/point.vert", base + "shaders/point.frag")) {
-        logError("Failed to load shaders from " + base + "shaders/");
+    if (!shader.loadFromSource(kPointVertSrc, kPointFragSrc)) {
+        logError("Failed to compile embedded shaders");
         return 3;
     }
 
     PointRenderer renderer;
-    GLuint watermarkTex = loadTextureBMP("C:\\UnrealProject\\PointForge\\images\\vx.bmp");
+    GLuint watermarkTex = loadTextureBMP(SDL_RWFromConstMem(kVxBmp, (int)kVxBmpLen), 1);
 
     // ---- camera initial framing ------------------------------------------
     Camera cam;
@@ -187,6 +207,14 @@ int main(int argc, char** argv) {
     float eyeSeparation = 0.05f;
     float focalDistance = 10.0f;
     float camSpeedMultiplier = 1.0f;
+    float uiScale = autoUiScale;
+
+    // ---- measurement (CPU point picking) ----------------------------------
+    bool measureMode = false;
+    int  measureCount = 0;            // 0 = none, 1 = A set, 2 = A+B set
+    glm::dvec3 measureA(0.0), measureB(0.0);
+    bool pendingPick = false;         // a click is waiting to be resolved this frame
+    int  pickX = 0, pickY = 0;
 
     auto resetSettings = [&]() {
         pointSize = 2.0f; sseBudget = 1.5f; gpuBudgetMB = 1024;
@@ -197,6 +225,7 @@ int main(int argc, char** argv) {
         clipMax[0]=1000.0f; clipMax[1]=1000.0f; clipMax[2]=1000.0f;
         stereoSBS = false; eyeSeparation = 0.05f; focalDistance = 10.0f;
         camSpeedMultiplier = 1.0f;
+        uiScale = autoUiScale;
     };
 
     auto saveSettings = [&]() {
@@ -218,6 +247,7 @@ int main(int argc, char** argv) {
         fprintf(f, "clipMin=%f,%f,%f\n", clipMin[0], clipMin[1], clipMin[2]);
         fprintf(f, "clipMax=%f,%f,%f\n", clipMax[0], clipMax[1], clipMax[2]);
         fprintf(f, "camSpeedMultiplier=%f\n", camSpeedMultiplier);
+        fprintf(f, "uiScale=%f\n", uiScale);
         fclose(f);
     };
 
@@ -243,11 +273,14 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "clipMin=%f,%f,%f", &f1, &f2, &f3) == 3) { clipMin[0]=f1; clipMin[1]=f2; clipMin[2]=f3; }
             else if (sscanf(line, "clipMax=%f,%f,%f", &f1, &f2, &f3) == 3) { clipMax[0]=f1; clipMax[1]=f2; clipMax[2]=f3; }
             else if (sscanf(line, "camSpeedMultiplier=%f", &f1) == 1) camSpeedMultiplier = f1;
+            else if (sscanf(line, "uiScale=%f", &f1) == 1) uiScale = f1;
         }
         fclose(f);
     };
 
     loadSettings();
+    uiScale = std::clamp(uiScale, 0.5f, 4.0f);
+    applyUiScale(uiScale);
 
     bool running = true;
     bool mouseLook = false;
@@ -304,6 +337,10 @@ int main(int argc, char** argv) {
                 }
             } else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_RESIZED) {
                 winW = e.window.data1; winH = e.window.data2;
+            } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (measureMode && octreeLoaded && !ImGui::GetIO().WantCaptureMouse) {
+                    pendingPick = true; pickX = e.button.x; pickY = e.button.y;
+                }
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
                 if (!ImGui::GetIO().WantCaptureMouse) {
                     mouseLook = true; SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -436,7 +473,7 @@ int main(int argc, char** argv) {
                         ++totalDrawnNodes;
                         totalDrawnPoints += rec.pointCount;
                     } else {
-                        store.requestLoad(idx);
+                        store.requestLoad(idx, frame);
                     }
 
                     glm::vec3 nodeCenter = (mn + mx) * 0.5f;
@@ -474,6 +511,25 @@ int main(int argc, char** argv) {
             }
 
             renderer.evictToBudget((size_t)gpuBudgetMB * 1024u * 1024u, frame, store);
+
+            // Drop load requests the camera moved past (>120 frames ≈ 2s @60fps)
+            // and cap buffered uploads so the streaming queues don't grow unbounded.
+            store.purgeStale(frame, 120, (size_t)uploadsPerFrame * 8);
+
+            // ---- resolve a pending measurement pick ---------------------------
+            if (pendingPick) {
+                pendingPick = false;
+                cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
+                glm::vec3 ro, rd;
+                cam.screenRay((float)pickX, (float)pickY, winW, winH, ro, rd);
+                double ssF = (winH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
+                double tolPerDist = (ssF > 0.0) ? (6.0 / ssF) : 0.01; // ~6px pick disc
+                glm::dvec3 hit;
+                if (store.pickPoint(ro, rd, tolPerDist, hit)) {
+                    if (measureCount == 1) { measureB = hit; measureCount = 2; }
+                    else { measureA = hit; measureCount = 1; }
+                }
+            }
         } else {
             glViewport(0, 0, winW, winH);
             glClearColor(clearColor[0], clearColor[1], clearColor[2], 1.0f);
@@ -493,6 +549,38 @@ int main(int argc, char** argv) {
             ImVec2 p_max = ImVec2(p_min.x + wmSize, p_min.y + wmSize);
             ImU32 col = IM_COL32(255, 255, 255, 25); // ~10% opacity
             ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min, p_max, ImVec2(0,0), ImVec2(1,1), col);
+        }
+
+        // ---- measurement overlay (project picked points to screen) ----------
+        if (octreeLoaded && measureCount >= 1) {
+            cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
+            glm::mat4 mvp = cam.viewProj();
+            glm::dvec3 ctr = store.cubeCenter();
+            auto project = [&](const glm::dvec3& world, ImVec2& out) -> bool {
+                glm::vec4 clip = mvp * glm::vec4(glm::vec3(world - ctr), 1.0f);
+                if (clip.w <= 0.0f) return false; // behind the camera
+                glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                out.x = (ndc.x * 0.5f + 0.5f) * (float)winW;
+                out.y = (1.0f - (ndc.y * 0.5f + 0.5f)) * (float)winH;
+                return true;
+            };
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            ImVec2 sa, sb;
+            bool okA = project(measureA, sa);
+            bool okB = (measureCount == 2) && project(measureB, sb);
+            const ImU32 cMark = IM_COL32(255, 220, 40, 255);
+            const ImU32 cLine = IM_COL32(255, 220, 40, 200);
+            const ImU32 cText = IM_COL32(255, 255, 255, 255);
+            if (okA) { dl->AddCircleFilled(sa, 5.0f, cMark); dl->AddCircle(sa, 8.0f, cMark, 0, 2.0f); }
+            if (okB) { dl->AddCircleFilled(sb, 5.0f, cMark); dl->AddCircle(sb, 8.0f, cMark, 0, 2.0f); }
+            if (okA && okB) {
+                dl->AddLine(sa, sb, cLine, 2.0f);
+                double dist = glm::length(measureB - measureA);
+                char dbuf[64];
+                snprintf(dbuf, sizeof(dbuf), "%.3f m", dist);
+                ImVec2 mid((sa.x + sb.x) * 0.5f, (sa.y + sb.y) * 0.5f);
+                dl->AddText(ImVec2(mid.x + 6, mid.y - 6), cText, dbuf);
+            }
         }
 
         if (convertDone) {
@@ -532,6 +620,12 @@ int main(int argc, char** argv) {
                         pf::logError("Could not load octree from " + folder);
                     }
                 }
+            }
+            ImGui::Separator();
+            if (ImGui::SliderFloat("UI Scale", &uiScale, 0.5f, 3.0f, "%.2fx")) {
+                uiScale = std::clamp(uiScale, 0.5f, 4.0f);
+                applyUiScale(uiScale);
+                saveSettings();
             }
             if (octreeLoaded) {
                 ImGui::Separator();
@@ -600,6 +694,20 @@ int main(int argc, char** argv) {
                         if (ImGui::SliderFloat3("Min", clipMin, -ext, ext)) settingsChanged = true;
                         if (ImGui::SliderFloat3("Max", clipMax, -ext, ext)) settingsChanged = true;
                     }
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::TreeNode("Measure")) {
+                    ImGui::Checkbox("Measure mode (LMB picks)", &measureMode);
+                    ImGui::TextWrapped("Click two points to measure straight-line distance.");
+                    if (measureCount >= 1)
+                        ImGui::Text("A: %.2f, %.2f, %.2f", measureA.x, measureA.y, measureA.z);
+                    if (measureCount == 2) {
+                        ImGui::Text("B: %.2f, %.2f, %.2f", measureB.x, measureB.y, measureB.z);
+                        ImGui::TextColored(ImVec4(1, 0.86f, 0.16f, 1),
+                                           "Distance: %.3f m", glm::length(measureB - measureA));
+                    }
+                    if (ImGui::Button("Clear Measurement")) measureCount = 0;
                     ImGui::TreePop();
                 }
 

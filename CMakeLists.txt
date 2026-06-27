@@ -16,6 +16,19 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
+# Detect a static vcpkg triplet (e.g. x64-windows-static). When set we link a
+# single self-contained binary: static CRT + static GLEW. Guarded so the default
+# dynamic triplet build is unaffected.
+set(PF_STATIC OFF)
+if(VCPKG_TARGET_TRIPLET MATCHES "static")
+    set(PF_STATIC ON)
+    message(STATUS "PointForge: STATIC build (${VCPKG_TARGET_TRIPLET}) -> single-binary mode")
+    if(MSVC)
+        # Match the static CRT (/MT) that x64-windows-static libraries use.
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Dependencies (provided by vcpkg manifest; see vcpkg.json)
 # ---------------------------------------------------------------------------
@@ -24,6 +37,15 @@ find_package(GLEW REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
+
+# Static triplets export SDL2::SDL2-static rather than SDL2::SDL2. Pick whatever
+# this triplet provides so the same CMakeLists serves both build modes.
+if(TARGET SDL2::SDL2-static)
+    set(PF_SDL2_LIB SDL2::SDL2-static)
+else()
+    set(PF_SDL2_LIB SDL2::SDL2)
+endif()
+message(STATUS "PointForge: SDL2 target = ${PF_SDL2_LIB}")
 
 # ---------------------------------------------------------------------------
 # Optional format libraries. We locate the header + import library directly
@@ -41,8 +63,17 @@ set(PF_OPTIONAL_DEFS "")
 # import lib as laszip3.lib, so we must search the laszip/ subdir and include
 # the "laszip3" name. LASReader.cpp does #include <laszip_api.h>, which resolves
 # because LASZIP_INCLUDE_DIR points straight at the laszip/ folder.
+# Prefer the release static lib dir: vcpkg also exposes debug/lib, and a bare
+# find_library can latch onto the debug variant -> CRT mismatch in a Release exe.
+set(_PF_REL_LIB "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib")
 find_path(LASZIP_INCLUDE_DIR NAMES laszip_api.h PATH_SUFFIXES laszip)
-find_library(LASZIP_LIB NAMES laszip3 laszip_api laszip_api3 laszip)
+# Release-only first (NO_DEFAULT_PATH skips vcpkg's CMAKE_PREFIX_PATH, which also
+# lists debug/lib and would otherwise win); fall back to a normal search.
+find_library(LASZIP_LIB NAMES laszip3 laszip_api3 laszip_api laszip
+             PATHS "${_PF_REL_LIB}" NO_DEFAULT_PATH)
+if(NOT LASZIP_LIB)
+    find_library(LASZIP_LIB NAMES laszip3 laszip_api3 laszip_api laszip)
+endif()
 if(LASZIP_INCLUDE_DIR AND LASZIP_LIB)
     list(APPEND PF_OPTIONAL_INCS ${LASZIP_INCLUDE_DIR})
     list(APPEND PF_OPTIONAL_LIBS ${LASZIP_LIB})
@@ -72,15 +103,28 @@ else()
 endif()
 
 # --- Zstd (payload compression) ---
-find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
-find_library(ZSTD_LIB NAMES zstd libzstd)
-if(ZSTD_INCLUDE_DIR AND ZSTD_LIB)
-    list(APPEND PF_OPTIONAL_INCS ${ZSTD_INCLUDE_DIR})
-    list(APPEND PF_OPTIONAL_LIBS ${ZSTD_LIB})
+# Prefer the CMake config target (zstd::libzstd) so debug/release libs are chosen
+# per-config automatically; fall back to a release-hinted find_library.
+find_package(zstd CONFIG QUIET)
+if(TARGET zstd::libzstd)
+    list(APPEND PF_OPTIONAL_LIBS zstd::libzstd)
     list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
-    message(STATUS "Zstd: ${ZSTD_LIB}")
+    message(STATUS "Zstd: target zstd::libzstd")
+elseif(TARGET zstd::libzstd_static)
+    list(APPEND PF_OPTIONAL_LIBS zstd::libzstd_static)
+    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+    message(STATUS "Zstd: target zstd::libzstd_static")
 else()
-    message(WARNING "Zstd not found -> Node compression disabled")
+    find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
+    find_library(ZSTD_LIB NAMES zstd libzstd HINTS "${_PF_REL_LIB}")
+    if(ZSTD_INCLUDE_DIR AND ZSTD_LIB)
+        list(APPEND PF_OPTIONAL_INCS ${ZSTD_INCLUDE_DIR})
+        list(APPEND PF_OPTIONAL_LIBS ${ZSTD_LIB})
+        list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+        message(STATUS "Zstd: ${ZSTD_LIB}")
+    else()
+        message(WARNING "Zstd not found -> Node compression disabled")
+    endif()
 endif()
 
 message(STATUS "PointForge optional format libs: ${PF_OPTIONAL_LIBS}")
@@ -113,7 +157,7 @@ target_include_directories(imgui_local PUBLIC
     ${imgui_SOURCE_DIR}/backends
 )
 # The SDL2 backend includes <SDL.h>; the OpenGL3 backend uses its own loader.
-target_link_libraries(imgui_local PUBLIC SDL2::SDL2)
+target_link_libraries(imgui_local PUBLIC ${PF_SDL2_LIB})
 
 # ---------------------------------------------------------------------------
 # Core static library shared by both executables
@@ -153,7 +197,7 @@ add_executable(pfview WIN32
 )
 target_link_libraries(pfview PRIVATE
     pfcore
-    SDL2::SDL2 SDL2::SDL2main
+    ${PF_SDL2_LIB} SDL2::SDL2main
     GLEW::GLEW
     OpenGL::GL
     imgui_local
@@ -161,8 +205,17 @@ target_link_libraries(pfview PRIVATE
     Threads::Threads
 )
 
-# Copy shaders next to the viewer binary so it finds them at runtime.
-add_custom_command(TARGET pfview POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-            $<TARGET_FILE_DIR:pfview>/shaders)
+# Final release binary name.
+set_target_properties(pfview PROPERTIES OUTPUT_NAME "ViitorXPCViewer")
+
+if(PF_STATIC)
+    # Static GLEW requires consumers to define GLEW_STATIC before <GL/glew.h>.
+    target_compile_definitions(pfview PRIVATE GLEW_STATIC)
+else()
+    # Dynamic build only: copy shaders next to the binary (the static single-file
+    # build embeds them via EmbeddedShaders.h, so no copy is needed there).
+    add_custom_command(TARGET pfview POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+                $<TARGET_FILE_DIR:pfview>/shaders)
+endif()

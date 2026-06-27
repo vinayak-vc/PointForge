@@ -82,7 +82,8 @@ A converted cloud directory contains:
 - `meta.bin`     `FileMetadata` (magic "PFO1") — see src/common/OctreeFormat.h
 - `metadata.json` human-readable copy
 - `hierarchy.bin` array of `NodeRecord` (52 bytes each; explicit `children[8]`)
-- `octree.bin`   concatenated per-node `PackedPoint` payloads (20 bytes each)
+- `octree.bin`   concatenated per-node `PackedPoint` payloads (22 bytes each;
+                 v2 added `classification` + pad — see src/common/PointFormat.h)
 Octant numbering: `(x<<2)|(y<<1)|z`, 0 = low half. `childCube()` in
 OctreeFormat.h is the single source of truth — used by both indexer and viewer.
 

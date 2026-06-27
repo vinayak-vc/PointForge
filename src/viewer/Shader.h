@@ -9,6 +9,9 @@ namespace pf {
 class Shader {
 public:
     bool loadFromFiles(const std::string& vertPath, const std::string& fragPath);
+    // Compile + link from in-memory GLSL source (used for shaders embedded in
+    // the binary, so the viewer needs no external shaders/ folder).
+    bool loadFromSource(const std::string& vertSrc, const std::string& fragSrc);
     void use() const { glUseProgram(program_); }
     GLuint id() const { return program_; }
     ~Shader();

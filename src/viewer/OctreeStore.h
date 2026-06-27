@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -54,19 +55,41 @@ public:
     // Node spacing in world units (rootSpacing / 2^level).
     double nodeSpacing(uint8_t level) const;
 
-    // Enqueue an async payload load (no-op if already requested/queued).
-    void requestLoad(uint32_t nodeIndex);
+    // Enqueue an async payload load (no-op if already requested/queued). The
+    // frame stamp records when the node was last wanted so the queue can be
+    // pruned of requests the camera has since moved past (see purgeStale()).
+    void requestLoad(uint32_t nodeIndex, uint64_t frame = 0);
     // Pop one finished load on the main thread; returns false if none ready.
     bool popResult(LoadResult& out);
     // Tell the store a node is no longer resident (so it may be requested again).
     void markEvicted(uint32_t nodeIndex);
 
+    // Drop queued-but-not-yet-started loads that were last wanted more than
+    // maxAgeFrames ago, plus any ready results that piled up beyond maxReady.
+    // Frees the streaming queues when the view changes faster than disk I/O.
+    void purgeStale(uint64_t frame, uint64_t maxAgeFrames, size_t maxReady);
+
     size_t pendingRequests();
+
+    // ---- synchronous CPU picking (not the streaming path) -----------------
+    // Cast a ray (centred space, dir unit) and return the nearest point within
+    // a screen tolerance. tolPerDist = pickRadiusPixels / ssFactor: the world
+    // tolerance grows linearly with along-ray distance so the pick "disc" stays
+    // a fixed pixel size. Reads intersected node payloads off disk on the spot.
+    // hitWorld is filled with the picked point in WORLD coords. Returns false
+    // if nothing was hit. Bounded by scanning at most maxScanPoints points.
+    bool pickPoint(const glm::vec3& rayOriginCentered, const glm::vec3& rayDir,
+                   double tolPerDist, glm::dvec3& hitWorld,
+                   uint64_t maxScanPoints = 8'000'000ull) const;
 
 private:
     void computeCubes();
     void workerLoop();
     GpuVertex convert(const PackedPoint& p) const;
+    // Read + (if needed) zstd-decompress one node's packed points via an open
+    // stream. Shared by the streaming worker and the synchronous picker.
+    bool readNodeInto(std::ifstream& in, const NodeRecord& rec,
+                      std::vector<PackedPoint>& raw) const;
 
     FileMetadata            meta_{};
     std::vector<NodeRecord> nodes_;
@@ -84,6 +107,7 @@ private:
     std::deque<uint32_t>    requestQueue_;
     std::vector<LoadResult> ready_;
     std::unordered_set<uint32_t> inflight_;
+    std::unordered_map<uint32_t, uint64_t> requestFrame_; // node -> last-wanted frame
     std::atomic<bool>       stop_{false};
 };
 
