@@ -195,6 +195,7 @@ add_executable(pfview WIN32
     src/viewer/OctreeStore.cpp
     src/viewer/PointRenderer.cpp
     src/viewer/Controller.cpp
+    src/viewer/SerialController.cpp
 )
 target_link_libraries(pfview PRIVATE
     pfcore

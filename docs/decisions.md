@@ -43,6 +43,12 @@ This document records major design decisions.
 - **Custom 1-stick pads**: with no right stick, holding **LB** switches the single stick from move to look (modifier pattern). Bindings + deadzone + sensitivities persist in `pfview_config.txt`.
 - **Why index-based rebinding**: raw joystick axis/button numbering is not standardised across devices, so a fixed mapping can't work for an arbitrary custom controller; the panel shows live values to discover indices.
 
+## Custom ESP32 Controller (Bluetooth SPP serial)
+- **Decision**: The user's custom controller is an ESP32 over Bluetooth SPP (virtual COM port), not a HID joystick, so SDL can't see it. Added a dedicated Win32 `SerialController` (background thread, `CreateFile("\\\\.\\COMx")` + blocking `ReadFile`) that parses the exact protocol from their `JoystickReceiverBluetooth.cs` (`x,y,b` lines, `PAUSE`/`PLAY`). COM port is auto-detected from the device MAC via `HKLM\SYSTEM\CurrentControlSet\Enum\BTHENUM` (the same registry walk the C# uses), with a manual COM fallback.
+- **Kept separate from SDL input**: it's a third input source alongside mouse and the SDL `GameInput` (Xbox/raw joystick) — existing paths untouched, per the user's "only add" requirement.
+- **Mapping** (user choice): joystick = look; hold the joystick trigger = fly forward along the look direction; PAUSE toggles UI-nav mode; PLAY = activate in UI (fed to ImGui via `GamepadFaceDown`) / Frame-All in camera mode. In UI mode the stick drives ImGui nav through `AddKeyAnalogEvent(ImGuiKey_GamepadLStick*)`.
+- **No new dependency**: pure Win32 + std::thread, so the single-file static exe stays single-file. Non-Windows builds get a no-op stub.
+
 ## DPI Scaling (metrics-only)
 - **Decision**: Detect display DPI via `SDL_GetDisplayDPI` (96 dpi = 1.0x) for the default; apply with `ImGuiStyle::ScaleAllSizes` from a captured base style plus `io.FontGlobalScale`. Exposed as a persisted "UI Scale" slider. The same apply path also swaps light/dark theme colours from the captured base.
 - **Reason**: Simple, dependency-free, and re-applies cleanly (base style snapshot avoids cumulative scaling). Trade-off: the font glyph atlas is not re-rasterized, so large scales soften text — acceptable for now (tracked in tasks.md).

@@ -17,6 +17,7 @@
 #include "viewer/OctreeStore.h"
 #include "viewer/PointRenderer.h"
 #include "viewer/Controller.h"
+#include "viewer/SerialController.h"
 #include "viewer/EmbeddedShaders.h"
 #include "viewer/EmbeddedImage.h"
 #include "common/Log.h"
@@ -275,6 +276,14 @@ int main(int argc, char** argv) {
     bool  padInvertY  = false;
     bool  uiNavMode   = false;     // true = controller drives the UI, not the camera
 
+    // ---- custom serial controller (ESP32 joystick over Bluetooth SPP) -----
+    SerialController serial;
+    bool        serialEnabled = true;
+    bool        serialAuto    = true;
+    std::string serialMac     = "B4BFE90B6036"; // from the user's JoystickReceiver
+    std::string serialPort    = "COM4";
+    bool        serialNavRelease = false;       // pending ImGui activate-release
+
     // ---- measurement (CPU point picking, multi-segment polyline) ----------
     bool measureMode = false;
     std::vector<glm::dvec3> measurePts;   // picked vertices, world coords
@@ -359,6 +368,10 @@ int main(int argc, char** argv) {
         fprintf(f, "padInvertY=%d\n", (int)padInvertY);
         fprintf(f, "jAxes=%d,%d,%d,%d\n", pad.jAxisX, pad.jAxisY, pad.jAxisRX, pad.jAxisRY);
         fprintf(f, "jBtns=%d,%d,%d,%d,%d,%d\n", pad.jBtnA, pad.jBtnB, pad.jBtnLB, pad.jBtnRB, pad.jBtnBack, pad.jBtnStart);
+        fprintf(f, "serialEnabled=%d\n", (int)serialEnabled);
+        fprintf(f, "serialAuto=%d\n", (int)serialAuto);
+        fprintf(f, "serialMac=%s\n", serialMac.c_str());
+        fprintf(f, "serialPort=%s\n", serialPort.c_str());
         for (const auto& r : recentDirs) fprintf(f, "recent=%s\n", r.c_str());
         fclose(f);
     };
@@ -398,6 +411,18 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "padInvertY=%d", &i) == 1) padInvertY = (i != 0);
             else if (sscanf(line, "jAxes=%d,%d,%d,%d", &pad.jAxisX, &pad.jAxisY, &pad.jAxisRX, &pad.jAxisRY) == 4) {}
             else if (sscanf(line, "jBtns=%d,%d,%d,%d,%d,%d", &pad.jBtnA, &pad.jBtnB, &pad.jBtnLB, &pad.jBtnRB, &pad.jBtnBack, &pad.jBtnStart) == 6) {}
+            else if (sscanf(line, "serialEnabled=%d", &i) == 1) serialEnabled = (i != 0);
+            else if (sscanf(line, "serialAuto=%d", &i) == 1) serialAuto = (i != 0);
+            else if (strncmp(line, "serialMac=", 10) == 0) {
+                std::string v = line + 10;
+                while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+                serialMac = v;
+            }
+            else if (strncmp(line, "serialPort=", 11) == 0) {
+                std::string v = line + 11;
+                while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+                serialPort = v;
+            }
             else if (strncmp(line, "recent=", 7) == 0) {
                 std::string v = line + 7;
                 while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
@@ -410,6 +435,7 @@ int main(int argc, char** argv) {
     loadSettings();
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
+    if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
 
     // Load an octree directory, reset view, record it as recent.
     auto loadOctree = [&](const std::string& dir) -> bool {
@@ -614,6 +640,44 @@ int main(int argc, char** argv) {
                 if (pad.pressed(PAD_Y)) measureMode = !measureMode;  // Y = toggle measure
                 if (pad.pressed(PAD_X)) pendingShot = true;          // X = screenshot
                 if (pad.pressed(PAD_BACK)) showUI = !showUI;         // Back = toggle UI
+            }
+        }
+
+        // ---- custom serial controller (ESP32 joystick: look + trigger-fly) --
+        if (serialEnabled && serial.connected()) {
+            ImGuiIO& io = ImGui::GetIO();
+            float sx = serial.normX() * 2.0f - 1.0f;   // 0..1 -> -1..1
+            float sy = serial.normY() * 2.0f - 1.0f;
+            auto dz = [&](float v) {
+                float a = std::fabs(v);
+                if (a < pad.deadzone) return 0.0f;
+                float s = (a - pad.deadzone) / (1.0f - pad.deadzone);
+                return v < 0.0f ? -s : s;
+            };
+            sx = dz(sx); sy = dz(sy);
+            float invY = padInvertY ? -1.0f : 1.0f;
+
+            bool pauseClick = serial.consumePause();
+            bool playClick  = serial.consumePlay();
+            if (pauseClick) uiNavMode = !uiNavMode;     // PAUSE = UI mode toggle
+
+            if (uiNavMode) {
+                io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+                float ly = sy * invY;
+                io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft,  sx < -0.1f, std::fmax(0.0f, -sx));
+                io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, sx >  0.1f, std::fmax(0.0f,  sx));
+                io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp,    ly < -0.1f, std::fmax(0.0f, -ly));
+                io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown,  ly >  0.1f, std::fmax(0.0f,  ly));
+                if (playClick) { io.AddKeyEvent(ImGuiKey_GamepadFaceDown, true); serialNavRelease = true; }
+                else if (serialNavRelease) { io.AddKeyEvent(ImGuiKey_GamepadFaceDown, false); serialNavRelease = false; }
+            } else if (octreeLoaded) {
+                // Joystick = look; hold trigger to fly forward along the look dir.
+                cam.addYawPitch(sx * padLookSens * dt, -sy * invY * padLookSens * dt);
+                if (serial.triggerHeld()) {
+                    float mv = cam.moveSpeed * dt * camSpeedMultiplier * padMoveSens;
+                    cam.position += cam.front() * mv;
+                }
+                if (playClick) frameAllReq = true;       // PLAY = activate (frame all)
             }
         }
 
@@ -1160,6 +1224,28 @@ int main(int argc, char** argv) {
                         ImGui::TextWrapped("Left stick: move | Right stick: look | Triggers: down/up | "
                                            "RB: boost | A: frame | Y: measure | X: shot | Back: UI | Start: UI mode");
                     }
+
+                    ImGui::SeparatorText("Custom serial controller (Bluetooth)");
+                    if (ImGui::Checkbox("Enable serial controller", &serialEnabled)) {
+                        settingsChanged = true;
+                        if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
+                        else serial.stop();
+                    }
+                    if (serial.connected())
+                        ImGui::TextColored(ImVec4(0.6f, 1, 0.6f, 1), "Connected: %s", serial.portName().c_str());
+                    else
+                        ImGui::TextDisabled("Not connected (waiting / not paired)");
+                    if (ImGui::Checkbox("Auto-detect by MAC", &serialAuto)) settingsChanged = true;
+                    char macBuf[32]; snprintf(macBuf, sizeof(macBuf), "%s", serialMac.c_str());
+                    if (ImGui::InputText("MAC", macBuf, sizeof(macBuf))) { serialMac = macBuf; settingsChanged = true; }
+                    char comBuf[16]; snprintf(comBuf, sizeof(comBuf), "%s", serialPort.c_str());
+                    if (ImGui::InputText("COM port", comBuf, sizeof(comBuf))) { serialPort = comBuf; settingsChanged = true; }
+                    if (ImGui::Button("Reconnect")) serial.start(serialMac, serialPort, serialAuto);
+                    if (serial.connected())
+                        ImGui::Text("X %.2f  Y %.2f  trigger %d",
+                                    serial.normX(), serial.normY(), serial.triggerHeld() ? 1 : 0);
+                    ImGui::TextWrapped("Joystick = look. Hold trigger = fly forward. "
+                                       "PAUSE = UI mode. PLAY = activate / frame all.");
                     ImGui::TreePop();
                 }
 
@@ -1372,6 +1458,10 @@ int main(int argc, char** argv) {
                     if (padEnabled && pad.connected()) {
                         ImGui::SameLine(0, 18);
                         ImGui::TextColored(ImVec4(0.6f, 0.9f, 1, 1), "Pad:%s", uiNavMode ? "UI" : "Cam");
+                    }
+                    if (serialEnabled && serial.connected()) {
+                        ImGui::SameLine(0, 18);
+                        ImGui::TextColored(ImVec4(0.6f, 0.9f, 1, 1), "BT:%s", uiNavMode ? "UI" : "Cam");
                     }
                 } else {
                     ImGui::TextDisabled("No cloud loaded  -  press F1 for help");

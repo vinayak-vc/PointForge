@@ -19,6 +19,24 @@ Limitation: raw-joystick ImGui nav is not auto-fed (Xbox only); custom pads get
 button actions + camera. Not tested with a physical device this session — verify
 mappings live (the rebind panel exists for non-standard axis/button indices).
 
+### Custom ESP32 controller (Bluetooth SPP serial)
+The user's custom controller is **not** a USB HID — it's an ESP32 streaming over
+a Bluetooth virtual COM port (protocol from their `JoystickReceiverBluetooth.cs`:
+lines `x,y,b` with 12-bit ADC + active-low button, plus `PAUSE`/`PLAY`). Added
+`src/viewer/SerialController.{h,cpp}` (Win32 only): background thread opens the
+COM port (auto-detected from the device MAC via `HKLM\...\Enum\BTHENUM`, same as
+the C# script; manual COM fallback), parses lines, exposes normX/normY + trigger
++ pause/play one-shots. Wired in `main.cpp` as a third input alongside mouse +
+Xbox:
+- **Joystick = look**; **hold trigger = fly forward** along the look direction.
+- **PAUSE** = toggle UI-nav mode; in UI mode the stick feeds ImGui gamepad-nav
+  (`AddKeyAnalogEvent(GamepadLStick*)`) and **PLAY** = activate (`GamepadFaceDown`).
+- **PLAY** in camera mode = Frame-All.
+- Controller panel has a "Custom serial controller" section: enable, auto/MAC/COM,
+  Reconnect, live X/Y/trigger readout. Persisted (`serialEnabled/Auto/Mac/Port`).
+Default MAC `B4BFE90B6036` (from the user's script). Not tested with the physical
+device — verify COM auto-detect + axis orientation (invert-Y available).
+
 ## Previous Session — UX overhaul
 Implemented a broad UX pass on `pfview` (single-file `ViitorXPCViewer`):
 - **Navigation**: LMB-drag orbit, double-click focus, wheel zoom-to-cursor

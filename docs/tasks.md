@@ -25,6 +25,8 @@
 - `[x]` Screenshot (F12, BMP), reset confirmation, clear-clipping, top toolbar
 - `[x]` Controller support: Xbox gamepad (SDL_GameController) + raw joystick fallback
         (camera, actions, ImGui UI-nav mode, deadzone/sens config, live rebind panel)
+- `[x]` Custom ESP32 Bluetooth-SPP controller (Win32 serial reader, MAC auto-detect):
+        joystick=look, trigger=fly-forward, PAUSE=UI mode, PLAY=activate/frame-all
 
 ## In Progress
 - (none)
