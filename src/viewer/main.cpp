@@ -567,8 +567,8 @@ int main(int argc, char** argv) {
             if (ks[SDL_SCANCODE_S]) moveDir -= fwd;
             if (ks[SDL_SCANCODE_D]) moveDir += rgt;
             if (ks[SDL_SCANCODE_A]) moveDir -= rgt;
-            if (ks[SDL_SCANCODE_E]) moveDir += glm::vec3(0, 1, 0); // E is up
-            if (ks[SDL_SCANCODE_Q]) moveDir -= glm::vec3(0, 1, 0); // Q is down
+            if (ks[SDL_SCANCODE_E]) moveDir += glm::vec3(0, 0, 1); // E is up (world Z-up)
+            if (ks[SDL_SCANCODE_Q]) moveDir -= glm::vec3(0, 0, 1); // Q is down
             
             if (glm::length(moveDir) > 0.0f) {
                 moveDir = glm::normalize(moveDir);
@@ -944,7 +944,7 @@ int main(int argc, char** argv) {
             if (!folder.empty()) loadOctree(folder);
         }
         ImGui::SameLine(); if (ImGui::Button("Frame")) frameAll();
-        ImGui::SameLine(); ImGui::Checkbox("Measure", &measureMode);
+        ImGui::SameLine(); ImGui::Checkbox("Measure##toolbar", &measureMode);
         ImGui::SameLine(); if (ImGui::Button("Shot")) pendingShot = true;
         ImGui::SameLine(); if (ImGui::Button("Help")) showHelp = !showHelp;
         ImGui::Separator();
