@@ -83,3 +83,8 @@ This document records major design decisions.
   `PointForgeC.h` in sync with `PointForgeNative.cs` in the Unity repo
   (`C:\Unity\unityvc-base-project\Assets\Games\Pointcloud-unity`).
   POD-only boundary; API version via `PF_GetVersion` (currently 1).
+
+## Convert Integration (DLL instead of Process)
+- **Decision**: Replaced System.Diagnostics.Process invocation of pfconvert.exe with a native DLL library (PointForgeConvert.dll) in the Unity integration.
+- **Reason**: System.Diagnostics.Process is not supported and usually stripped in IL2CPP builds. Providing a DLL ensures cross-platform and IL2CPP compatibility within Unity, keeping the conversion logic directly within the Unity process space.
+- **Consequence**: Added a new C-API pfconvert_api.cpp and a pfconvert_dll CMake target that exposes PF_ConvertDataset and PF_Convert_SetLogCallback. Logs are sent via a callback to C#, which avoids freezing the editor and correctly feeds the Unity UI console.
