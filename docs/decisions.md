@@ -67,3 +67,19 @@ This document records major design decisions.
 - **GpuVertex 16 -> 20 bytes**: added `intensity` (uint16) + `classification` (uint8) so the viewer can colour by them on the GPU (new attribs loc 2/3, shader modes 3/4). Accepted per-point GPU cost for the feature.
 - **Orbit vs free-look**: LMB-drag = turntable orbit around a pivot (discoverable default); RMB-drag keeps free-fly look; pivot updates on double-click/zoom via depth readback; measure mode reclaims LMB.
 - **Convert cancel is cooperative**: `IndexOptions::cancel` (atomic) is polled at Phase C chunk boundaries; aborting returns false and leaves partial output. Phase A/B not yet cancellable.
+
+## Unity Plugin: Thin C API Over OctreeStore (branch `library/unity`)
+- **Decision**: Unity integration is a separate SHARED target (`pfunity`) that
+  compiles only `OctreeStore.cpp + Log.cpp` plus a new flat C API
+  (`src/library/unity/PointForgeC.{h,cpp}`). It does NOT link pfcore.
+- **Reason**: Unity consumes already-converted octrees, so the importer stack
+  (laszip/E57/indexer) is dead weight and would drag extra DLLs across the
+  plugin boundary. OctreeStore has no SDL/GL/ImGui dependencies, so the
+  streaming path is reusable as-is — the DLL ends up with KERNEL32-only
+  imports when built with the static triplet.
+- **Consequence**: LOD/visibility decisions stay native (the pfview
+  frustum+SSE traversal was ported into the API layer), Unity only mirrors
+  GPU residency back (`PF_ReleaseLoadedNode`/`PF_UnloadNode`). Keep
+  `PointForgeC.h` in sync with `PointForgeNative.cs` in the Unity repo
+  (`C:\Unity\unityvc-base-project\Assets\Games\Pointcloud-unity`).
+  POD-only boundary; API version via `PF_GetVersion` (currently 1).

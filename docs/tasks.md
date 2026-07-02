@@ -49,10 +49,16 @@
         no Ninja/vcvars dev-shell step needed; re-verified zero non-system DLL
         imports and a clean launch isolated in an empty directory
 
+- `[x]` Unity native plugin (branch `library/unity`): `pfunity` DLL target +
+        flat C API (`src/library/unity/PointForgeC.{h,cpp}`) — streaming reader
+        only, pfcore untouched; smoke-tested against a real 12.4M-pt octree
+
 ## In Progress
 - (none)
 
 ## To Do
+- `[ ]` Orthographic screen-space-error variant in the C API (Unity scene
+        cameras can be ortho; streaming currently pauses in ortho views)
 - `[ ]` Improved caching: auto-purge old converted-cloud cache dirs on disk
 - `[ ]` UI font re-rasterization at scale (current DPI path scales metrics + FontGlobalScale only)
 - `[ ]` Linearised-depth EDL (current uses raw depth diff; tune for ortho)

@@ -1,6 +1,38 @@
 # AI Handoff
 
-## Latest Session — Docked UI shell redesign + single-file build fix
+## Latest Session (2026-07-02) — Unity native plugin (branch `library/unity`)
+PointForge is now consumable from Unity as a native DLL. New branch
+**`library/unity`** (do not merge to main without review; main is untouched).
+
+- **`src/library/unity/PointForgeC.h/.cpp`** — flat C API (`PF_OpenProject`,
+  `PF_UpdateCamera`, `PF_GetVisibleNodes`, `PF_DequeueLoadedNode`,
+  `PF_ReleaseLoadedNode`, `PF_UnloadNode`, `PF_GetEvictionCandidates`,
+  `PF_GetStatistics`, `PF_GetNodeInfo`, `PF_SetLogCallback`). POD-only
+  boundary, opaque handle, single-thread contract (Unity main thread);
+  OctreeStore's worker thread does the disk I/O as usual.
+- Ports pfview's frustum+SSE `visit()` traversal (recursion → explicit stack).
+  Residency is tracked in the API layer because Unity owns the GPU buffers;
+  draw list = visible ∧ resident. LRU eviction planning via
+  `PF_GetEvictionCandidates` (never evicts nodes in the current draw list).
+- **CMake**: new `pfunity` SHARED target (`PF_BUILD_UNITY_PLUGIN`, ON) —
+  compiles `OctreeStore.cpp + Log.cpp + PointForgeC.cpp` only; links glm +
+  zstd. **pfcore untouched**; no laszip/E57/SDL/GL in the DLL. The zstd
+  detection block now sets `PF_ZSTD_LIB`/`PF_ZSTD_INC` before appending to
+  `PF_OPTIONAL_*` so pfunity can link zstd alone.
+- Build: `cmake --build build-static --config Release --target pfunity`
+  → `build-static/Release/PointForgeUnity.dll` (static CRT+zstd, 432 KB,
+  KERNEL32-only imports, 13 exports verified with dumpbin).
+- Verified with a standalone smoke test against
+  `C:\UnrealProject\model\PointForgeCache_direct` (1024 nodes, 12.4M pts):
+  open/metadata/traversal/streaming/release/stats/eviction all correct.
+- Consumer: Unity plugin repo at
+  `C:\Unity\unityvc-base-project\Assets\Games\Pointcloud-unity` (own git repo,
+  own AGENTS.md + docs/). Keep `PointForgeNative.cs` there in sync with
+  `PointForgeC.h`.
+- Known gaps: perspective-only SSE (ortho cameras unsupported), no
+  orthographic variant exported yet; API version = 1 via `PF_GetVersion`.
+
+## Previous Session — Docked UI shell redesign + single-file build fix
 Two unrelated pieces of work, both on `main`:
 
 ### 1. Full UI redesign (viewport-centric docked shell)
