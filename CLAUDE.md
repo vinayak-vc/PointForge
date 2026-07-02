@@ -13,7 +13,8 @@ tech stack of the "Axiom Present" app in the parent folder.
 - LAS/LAZ via LASzip; E57 via libE57Format; PLY + PTS/XYZ via own parsers
 - Dependencies come from **vcpkg** (manifest: `vcpkg.json`), except Dear ImGui,
   which is compiled from source via CMake `FetchContent` (the vcpkg imgui port
-  dropped its SDL2 binding in 1.92.x).
+  dropped its SDL2 binding in 1.92.x). Pinned to **v1.91.5-docking** — the
+  viewer shell uses DockSpace/DockBuilder; do not repin to a non-docking tag.
 
 ## Two programs (share static lib `pfcore`)
 - `pfconvert` — importer. Source cloud -> streamable on-disk octree.
@@ -30,7 +31,9 @@ src/indexer/   Chunker (out-of-core chunking), OctreeIndexer (chunk subtrees +
                  coarse stitch), MetadataWriter
 src/tools/pfconvert/main.cpp   importer CLI entry point
 src/viewer/    Camera, Shader, OctreeStore (load + async streaming),
-                 PointRenderer (GPU VBO cache + eviction), main.cpp (pfview)
+                 PointRenderer (GPU VBO cache + eviction), main.cpp (pfview),
+                 Jobs.h (background convert job queue), UiLog.h (Console ring
+                 buffer fed by pf::setLogSink)
 shaders/       point.vert / point.frag (GLSL 330 core)
 docs/ARCHITECTURE.md   the why: 3-phase out-of-core build, MNO LOD, on-disk format
 ```
@@ -49,7 +52,16 @@ cd build\Release
 .\pfconvert.exe "C:\path\to\scan.laz" --out scans\mysite
 .\pfview.exe scans\mysite
 ```
-Viewer: RMB-drag look, WASD move, Q/E down/up, Shift fast, wheel point size.
+Viewer UI is a docked shell: menu bar + toolbar, central viewport (passthru
+dock node), right "Properties" dock, bottom Jobs/Console/Performance dock
+(closed by default), status bar. Conversion runs as background jobs: Convert
+dialog (Ctrl+I) -> Jobs panel + status-bar pill + completion toast. Controller
+and ESP32-serial config live in Edit > Preferences > Input.
+Keys: LMB orbit, 2xLMB focus, RMB look, WASD+QE fly (Shift fast), wheel zoom,
+Ctrl+wheel point size, F frame, M measure, C clip, 1/3/7 view presets, 5 ortho,
+F1 shortcuts, Ctrl+P command palette, F3 stats HUD, F5 or Shift+Space hide UI,
+F9 stereoscopic SBS (hides ALL UI; F9/Esc exits), F11 fullscreen, Ctrl+O open,
+Ctrl+I convert, Ctrl+, preferences, Esc Esc quit.
 
 `pfconvert` flags (arg parsing in src/tools/pfconvert/main.cpp; `--out` required):
 - `--out <dir>`        output octree directory (created if missing)

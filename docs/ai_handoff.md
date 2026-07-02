@@ -1,6 +1,79 @@
 # AI Handoff
 
-## Latest Session — Controller support
+## Latest Session — Docked UI shell redesign + single-file build fix
+Two unrelated pieces of work, both on `main`:
+
+### 1. Full UI redesign (viewport-centric docked shell)
+The old UI was one scrolling 350px "PointForge Dashboard" ImGui window mixing
+viewer settings, converter settings, and controller/ESP32 config. Preceded by
+a UX audit (four independently-designed IA proposals — DCC-dock, steelmanned
+top-tabs, viewport+jobs, ribbon — scored by three judge lenses: beginner,
+power-user, scalability/feasibility). All four proposals, judged
+independently, rejected top-level page tabs; the tabs advocate reversed its
+own position after steelmanning. Converged recommendation: menu+dock shell
+(same pattern as Unreal/Unity/Blender/VS/CloudCompare), conversion as a
+background job queue, controller config out of daily UI into Preferences.
+Implemented that recommendation in full — see `architecture.md` §7 for the
+shell's structure and `decisions.md` ("Viewport-Centric Docked UI Shell") for
+the rationale. Highlights:
+- Repinned ImGui FetchContent `v1.91.5` -> **`v1.91.5-docking`** (same repo,
+  docking branch) to get `DockSpace`/`DockBuilder`.
+- New `src/viewer/Jobs.h` (`JobQueue`/`ConvertJob`): one worker thread runs
+  conversions sequentially via the existing `IndexOptions` progress/cancel
+  contract — unchanged from the old inline converter, just called from a
+  queue instead of a raw `std::thread` in `main.cpp`. This is the same
+  abstraction batch conversion and future AI-segmentation jobs reuse.
+- New `src/viewer/UiLog.h` + `pf::setLogSink()` (added to `common/Log.h/.cpp`):
+  mirrors every `pf::log()` call — including from the converter thread — into
+  a ring buffer backing the new Console panel. Original stdout/stderr logging
+  untouched; the UI sink is additive.
+- `main.cpp` rewritten around the shell: menu bar, toolbar, passthru-docked
+  viewport, Properties dock (collapsing sections; tool options *append*, e.g.
+  Measure/Clip sections show up alongside Display rather than replacing it),
+  bottom Jobs/Console/Performance dock (closed by default), status bar with a
+  job-progress pill, toasts, F1 searchable shortcut sheet (one keybinding
+  table is the source of truth), Ctrl+P command palette, welcome/empty state
+  with drag-drop routing (octree dir -> load, raw scan file -> Convert dialog
+  pre-filled), Preferences dialog (General/Display/Input/Advanced tabs —
+  Input absorbs the entire gamepad + ESP32 block).
+- **Stereoscopic SBS (F9) now suppresses ALL UI** per explicit requirement —
+  not just leaves it on top of the split view. Every ImGui draw this
+  frame (menu/toolbar/docks/status bar/watermark/measure overlay/colour
+  legend) is skipped; only a fading "F9/Esc to exit" hint renders, drawn once
+  per eye viewport so it fuses correctly through a stereoscope. Hotkeys still
+  process; only rendering stops. Boots correctly into the hint if `stereoSBS`
+  is loaded `true` from `pfview_config.txt`.
+- New keys: `M`/`C` tool toggles, `1`/`3`/`7` view presets, `5` ortho, `F3`
+  stats HUD, `F9` stereo, `Shift+Space` zen (alias for `F5`), `Ctrl+O/I/P/,`.
+  Fixed a latent bug in the process: `F` (frame-all) used to fire while typing
+  in an ImGui text field; now guarded by `WantCaptureKeyboard` like the other
+  letter-key shortcuts.
+- Verified: Release build clean (only pre-existing E57Reader warnings), 6s
+  smoke-launch with no crash. **Not** verified against a live multi-billion
+  point cloud this session, and the Jobs/Console panels are untested with a
+  real conversion run end-to-end — worth doing before calling this final.
+
+### 2. Single-file static build: toolset-mismatch fix simplified
+The existing single-file recipe (decisions.md, prior session) required
+configuring with Ninja inside a VS18 developer command prompt to dodge a
+vcpkg/CMake-generator toolset mismatch (LNK2019 on `__std_regex_transform_*`
+etc. — vcpkg auto-picked the newest installed MSVC, 14.51 from VS 18
+Community, while CMake's default "Visual Studio 17 2022" generator targets
+14.44 from the VS 2022 BuildTools instance). Reproduced the *exact same*
+LNK2019 this session, then found a one-file fix instead of the Ninja dance:
+new **`triplets/x64-windows-static.cmake`** overlay triplet pins
+`VCPKG_PLATFORM_TOOLSET_VERSION 14.44`, forcing vcpkg to compile every static
+port with the toolset the default generator actually links against. Normal
+`cmake -B build-static -S . -DCMAKE_TOOLCHAIN_FILE=... -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_OVERLAY_TRIPLETS=<repo>/triplets`
++ `cmake --build build-static --config Release` now links clean, no Ninja/
+vcvars step. Verified: `dumpbin /DEPENDENTS` on the resulting
+`ViitorXPCViewer.exe` shows only OS DLLs (OPENGL32/KERNEL32/USER32/GDI32/
+WINMM/IMM32/ole32/OLEAUT32/VERSION/ADVAPI32/SETUPAPI/SHELL32); copied the exe
+alone into an empty directory and launched it successfully (6s, no crash).
+The Ninja recipe in decisions.md still works and is left documented, but the
+overlay-triplet recipe above is simpler and should be preferred going forward.
+
+## Previous Session — Controller support
 Branch `Controller-support`. Added gamepad / joystick input via SDL (no new dep):
 - New `src/viewer/Controller.{h,cpp}` — `GameInput` wraps `SDL_GameController`
   (Xbox, auto-mapped) and falls back to raw `SDL_Joystick` for custom HIDs
@@ -84,7 +157,20 @@ architecture/roadmap/handoff first; updated tasks.md + decisions.md).
   to v2 (bytesPerPoint 22, classification attribute). `CLAUDE.md` `PackedPoint`
   corrected 20 -> 22 bytes.
 
-## Modified Files
+## Modified Files (this session — UI shell + static build)
+- `src/viewer/Jobs.h` (new)      — `JobQueue`/`ConvertJob` background conversion queue
+- `src/viewer/UiLog.h` (new)     — Console panel ring buffer
+- `src/common/Log.h`, `src/common/Log.cpp` — added `pf::setLogSink()`
+- `src/viewer/main.cpp`          — full shell rewrite (docking, menu/toolbar,
+  Properties/Jobs/Console/Performance docks, status bar, palette, shortcuts,
+  Preferences dialog, stereo-hides-UI, new hotkeys)
+- `CMakeLists.txt`               — ImGui FetchContent tag -> `v1.91.5-docking`
+- `triplets/x64-windows-static.cmake` (new) — overlay triplet, toolset pin
+- `CLAUDE.md`                    — stack/layout/run sections updated for the new shell
+- `docs/*.md` (all six)          — this handoff entry + architecture §7 +
+  decisions + roadmap/tasks updates
+
+## Modified Files (prior sessions)
 - `src/viewer/Camera.h`, `src/viewer/Camera.cpp`        — `screenRay()` (unproject pick ray)
 - `src/viewer/OctreeStore.h`, `src/viewer/OctreeStore.cpp` — `pickPoint()`, `readNodeInto()`, `purgeStale()`, frame-stamped requests
 - `src/viewer/main.cpp`                                  — measure state/overlay/UI, DPI scaling, purge call, frame-stamped `requestLoad`
@@ -107,21 +193,29 @@ architecture/roadmap/handoff first; updated tasks.md + decisions.md).
   a live cloud this session — pick accuracy/perf on a real octree is untested.
 
 ## Single-File Release Build
-`release/ViitorXPCViewer.exe` (6.2 MB) is a fully static, single-file viewer:
-zero non-system DLLs, shaders + icon embedded. See decisions.md ("Single-File
-Static Release") for the full recipe. Reproduce:
+A fully static, single-file `ViitorXPCViewer.exe` (~6.5 MB): zero non-system
+DLLs, shaders + icon embedded. See decisions.md ("Single-File Static Release")
+for the full history. **Current (simplest) recipe** — no Ninja/vcvars needed:
 
 ```powershell
-# 1. compile static deps (one-time, long): default-generator configure
 cmake -B build-static -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-      -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_HOST_TRIPLET=x64-windows-static
-# 2. configure + build with Ninja INSIDE the VS18 dev env (must match the
-#    toolset vcpkg used, else LNK2019 on __std_* STL symbols):
-#    run vcvars64.bat from VS18, put its Ninja on PATH, then:
+      -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_OVERLAY_TRIPLETS=C:/UnrealProject/PointForge/triplets
+cmake --build build-static --config Release   # -> build-static/Release/ViitorXPCViewer.exe
+```
+`triplets/x64-windows-static.cmake` pins `VCPKG_PLATFORM_TOOLSET_VERSION` to
+match whatever MSVC toolset the default "Visual Studio 17 2022" generator
+resolves to on this machine (currently 14.44) — check
+`grep CMAKE_GENERATOR_INSTANCE build-static/CMakeCache.txt` and the installed
+`VC/Tools/MSVC/<version>` folders if you re-provision the machine and this
+starts failing with LNK2019 on `__std_*` symbols again; bump the pin to match.
+
+Older fallback (still works, more steps — see decisions.md for why it was
+needed originally):
+```powershell
 cmake -B build-static-ninja -S . -G Ninja -DCMAKE_BUILD_TYPE=Release `
       -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
       -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_HOST_TRIPLET=x64-windows-static
-cmake --build build-static-ninja --target pfview   # -> ViitorXPCViewer.exe
+cmake --build build-static-ninja --target pfview   # run from inside a VS18 dev shell
 ```
 The dynamic build (`build/`, VS2022) still works for fast iteration.
 
@@ -129,11 +223,16 @@ New files: `src/viewer/EmbeddedShaders.h`, `src/viewer/EmbeddedImage.h`
 (generated from `shaders/` and `images/vx.bmp` — regenerate if those change).
 
 ## Next Recommended Task
-- **Eye-Dome Lighting (EDL)** post-process for depth perception (roadmap mid-term;
-  fullscreen pass, mirrors Axiom Present SSAO pattern), **or**
+- **Verify the new shell against a real conversion end-to-end**: enqueue a
+  real scan in the Convert dialog, confirm the Jobs panel progress/cancel,
+  status-bar pill, completion toast + auto-load, and Console log lines all
+  behave under an actual multi-minute conversion (only smoke-tested this
+  session — no real job was run through it), **or**
+- **Multi-select batch conversion** in the Convert dialog — the `JobQueue`
+  already supports N jobs, this is UI-only (file dialog multi-select loop
+  calling `jobs.enqueue()` per file), **or**
 - **On-disk cache purge**: a "Clear Cache" action for old `PointForgeCache_*`
-  converted-cloud dirs (the Converter "Cache" readout is still a 0 MB stub at
-  main.cpp's converter panel).
+  converted-cloud dirs (still a gap; predates this session).
 
 ## Note on scope
 This repo is the **desktop SDL2/OpenGL** PointForge. A separate **Unreal Engine

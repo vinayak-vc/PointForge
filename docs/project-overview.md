@@ -11,3 +11,5 @@ PointForge is an out-of-core octree point cloud converter and streaming viewer. 
 - Custom visualizations including True Color, Elevation gradients (Turbo map), and Solid Color rendering
 - Advanced clipping planes, stereo (SBS) mode, and camera features
 - Fast C++ core running efficiently across multiple threads for both rendering and conversion
+- Viewport-centric **docked UI shell** (menu bar, toolbar, dockable Properties/Jobs/Console/Performance panels, status bar) — conversion runs as background jobs, monitored via a status-bar pill and Jobs panel rather than blocking the viewer
+- Stereoscopic SBS mode hides all UI chrome (no menu/toolbar/HUD reaching either eye) for clean stereoscope viewing

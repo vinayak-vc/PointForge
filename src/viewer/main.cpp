@@ -1,11 +1,24 @@
 // pfview — PointForge streaming viewer (SDL2 + OpenGL 3.3 core + Dear ImGui).
+//
+// UI architecture (viewport-centric docked shell):
+//   menu bar + thin toolbar          constant-touch actions
+//   central viewport                 always visible (passthru dock node)
+//   right dock   "Properties"        collapsing sections, tool options append
+//   bottom dock  "Jobs|Console|Performance"  closed by default
+//   status bar                       mode/hints | hover XYZ | job pill | stats
+//   dialogs      Convert, Preferences, Shortcuts (F1), Command Palette (Ctrl+P)
+// Conversion runs as background jobs (viewer/Jobs.h); progress lives in the
+// Jobs panel + status-bar pill, never in a settings panel.
+// Stereoscopic SBS (F9) hides ALL UI so each eye sees only the cloud.
 #include <GL/glew.h>   // must precede any system GL header
 #include <SDL.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include "imgui.h"
+#include "imgui_internal.h"   // DockBuilder API (initial dock layout)
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 
@@ -20,6 +33,8 @@
 #include "viewer/SerialController.h"
 #include "viewer/EmbeddedShaders.h"
 #include "viewer/EmbeddedImage.h"
+#include "viewer/Jobs.h"
+#include "viewer/UiLog.h"
 #include "common/Log.h"
 #include "common/OctreeFormat.h"
 #include "common/FileDialog.h"
@@ -31,6 +46,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -75,7 +92,7 @@ static GLuint loadTextureBMP(SDL_RWops* rw, int freeRw) {
     if (!rw) return 0;
     SDL_Surface* surf = SDL_LoadBMP_RW(rw, freeRw);
     if (!surf) return 0;
-    
+
     SDL_Surface* formatted = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
     SDL_FreeSurface(surf);
     if (!formatted) return 0;
@@ -85,8 +102,8 @@ static GLuint loadTextureBMP(SDL_RWops* rw, int freeRw) {
     for (int i = 0; i < count; ++i) {
         Uint8 r, g, b, a;
         SDL_GetRGBA(pixels[i], formatted->format, &r, &g, &b, &a);
-        if (r == 255 && g == 0 && b == 255) { 
-            pixels[i] = SDL_MapRGBA(formatted->format, 255, 255, 255, 0); 
+        if (r == 255 && g == 0 && b == 255) {
+            pixels[i] = SDL_MapRGBA(formatted->format, 255, 255, 255, 0);
         }
     }
 
@@ -96,7 +113,7 @@ static GLuint loadTextureBMP(SDL_RWops* rw, int freeRw) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, formatted->w, formatted->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, formatted->pixels);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    
+
     SDL_FreeSurface(formatted);
     return tex;
 }
@@ -118,9 +135,83 @@ static bool saveScreenshotBMP(const char* path, int w, int h) {
     return ok;
 }
 
+// ---- UI helpers -------------------------------------------------------------
+enum ToolMode { TOOL_NAV = 0, TOOL_MEASURE = 1, TOOL_CLIP = 2 };
+
+static std::string baseName(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    return (slash == std::string::npos) ? path : path.substr(slash + 1);
+}
+
+static std::string prettyCount(uint64_t n) {
+    char b[32];
+    if (n >= 1000000000ull)      snprintf(b, sizeof(b), "%.2fB", n / 1e9);
+    else if (n >= 1000000ull)    snprintf(b, sizeof(b), "%.1fM", n / 1e6);
+    else if (n >= 1000ull)       snprintf(b, sizeof(b), "%.1fK", n / 1e3);
+    else                         snprintf(b, sizeof(b), "%llu", (unsigned long long)n);
+    return b;
+}
+
+static bool icontains(const std::string& hay, const std::string& needle) {
+    if (needle.empty()) return true;
+    auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        return s;
+    };
+    return lower(hay).find(lower(needle)) != std::string::npos;
+}
+
+struct Toast {
+    std::string text;
+    std::string openDir;   // non-empty -> show an [Open] button loading this octree
+    float       ttl = 6.0f;
+    bool        isError = false;
+};
+
+// Single source of truth for shortcut documentation: feeds the F1 cheat sheet.
+// (Menu accelerator strings and toolbar tooltips quote the same keys inline.)
+struct KeyBindInfo { const char* keys; const char* action; const char* category; };
+static const KeyBindInfo kKeyBinds[] = {
+    { "Ctrl+O",       "Open octree folder",              "Files" },
+    { "Ctrl+I",       "Convert a scan...",               "Files" },
+    { "F12",          "Screenshot",                      "Files" },
+    { "Drag & drop",  "Octree folder loads, scan file opens Convert", "Files" },
+    { "LMB drag",     "Orbit around pivot",              "Navigation" },
+    { "Double-click", "Focus pivot on point",            "Navigation" },
+    { "RMB drag",     "Free look",                       "Navigation" },
+    { "Wheel",        "Zoom to cursor",                  "Navigation" },
+    { "Ctrl+Wheel",   "Point size",                      "Navigation" },
+    { "WASD / Q E",   "Fly (Shift = fast)",              "Navigation" },
+    { "F",            "Frame all",                       "Navigation" },
+    { "1 / 3 / 7",    "Front / Side / Top view",         "Navigation" },
+    { "5",            "Orthographic toggle",             "Navigation" },
+    { "M",            "Measure tool",                    "Tools" },
+    { "C",            "Clip tool",                       "Tools" },
+    { "Esc",          "Exit tool / close popup",         "Tools" },
+    { "F1",           "Keyboard shortcuts",              "Interface" },
+    { "Ctrl+P",       "Command palette",                 "Interface" },
+    { "F3",           "Stats overlay",                   "Interface" },
+    { "F5 / Shift+Space", "Hide or show all UI",         "Interface" },
+    { "F9",           "Stereoscopic SBS (hides all UI)", "Interface" },
+    { "F11",          "Fullscreen",                      "Interface" },
+    { "Ctrl+,",       "Preferences",                     "Interface" },
+    { "Esc Esc",      "Quit",                            "Interface" },
+    { "Left stick",   "Move",                            "Controller" },
+    { "Right stick",  "Look (custom: hold LB + stick)",  "Controller" },
+    { "Triggers",     "Down / up",                       "Controller" },
+    { "A / Y / X",    "Frame / measure / screenshot",    "Controller" },
+    { "Start (or B)", "Toggle UI navigation mode",       "Controller" },
+};
+
 int main(int argc, char** argv) {
     std::string initialDir = "";
     if (argc >= 2) initialDir = argv[1];
+
+    // Mirror every pf::log() message into the Console panel's ring buffer.
+    pf::setLogSink([](pf::LogLevel level, const std::string& msg) {
+        pf::UiLogBuffer::instance().push(level, msg);
+    });
 
     // ---- SDL + GL context -------------------------------------------------
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
@@ -157,6 +248,13 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        // "Locked by default": panels only move when dragged by their title/tab,
+        // never by their body — protects novices from accidental tear-off.
+        io.ConfigWindowsMoveFromTitleBarOnly = true;
+    }
     ImGui_ImplSDL2_InitForOpenGL(window, gl);
     ImGui_ImplOpenGL3_Init("#version 330");
 
@@ -245,7 +343,7 @@ int main(int argc, char** argv) {
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_PROGRAM_POINT_SIZE);
 
-    // ---- tunables (ImGui) -------------------------------------------------
+    // ---- tunables (persisted in pfview_config.txt) -------------------------
     float pointSize   = 2.0f;
     float sseBudget   = 1.5f;   // pixels; smaller = more detail loaded
     int   gpuBudgetMB = 1024;
@@ -266,6 +364,7 @@ int main(int argc, char** argv) {
     bool  enableEDL = false;       // eye-dome lighting post-process
     float edlStrength = 1.0f;
     float edlRadius = 1.5f;
+    int   qualityIdx = 1;          // Low/Medium/High/Ultra preset (drives sse + GPU budget)
 
     // ---- controller (gamepad / custom joystick) ---------------------------
     GameInput pad;
@@ -284,8 +383,8 @@ int main(int argc, char** argv) {
     std::string serialPort    = "COM4";
     bool        serialNavRelease = false;       // pending ImGui activate-release
 
-    // ---- measurement (CPU point picking, multi-segment polyline) ----------
-    bool measureMode = false;
+    // ---- tools (Navigate / Measure / Clip) ---------------------------------
+    int toolMode = TOOL_NAV;
     std::vector<glm::dvec3> measurePts;   // picked vertices, world coords
     bool pendingPick = false;             // a click is waiting to be resolved this frame
     int  pickX = 0, pickY = 0;
@@ -303,13 +402,17 @@ int main(int argc, char** argv) {
     bool pendingZoom  = false; float zoomDelta = 0.0f; int zoomX = 0, zoomY = 0;
     bool frameAllReq  = false;       // 'F' / button -> fit whole cloud
 
-    // ---- HUD / help -------------------------------------------------------
-    bool showHelp = false;           // F1 toggles the controls overlay
-    bool showStatusBar = true;       // always-on bottom status strip
+    // ---- HUD / overlays ----------------------------------------------------
+    bool showHelp = false;           // F1 = keyboard shortcuts window
+    bool showStatusBar = true;       // bottom status strip (Window menu toggle)
+    bool showStatsOverlay = false;   // F3 = translucent viewport stats HUD
     bool pendingShot = false;        // F12 / button -> save a screenshot
     int  shotCounter = 0;
     glm::dvec3 hoverWorld(0.0);      // world point under the cursor this frame
     bool hoverValid = false;
+    float navHintT = 0.0f;           // first-load fading nav hint (seconds left)
+    float stereoHintT = 0.0f;        // "F9 to exit" hint when entering stereo
+    std::string loadedDir;           // currently loaded octree directory
 
     // ---- loading (recent files / auto-load) -------------------------------
     std::vector<std::string> recentDirs;   // most-recent first, capped
@@ -317,7 +420,7 @@ int main(int argc, char** argv) {
     auto addRecent = [&](const std::string& dir) {
         recentDirs.erase(std::remove(recentDirs.begin(), recentDirs.end(), dir), recentDirs.end());
         recentDirs.insert(recentDirs.begin(), dir);
-        if (recentDirs.size() > 8) recentDirs.resize(8);
+        if (recentDirs.size() > 10) recentDirs.resize(10);
     };
 
     auto resetSettings = [&]() {
@@ -332,6 +435,7 @@ int main(int argc, char** argv) {
         uiScale = autoUiScale;
         darkTheme = true;
         enableEDL = false; edlStrength = 1.0f; edlRadius = 1.5f;
+        qualityIdx = 1;
         padEnabled = true; pad.deadzone = 0.18f; padLookSens = 120.0f;
         padMoveSens = 1.0f; padInvertY = false;
     };
@@ -360,6 +464,7 @@ int main(int argc, char** argv) {
         fprintf(f, "enableEDL=%d\n", (int)enableEDL);
         fprintf(f, "edlStrength=%f\n", edlStrength);
         fprintf(f, "edlRadius=%f\n", edlRadius);
+        fprintf(f, "qualityIdx=%d\n", qualityIdx);
         fprintf(f, "autoLoadLast=%d\n", (int)autoLoadLast);
         fprintf(f, "padEnabled=%d\n", (int)padEnabled);
         fprintf(f, "padDeadzone=%f\n", pad.deadzone);
@@ -403,6 +508,7 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "enableEDL=%d", &i) == 1) enableEDL = (i != 0);
             else if (sscanf(line, "edlStrength=%f", &f1) == 1) edlStrength = f1;
             else if (sscanf(line, "edlRadius=%f", &f1) == 1) edlRadius = f1;
+            else if (sscanf(line, "qualityIdx=%d", &i) == 1) qualityIdx = i;
             else if (sscanf(line, "autoLoadLast=%d", &i) == 1) autoLoadLast = (i != 0);
             else if (sscanf(line, "padEnabled=%d", &i) == 1) padEnabled = (i != 0);
             else if (sscanf(line, "padDeadzone=%f", &f1) == 1) pad.deadzone = f1;
@@ -426,7 +532,7 @@ int main(int argc, char** argv) {
             else if (strncmp(line, "recent=", 7) == 0) {
                 std::string v = line + 7;
                 while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
-                if (!v.empty() && recentDirs.size() < 8) recentDirs.push_back(v);
+                if (!v.empty() && recentDirs.size() < 10) recentDirs.push_back(v);
             }
         }
         fclose(f);
@@ -436,6 +542,7 @@ int main(int argc, char** argv) {
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
+    if (stereoSBS) stereoHintT = 5.0f;   // booted straight into stereo -> show the exit hint
 
     // Load an octree directory, reset view, record it as recent.
     auto loadOctree = [&](const std::string& dir) -> bool {
@@ -443,9 +550,12 @@ int main(int argc, char** argv) {
         renderer.clear();
         if (store.load(dir)) {
             octreeLoaded = true;
+            loadedDir = dir;
             setupCamera();
             addRecent(dir);
             saveSettings();
+            navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
+            SDL_SetWindowTitle(window, (baseName(dir) + " - ViitorX PointCloud Viewer").c_str());
 #ifdef _WIN32
             MessageBeep(MB_ICONINFORMATION);
 #endif
@@ -474,24 +584,123 @@ int main(int argc, char** argv) {
     bool mouseLook = false;
     uint64_t frame = 0;
     Uint64 prevTicks = SDL_GetPerformanceCounter();
-    
-    std::string convInput = "";
-    std::string convOutput = "";
-    int presetIdx = 1;
-    std::atomic<bool> isConverting(false);
-    std::atomic<bool> convertDone(false);
-    std::atomic<bool> convertSuccess(false);
-    std::atomic<bool> cancelConvert(false);
-    std::thread convertThread;
-    
-    std::atomic<float> convertProgress(0.0f);
-    std::mutex convertStatusMutex;
-    std::string convertStatus = "";
-    
+
+    // ---- background conversion jobs ----------------------------------------
+    JobQueue jobs;
+    std::string convInput;             // Convert dialog: source scan
+    std::string convOutput;            // Convert dialog: output octree dir
+    int  convPreset = 1;               // 0 Draft, 1 Balanced, 2 High, 3 Custom
+    bool convLoadWhenDone = true;
     pf::IndexOptions customOpts;
-    
-    bool showUI = true;
+
+    // ---- UI state -----------------------------------------------------------
+    bool showUI = true;                // F5 / Shift+Space zen toggle (hides everything)
+    bool showProperties = true;
+    bool showJobsPanel = false;        // bottom dock tabs start closed
+    bool showConsole = false;
+    bool showPerf = false;
+    bool showConvertDialog = false;
+    bool showPrefs = false;
+    bool showPalette = false;
+    bool showWelcomeOverride = false;  // View > Welcome Screen while a cloud is loaded
+    bool firstJobRevealed = false;     // first-ever job auto-opens the Jobs panel once
+    bool resetDockLayout = false;      // Window > Reset Layout
+    bool aboutOpenReq = false;
+    std::vector<Toast> toasts;
+    char paletteBuf[96] = "";
+    char shortcutFilter[64] = "";
+    bool logShowDebug = false, logShowInfo = true, logShowWarn = true, logShowError = true;
+    bool logAutoScroll = true;
+    float fpsHist[150] = {};
+    int   fpsHistIdx = 0;
     Uint32 lastEscapeTime = 0;
+
+    auto addToast = [&](const std::string& text, const std::string& openDir = "",
+                        bool isError = false) {
+        Toast t; t.text = text; t.openDir = openDir; t.isError = isError;
+        t.ttl = isError ? 10.0f : 6.0f;
+        toasts.push_back(std::move(t));
+        if (toasts.size() > 5) toasts.erase(toasts.begin());
+    };
+
+    auto applyQualityPreset = [&](int idx) {
+        switch (idx) {
+            case 0: sseBudget = 4.0f; gpuBudgetMB = 512;  break;
+            case 1: sseBudget = 2.0f; gpuBudgetMB = 1024; break;
+            case 2: sseBudget = 1.0f; gpuBudgetMB = 2048; break;
+            case 3: sseBudget = 0.5f; gpuBudgetMB = 4096; break;
+        }
+    };
+
+    auto applyConvertPreset = [&](int idx) {
+        switch (idx) {
+            case 0: // Draft — fastest, coarse LOD
+                customOpts.targetLeafSize = 100000; customOpts.gridDepth = 2;
+                customOpts.maxDepth = 20; customOpts.flushBudget = 16777216ull;
+                customOpts.compress = false;
+                break;
+            case 1: // Balanced — recommended
+                customOpts.targetLeafSize = 50000; customOpts.gridDepth = 3;
+                customOpts.maxDepth = 24; customOpts.flushBudget = 33554432ull;
+                customOpts.compress = true;
+                break;
+            case 2: // High — best close-up detail, slower
+                customOpts.targetLeafSize = 20000; customOpts.gridDepth = 4;
+                customOpts.maxDepth = 28; customOpts.flushBudget = 67108864ull;
+                customOpts.compress = true;
+                break;
+        }
+        customOpts.rootSpacing = 0.0;
+    };
+    applyConvertPreset(convPreset);
+
+    // Open the Convert dialog, optionally pre-filled with a source file.
+    auto openConvertDialog = [&](const std::string& sourceFile) {
+        if (!sourceFile.empty()) {
+            convInput = sourceFile;
+            std::filesystem::path p(sourceFile);
+            convOutput = (p.parent_path() / (p.stem().string() + "_octree")).string();
+        }
+        showConvertDialog = true;
+    };
+
+    auto browseAndLoad = [&]() {
+        std::string folder = pf::openFolderDialog();
+        if (!folder.empty()) loadOctree(folder);
+    };
+
+    auto enqueueConvert = [&]() {
+        if (convInput.empty() || convOutput.empty()) return;
+        jobs.enqueue(convInput, convOutput, customOpts, convLoadWhenDone);
+        addToast("Queued: " + baseName(convInput));
+        if (!firstJobRevealed) { firstJobRevealed = true; showJobsPanel = true; }
+        showConvertDialog = false;
+    };
+
+    auto camPresetTop = [&]() {
+        cam.yaw = -90; cam.pitch = 89;
+        cam.position = store.cubeCenter() + glm::dvec3(0, 0, store.cube(store.rootIndex()).size * 2);
+    };
+    auto camPresetFront = [&]() {
+        cam.yaw = -90; cam.pitch = 0;
+        cam.position = store.cubeCenter() + glm::dvec3(0, -store.cube(store.rootIndex()).size * 2, 0);
+    };
+    auto camPresetSide = [&]() {
+        cam.yaw = 0; cam.pitch = 0;
+        cam.position = store.cubeCenter() + glm::dvec3(store.cube(store.rootIndex()).size * 2, 0, 0);
+    };
+
+    auto toggleFullscreen = [&]() {
+        Uint32 flags = SDL_GetWindowFlags(window);
+        if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) SDL_SetWindowFullscreen(window, 0);
+        else SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    };
+
+    auto toggleStereo = [&]() {
+        stereoSBS = !stereoSBS;
+        if (stereoSBS) stereoHintT = 5.0f;   // teach the exit key
+        saveSettings();
+    };
 
     while (running) {
         // ---- timing -------------------------------------------------------
@@ -500,6 +709,8 @@ int main(int argc, char** argv) {
         if (dt > 0.1f) dt = 0.1f;
         prevTicks = now;
         ++frame;
+        fpsHist[fpsHistIdx] = dt > 0 ? 1.0f / dt : 0.0f;
+        fpsHistIdx = (fpsHistIdx + 1) % 150;
 
         // ---- events -------------------------------------------------------
         SDL_Event e;
@@ -512,16 +723,15 @@ int main(int argc, char** argv) {
                 SDL_free(e.drop.file);
                 std::error_code ec;
                 if (std::filesystem::is_directory(dropFile, ec)) {
-                    loadOctree(dropFile);
+                    loadOctree(dropFile);           // converted octree -> open it
                 } else if (std::filesystem::is_regular_file(dropFile, ec)) {
-                    convInput = dropFile;
-                    convOutput = "";
+                    openConvertDialog(dropFile);    // raw scan -> Convert, pre-filled
                 }
             } else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_RESIZED) {
                 winW = e.window.data1; winH = e.window.data2;
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 if (octreeLoaded && !ImGui::GetIO().WantCaptureMouse) {
-                    if (measureMode) {
+                    if (toolMode == TOOL_MEASURE) {
                         pendingPick = true; pickX = e.button.x; pickY = e.button.y;
                     } else {
                         orbitDrag = true;                       // LMB drag = orbit
@@ -557,27 +767,59 @@ int main(int argc, char** argv) {
                     }
                 }
             } else if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_F5) {
+                const bool ctrl   = (SDL_GetModState() & KMOD_CTRL) != 0;
+                const bool shift  = (SDL_GetModState() & KMOD_SHIFT) != 0;
+                const bool typing = ImGui::GetIO().WantCaptureKeyboard;
+                const SDL_Keycode k = e.key.keysym.sym;
+                if (k == SDLK_F5) {
                     showUI = !showUI;
-                } else if (e.key.keysym.sym == SDLK_F12) {
+                } else if (k == SDLK_F12) {
                     pendingShot = true;                         // F12 = screenshot
-                } else if (e.key.keysym.sym == SDLK_F1) {
-                    showHelp = !showHelp;                       // F1 = controls help
-                } else if (e.key.keysym.sym == SDLK_f) {
+                } else if (k == SDLK_F1) {
+                    showHelp = !showHelp;                       // F1 = shortcuts
+                } else if (k == SDLK_F3) {
+                    showStatsOverlay = !showStatsOverlay;       // F3 = stats HUD
+                } else if (k == SDLK_F9) {
+                    toggleStereo();                             // F9 = SBS, no UI
+                } else if (k == SDLK_F11) {
+                    toggleFullscreen();
+                } else if (ctrl && k == SDLK_o) {
+                    browseAndLoad();
+                } else if (ctrl && k == SDLK_i) {
+                    openConvertDialog("");
+                } else if (ctrl && k == SDLK_p) {
+                    showPalette = !showPalette;
+                    paletteBuf[0] = 0;
+                } else if (ctrl && k == SDLK_COMMA) {
+                    showPrefs = true;
+                } else if (!typing && shift && k == SDLK_SPACE) {
+                    showUI = !showUI;                           // zen mode
+                } else if (!typing && k == SDLK_f) {
                     frameAllReq = true;                         // 'F' = frame all
-                } else if (e.key.keysym.sym == SDLK_F11) {
-                    Uint32 flags = SDL_GetWindowFlags(window);
-                    if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
-                        SDL_SetWindowFullscreen(window, 0);
-                    } else {
-                        SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+                } else if (!typing && k == SDLK_m && octreeLoaded) {
+                    toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                } else if (!typing && k == SDLK_c && octreeLoaded) {
+                    toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
+                } else if (!typing && octreeLoaded && k == SDLK_1) {
+                    camPresetFront();
+                } else if (!typing && octreeLoaded && k == SDLK_3) {
+                    camPresetSide();
+                } else if (!typing && octreeLoaded && k == SDLK_7) {
+                    camPresetTop();
+                } else if (!typing && octreeLoaded && k == SDLK_5) {
+                    cam.isOrtho = !cam.isOrtho;
+                } else if (k == SDLK_ESCAPE) {
+                    if (stereoSBS) {
+                        stereoSBS = false; saveSettings();      // Esc leaves stereo first
+                    } else if (showPalette) {
+                        showPalette = false;
+                    } else if (!typing && toolMode != TOOL_NAV) {
+                        toolMode = TOOL_NAV;                    // Esc exits the active tool
+                    } else if (!typing) {
+                        Uint32 nowTicks = SDL_GetTicks();
+                        if (nowTicks - lastEscapeTime < 500) running = false;
+                        lastEscapeTime = nowTicks;
                     }
-                } else if (e.key.keysym.sym == SDLK_ESCAPE) {
-                    Uint32 nowTicks = SDL_GetTicks();
-                    if (nowTicks - lastEscapeTime < 500) {
-                        running = false;
-                    }
-                    lastEscapeTime = nowTicks;
                 }
             }
         }
@@ -588,14 +830,14 @@ int main(int argc, char** argv) {
             float speed = cam.moveSpeed * dt * (ks[SDL_SCANCODE_LSHIFT] ? 5.0f : 1.0f) * camSpeedMultiplier;
             glm::vec3 fwd = cam.front(), rgt = cam.right();
             glm::vec3 moveDir(0.0f);
-            
+
             if (ks[SDL_SCANCODE_W]) moveDir += fwd;
             if (ks[SDL_SCANCODE_S]) moveDir -= fwd;
             if (ks[SDL_SCANCODE_D]) moveDir += rgt;
             if (ks[SDL_SCANCODE_A]) moveDir -= rgt;
             if (ks[SDL_SCANCODE_E]) moveDir += glm::vec3(0, 0, 1); // E is up (world Z-up)
             if (ks[SDL_SCANCODE_Q]) moveDir -= glm::vec3(0, 0, 1); // Q is down
-            
+
             if (glm::length(moveDir) > 0.0f) {
                 moveDir = glm::normalize(moveDir);
                 cam.position += moveDir * speed;
@@ -637,7 +879,8 @@ int main(int argc, char** argv) {
 
                 // Action buttons.
                 if (pad.pressed(PAD_A)) frameAllReq = true;          // A = frame all
-                if (pad.pressed(PAD_Y)) measureMode = !measureMode;  // Y = toggle measure
+                if (pad.pressed(PAD_Y))                              // Y = toggle measure
+                    toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
                 if (pad.pressed(PAD_X)) pendingShot = true;          // X = screenshot
                 if (pad.pressed(PAD_BACK)) showUI = !showUI;         // Back = toggle UI
             }
@@ -681,7 +924,7 @@ int main(int argc, char** argv) {
             }
         }
 
-                // ---- absorb finished async loads ---------------------------------
+        // ---- absorb finished async loads ---------------------------------
         if (octreeLoaded) {
             for (int i = 0; i < uploadsPerFrame; ++i) {
                 LoadResult res;
@@ -706,14 +949,14 @@ int main(int argc, char** argv) {
 
             auto renderPass = [&](const glm::vec3& eyeOffset, int vpX, int vpY, int vpW, int vpH) {
                 glViewport(vpX, vpY, vpW, vpH);
-                
+
                 cam.aspect = (vpH > 0) ? (float)vpW / (float)vpH : 1.0f;
                 glm::vec3 originalPos = cam.position;
                 cam.position += eyeOffset;
-                
+
                 glm::mat4 vp = cam.viewProj();
                 Frustum frustum = extractFrustum(vp);
-                
+
                 if (stereoSBS) {
                     // Shift the view projection horizontally to create convergence at focalDistance
                     // This is a simple off-axis projection approximation by skewing the frustum
@@ -724,7 +967,7 @@ int main(int argc, char** argv) {
                     vp = vp * shear;
                     frustum = extractFrustum(vp);
                 }
-                
+
                 const glm::dvec3 center = store.cubeCenter();
                 const double ssFactor = (vpH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
 
@@ -734,14 +977,14 @@ int main(int argc, char** argv) {
                 shader.setFloat("uAttenuation", attenuate ? 1.0f : 0.0f);
                 shader.setFloat("uViewportH", (float)vpH);
                 shader.setInt("uRound", roundPoints ? 1 : 0);
-                
+
                 shader.setInt("uColorMode", colorMode);
                 shader.setVec3("uSolidColor", solidColor[0], solidColor[1], solidColor[2]);
-                
+
                 float minZ = (float)store.cube(store.rootIndex()).min[2] - (float)center.z;
                 float maxZ = minZ + (float)store.cube(store.rootIndex()).size;
                 shader.setVec2("uZBounds", minZ, maxZ);
-                
+
                 if (enableClipping) {
                     shader.setVec3("uClipMin", clipMin[0], clipMin[1], clipMin[2]);
                     shader.setVec3("uClipMax", clipMax[0], clipMax[1], clipMax[2]);
@@ -787,11 +1030,11 @@ int main(int argc, char** argv) {
                 glm::vec3 rightVec = cam.right();
                 glm::vec3 leftOffset = -rightVec * (eyeSeparation * 0.5f);
                 glm::vec3 rightOffset = rightVec * (eyeSeparation * 0.5f);
-                
+
                 int halfW = winW / 2;
                 renderPass(leftOffset, 0, 0, halfW, winH);
                 renderPass(rightOffset, halfW, 0, winW - halfW, winH);
-                
+
                 visibleNodes = totalVisibleNodes / 2;
                 drawnNodes = totalDrawnNodes / 2;
                 drawnPoints = totalDrawnPoints / 2;
@@ -894,23 +1137,27 @@ int main(int argc, char** argv) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
 
-
-
-                // ---- ImGui overlay ------------------------------------------------
+        // ---- ImGui frame ---------------------------------------------------
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        if (watermarkTex) {
-            float wmSize = 80.0f; // size of the watermark
-            ImVec2 p_min = ImVec2(winW - wmSize - 20, 20); // 20px padding from top right
+        // Stereoscopic SBS: the viewer is being looked at through a stereoscope —
+        // no chrome may reach the screen. All UI is suppressed; hotkeys still work.
+        const bool uiVisible = showUI && !stereoSBS;
+        const float S = uiScale;   // multiplier for explicit pixel sizes
+
+        // ---- background watermark (mono view only; would break stereo) ------
+        if (watermarkTex && !stereoSBS) {
+            float wmSize = 80.0f;
+            ImVec2 p_min = ImVec2(winW - wmSize - 20, 20);
             ImVec2 p_max = ImVec2(p_min.x + wmSize, p_min.y + wmSize);
             ImU32 col = IM_COL32(255, 255, 255, 25); // ~10% opacity
             ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min, p_max, ImVec2(0,0), ImVec2(1,1), col);
         }
 
         // ---- measurement overlay (project polyline to screen) ---------------
-        if (octreeLoaded && (!measurePts.empty() || measureMode)) {
+        if (octreeLoaded && !stereoSBS && (!measurePts.empty() || toolMode == TOOL_MEASURE)) {
             cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
             glm::mat4 mvp = cam.viewProj();
             glm::dvec3 ctr = store.cubeCenter();
@@ -944,14 +1191,14 @@ int main(int argc, char** argv) {
                 prev = s; prevOk = ok;
             }
             // Snap preview: marker at the surface point under the cursor.
-            if (measureMode && hoverValid) {
+            if (toolMode == TOOL_MEASURE && hoverValid) {
                 ImVec2 s;
                 if (project(hoverWorld, s)) dl->AddCircle(s, 7.0f, cSnap, 0, 2.0f);
             }
         }
 
         // ---- colour legend (elevation / intensity) --------------------------
-        if (octreeLoaded && (colorMode == 1 || colorMode == 3)) {
+        if (octreeLoaded && !stereoSBS && (colorMode == 1 || colorMode == 3)) {
             ImDrawList* dl = ImGui::GetForegroundDrawList();
             float bx = (float)winW - 38.0f, by = 120.0f, bh = 180.0f, bw = 16.0f;
             auto turboCol = [](float v) {
@@ -986,474 +1233,950 @@ int main(int argc, char** argv) {
             dl->AddText(ImVec2(bx + bw + 4, by + bh - 6), tc, lo);
         }
 
-        if (convertDone) {
-            convertDone = false;
-            if (convertThread.joinable()) convertThread.join();
+        // ---- finished-job handling (runs even with UI hidden) ---------------
+        for (auto& job : jobs.jobs()) {
+            if (!job->finished() || job->notified) continue;
+            job->notified = true;
 #ifdef _WIN32
             MessageBeep(MB_ICONINFORMATION);
 #endif
-            if (convertSuccess && !convOutput.empty()) {
-                loadOctree(convOutput);
-            }
-        }
-
-        if (showUI) {
-            ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(350, octreeLoaded ? 500.0f : 350.0f), ImGuiCond_FirstUseEver);
-            ImGui::Begin("PointForge Dashboard");
-
-        // ---- top toolbar (common actions) --------------------------------
-        if (ImGui::Button("Open")) {
-            std::string folder = pf::openFolderDialog();
-            if (!folder.empty()) loadOctree(folder);
-        }
-        ImGui::SameLine(); if (ImGui::Button("Frame")) frameAll();
-        ImGui::SameLine(); ImGui::Checkbox("Measure##toolbar", &measureMode);
-        ImGui::SameLine(); if (ImGui::Button("Shot")) pendingShot = true;
-        ImGui::SameLine(); if (ImGui::Button("Help")) showHelp = !showHelp;
-        ImGui::Separator();
-
-        if (ImGui::CollapsingHeader("Viewer", ImGuiTreeNodeFlags_DefaultOpen)) {
-            if (ImGui::Button("Browse & Load Octree Folder...")) {
-                std::string folder = pf::openFolderDialog();
-                if (!folder.empty()) loadOctree(folder);
-            }
-            // Recent clouds + auto-load.
-            if (!recentDirs.empty()) {
-                ImGui::SameLine();
-                if (ImGui::BeginCombo("##recent", "Recent")) {
-                    for (size_t i = 0; i < recentDirs.size(); ++i) {
-                        if (ImGui::Selectable(recentDirs[i].c_str())) loadOctree(recentDirs[i]);
+            switch (job->state.load()) {
+                case ConvertJob::State::Succeeded:
+                    if (job->loadWhenDone) {
+                        loadOctree(job->output);
+                        addToast("Converted and loaded: " + job->name);
+                    } else {
+                        addToast("Converted: " + job->name, job->output);
                     }
-                    ImGui::EndCombo();
+                    break;
+                case ConvertJob::State::Failed:
+                    addToast("Conversion FAILED: " + job->name + " - see Console", "", true);
+                    break;
+                case ConvertJob::State::Canceled:
+                    addToast("Conversion canceled: " + job->name);
+                    break;
+                default: break;
+            }
+        }
+
+        // =====================================================================
+        //                              UI SHELL
+        // =====================================================================
+        if (uiVisible) {
+            ImGuiViewport* vp = ImGui::GetMainViewport();
+            const float toolbarH = ImGui::GetFrameHeight() + 12.0f;
+            const float statusH  = showStatusBar ? ImGui::GetTextLineHeightWithSpacing() + 8.0f : 0.0f;
+
+            // ---- menu bar ---------------------------------------------------
+            bool doResetSettings = false;
+            if (ImGui::BeginMainMenuBar()) {
+                if (ImGui::BeginMenu("File")) {
+                    if (ImGui::MenuItem("Open Octree Folder...", "Ctrl+O")) browseAndLoad();
+                    if (ImGui::BeginMenu("Open Recent", !recentDirs.empty())) {
+                        for (size_t i = 0; i < recentDirs.size(); ++i) {
+                            ImGui::PushID((int)i);
+                            if (ImGui::MenuItem(baseName(recentDirs[i]).c_str())) loadOctree(recentDirs[i]);
+                            ImGui::SetItemTooltip("%s", recentDirs[i].c_str());
+                            ImGui::PopID();
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Clear Recent")) { recentDirs.clear(); saveSettings(); }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Convert a Scan...", "Ctrl+I")) openConvertDialog("");
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Screenshot", "F12")) pendingShot = true;
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Exit", "Esc Esc")) running = false;
+                    ImGui::EndMenu();
                 }
-            }
-            if (ImGui::Checkbox("Auto-load last on startup", &autoLoadLast)) saveSettings();
-            ImGui::Separator();
-            if (ImGui::SliderFloat("UI Scale", &uiScale, 0.5f, 3.0f, "%.2fx")) {
-                uiScale = std::clamp(uiScale, 0.5f, 4.0f);
-                applyUiScale(uiScale);
-                saveSettings();
-            }
-            if (octreeLoaded) {
-                ImGui::Separator();
-                ImGui::Text("Cloud: %llu pts, %u nodes", (unsigned long long)store.meta().pointCount, store.meta().nodeCount);
-                ImGui::Text("Visible nodes:  %zu", visibleNodes);
-                ImGui::Text("Drawn nodes:    %zu", drawnNodes);
-                ImGui::Text("Points on GPU:  %llu", (unsigned long long)renderer.pointsOnGpu());
-                ImGui::Text("Drawn points:   %llu", (unsigned long long)drawnPoints);
-                ImGui::Text("GPU resident:   %.1f MB", renderer.residentBytes() / (1024.0 * 1024.0));
-                ImGui::Text("Load queue:     %zu", store.pendingRequests());
-                ImGui::Text("FPS:            %.1f", dt > 0 ? 1.0f / dt : 0.0f);
-                ImGui::Separator();
-                bool settingsChanged = false;
-
-                if (ImGui::Button("Reset to Defaults")) ImGui::OpenPopup("Reset?");
-                if (ImGui::BeginPopupModal("Reset?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                    ImGui::TextUnformatted("Reset all viewer settings to defaults?");
-                    if (ImGui::Button("Yes", ImVec2(80, 0))) {
-                        resetSettings();
-                        applyUiScale(uiScale);
-                        if (octreeLoaded) setupCamera();
-                        saveSettings();
-                        ImGui::CloseCurrentPopup();
+                if (ImGui::BeginMenu("Edit")) {
+                    if (ImGui::MenuItem("Preferences...", "Ctrl+,")) showPrefs = true;
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("View")) {
+                    if (ImGui::MenuItem("Frame All", "F", false, octreeLoaded)) frameAllReq = true;
+                    if (ImGui::MenuItem("Reset View", nullptr, false, octreeLoaded)) setupCamera();
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Front", "1", false, octreeLoaded)) camPresetFront();
+                    if (ImGui::MenuItem("Side",  "3", false, octreeLoaded)) camPresetSide();
+                    if (ImGui::MenuItem("Top",   "7", false, octreeLoaded)) camPresetTop();
+                    if (ImGui::MenuItem("Orthographic", "5", cam.isOrtho, octreeLoaded)) {
+                        cam.isOrtho = !cam.isOrtho; saveSettings();
                     }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+                    ImGui::Separator();
+                    if (ImGui::BeginMenu("Color Mode")) {
+                        const char* modes[] = { "True Color", "Elevation", "Solid Color", "Intensity", "Classification" };
+                        for (int i = 0; i < 5; ++i)
+                            if (ImGui::MenuItem(modes[i], nullptr, colorMode == i)) { colorMode = i; saveSettings(); }
+                        ImGui::EndMenu();
+                    }
+                    if (ImGui::MenuItem("Eye-Dome Lighting", nullptr, enableEDL)) { enableEDL = !enableEDL; saveSettings(); }
+                    if (ImGui::MenuItem("Stereoscopic (SBS)", "F9", stereoSBS)) toggleStereo();
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Stats Overlay", "F3", showStatsOverlay)) showStatsOverlay = !showStatsOverlay;
+                    if (ImGui::MenuItem("Fullscreen", "F11")) toggleFullscreen();
+                    if (ImGui::MenuItem("Hide UI (zen)", "F5")) showUI = false;
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Welcome Screen", nullptr, showWelcomeOverride)) showWelcomeOverride = !showWelcomeOverride;
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Tools")) {
+                    if (ImGui::MenuItem("Navigate", "Esc", toolMode == TOOL_NAV)) toolMode = TOOL_NAV;
+                    if (ImGui::MenuItem("Measure", "M", toolMode == TOOL_MEASURE, octreeLoaded))
+                        toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                    if (ImGui::MenuItem("Clip", "C", toolMode == TOOL_CLIP, octreeLoaded))
+                        toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Convert a Scan...", "Ctrl+I")) openConvertDialog("");
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Window")) {
+                    ImGui::MenuItem("Properties", nullptr, &showProperties);
+                    ImGui::MenuItem("Jobs", nullptr, &showJobsPanel);
+                    {
+                        int issues = pf::UiLogBuffer::instance().unseenIssues.load();
+                        char consoleLabel[48];
+                        if (issues > 0) snprintf(consoleLabel, sizeof(consoleLabel), "Console (%d!)", issues);
+                        else            snprintf(consoleLabel, sizeof(consoleLabel), "Console");
+                        ImGui::MenuItem(consoleLabel, nullptr, &showConsole);
+                    }
+                    ImGui::MenuItem("Performance", nullptr, &showPerf);
+                    ImGui::Separator();
+                    ImGui::MenuItem("Status Bar", nullptr, &showStatusBar);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Reset Layout")) { resetDockLayout = true; showProperties = true; }
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Help")) {
+                    if (ImGui::MenuItem("Keyboard Shortcuts", "F1")) showHelp = true;
+                    if (ImGui::MenuItem("Command Palette", "Ctrl+P")) { showPalette = true; paletteBuf[0] = 0; }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("About PointForge")) aboutOpenReq = true;
+                    ImGui::EndMenu();
+                }
+                ImGui::EndMainMenuBar();
+            }
+
+            // ---- toolbar (constant-touch actions only) ----------------------
+            ImGui::SetNextWindowPos(vp->WorkPos);
+            ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, toolbarH));
+            ImGuiWindowFlags tbFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                       ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 6));
+            if (ImGui::Begin("##toolbar", nullptr, tbFlags)) {
+                if (ImGui::Button("Open")) browseAndLoad();
+                ImGui::SetItemTooltip("Open a converted octree folder — Ctrl+O");
+                ImGui::SameLine(0.0f, 1.0f);
+                if (ImGui::ArrowButton("##openRecent", ImGuiDir_Down)) ImGui::OpenPopup("##recentPopup");
+                ImGui::SetItemTooltip("Recent clouds");
+                if (ImGui::BeginPopup("##recentPopup")) {
+                    if (recentDirs.empty()) ImGui::TextDisabled("No recent clouds");
+                    for (size_t i = 0; i < recentDirs.size(); ++i) {
+                        ImGui::PushID((int)i);
+                        if (ImGui::Selectable(baseName(recentDirs[i]).c_str())) loadOctree(recentDirs[i]);
+                        ImGui::SetItemTooltip("%s", recentDirs[i].c_str());
+                        ImGui::PopID();
+                    }
                     ImGui::EndPopup();
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Convert...")) openConvertDialog("");
+                ImGui::SetItemTooltip("Convert LAS/LAZ/E57/PLY/PTS/XYZ to a streamable octree — Ctrl+I");
 
-                ImGui::Separator();
-                if (ImGui::TreeNode("Rendering")) {
-                    static int qualityIdx = 1;
-                    const char* quals[] = { "Low", "Medium", "High", "Ultra" };
-                    if (ImGui::Combo("Quality", &qualityIdx, quals, IM_ARRAYSIZE(quals))) {
-                        switch (qualityIdx) {
-                            case 0: sseBudget = 4.0f; gpuBudgetMB = 512;  break;
-                            case 1: sseBudget = 2.0f; gpuBudgetMB = 1024; break;
-                            case 2: sseBudget = 1.0f; gpuBudgetMB = 2048; break;
-                            case 3: sseBudget = 0.5f; gpuBudgetMB = 4096; break;
-                        }
-                        settingsChanged = true;
-                    }
-                    ImGui::SetItemTooltip("One-knob preset for LOD detail + GPU budget.");
-                    if (ImGui::SliderFloat("Point size", &pointSize, 1.0f, 16.0f)) settingsChanged = true;
-                    ImGui::SetItemTooltip("Splat size in pixels. Also: Ctrl+mouse wheel.");
-                    if (ImGui::SliderFloat("LOD budget (px)", &sseBudget, 0.3f, 8.0f)) settingsChanged = true;
-                    ImGui::SetItemTooltip("Screen-space error target. Lower = more detail loaded (slower).");
-                    if (ImGui::SliderInt("GPU budget (MB)", &gpuBudgetMB, 128, 8192)) settingsChanged = true;
-                    ImGui::SetItemTooltip("Max GPU memory for resident points before LRU eviction.");
-                    if (ImGui::SliderInt("Uploads/frame", &uploadsPerFrame, 1, 256)) settingsChanged = true;
-                    ImGui::SetItemTooltip("Node VBO uploads per frame. Higher = faster streaming, more hitches.");
-                    if (ImGui::Checkbox("Round points", &roundPoints)) settingsChanged = true;
+                ImGui::SameLine(); ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+
+                ImGui::BeginDisabled(!octreeLoaded);
+                if (ImGui::Button("Frame")) frameAllReq = true;
+                ImGui::SetItemTooltip("Frame the whole cloud — F");
+
+                ImGui::SameLine(); ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+
+                // Tool strip: mutually exclusive viewport modes.
+                auto toolButton = [&](const char* label, int mode, const char* tip) {
+                    bool active = (toolMode == mode);
+                    if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                    if (ImGui::Button(label)) toolMode = (active && mode != TOOL_NAV) ? TOOL_NAV : mode;
+                    if (active) ImGui::PopStyleColor();
+                    ImGui::SetItemTooltip("%s", tip);
                     ImGui::SameLine();
-                    if (ImGui::Checkbox("Attenuate", &attenuate)) settingsChanged = true;
-                    if (ImGui::ColorEdit3("Background", clearColor)) settingsChanged = true;
-                    
-                    const char* modes[] = { "True Color", "Elevation", "Solid Color", "Intensity", "Classification" };
-                    if (ImGui::Combo("Color Mode", &colorMode, modes, IM_ARRAYSIZE(modes))) settingsChanged = true;
-                    ImGui::SetItemTooltip("How points are coloured. Intensity/Classification use the LAS attributes.");
-                    if (colorMode == 2) {
-                        if (ImGui::ColorEdit3("Solid Color", solidColor)) settingsChanged = true;
-                    }
-                    bool lightTheme = !darkTheme;
-                    if (ImGui::Checkbox("Light theme", &lightTheme)) {
-                        darkTheme = !lightTheme;
-                        applyUiScale(uiScale);   // re-apply colours + scale
-                        settingsChanged = true;
-                    }
+                };
+                toolButton("Nav", TOOL_NAV, "Navigate (orbit/fly) — Esc");
+                toolButton("Measure", TOOL_MEASURE, "Measure distances: LMB picks points — M");
+                toolButton("Clip", TOOL_CLIP, "Clip box: adjust planes in Properties — C");
 
-                    if (ImGui::Checkbox("Stereoscopic (SBS)", &stereoSBS)) settingsChanged = true;
-                    if (stereoSBS) {
-                        if (ImGui::SliderFloat("Eye Separation (IPD)", &eyeSeparation, 0.01f, 0.2f)) settingsChanged = true;
-                        if (ImGui::SliderFloat("Focal Distance", &focalDistance, 1.0f, 100.0f)) settingsChanged = true;
-                    }
+                ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
 
-                    if (ImGui::Checkbox("Eye-Dome Lighting", &enableEDL)) settingsChanged = true;
-                    ImGui::SetItemTooltip("Shades depth edges for much better depth perception on uncoloured clouds.");
-                    if (enableEDL) {
-                        if (ImGui::SliderFloat("EDL strength", &edlStrength, 0.1f, 5.0f)) settingsChanged = true;
-                        if (ImGui::SliderFloat("EDL radius", &edlRadius, 0.5f, 4.0f)) settingsChanged = true;
-                    }
-                    ImGui::TreePop();
-                }
-                
-                if (ImGui::TreeNode("Camera")) {
-                    if (ImGui::Checkbox("Orthographic", &cam.isOrtho)) settingsChanged = true;
-                    if (cam.isOrtho) {
-                        if (ImGui::SliderFloat("Ortho Size", &cam.orthoSize, 1.0f, 5000.0f, "%.1f", ImGuiSliderFlags_Logarithmic)) settingsChanged = true;
-                    }
-                    if (ImGui::SliderFloat("Fly Speed", &camSpeedMultiplier, 0.1f, 10.0f, "%.1fx")) settingsChanged = true;
-                    if (ImGui::Button("Reset View")) {
-                        setupCamera();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Frame All (F)")) {
-                        frameAll();
-                    }
-                    ImGui::Text("Presets:");
-                    if (ImGui::Button("Top")) { cam.yaw = -90; cam.pitch = 89; cam.position = store.cubeCenter() + glm::dvec3(0,0,store.cube(store.rootIndex()).size * 2); } ImGui::SameLine();
-                    if (ImGui::Button("Front")) { cam.yaw = -90; cam.pitch = 0; cam.position = store.cubeCenter() + glm::dvec3(0,-store.cube(store.rootIndex()).size * 2,0); } ImGui::SameLine();
-                    if (ImGui::Button("Side")) { cam.yaw = 0; cam.pitch = 0; cam.position = store.cubeCenter() + glm::dvec3(store.cube(store.rootIndex()).size * 2,0,0); }
-                    ImGui::TreePop();
-                }
-
-                if (ImGui::TreeNode("Clipping Planes")) {
-                    if (ImGui::Checkbox("Enable Clipping", &enableClipping)) settingsChanged = true;
-                    if (enableClipping) {
-                        float ext = (float)store.cube(store.rootIndex()).size * 2.0f;
-                        if (ImGui::SliderFloat3("Min", clipMin, -ext, ext)) settingsChanged = true;
-                        if (ImGui::SliderFloat3("Max", clipMax, -ext, ext)) settingsChanged = true;
-                        if (ImGui::Button("Reset Planes")) {
-                            clipMin[0] = clipMin[1] = clipMin[2] = -ext;
-                            clipMax[0] = clipMax[1] = clipMax[2] =  ext;
-                            settingsChanged = true;
-                        }
-                    }
-                    ImGui::TreePop();
-                }
-
-                if (ImGui::TreeNode("Measure")) {
-                    ImGui::Checkbox("Measure mode (LMB adds points)", &measureMode);
-                    ImGui::SetItemTooltip("Click successive points to build a polyline; total length sums all segments.");
-                    ImGui::TextWrapped("Points: %d", (int)measurePts.size());
-                    for (size_t i = 0; i < measurePts.size(); ++i)
-                        ImGui::Text("%2d: %.2f, %.2f, %.2f", (int)i + 1,
-                                    measurePts[i].x, measurePts[i].y, measurePts[i].z);
-                    if (measurePts.size() >= 2)
-                        ImGui::TextColored(ImVec4(1, 0.86f, 0.16f, 1),
-                                           "Total: %.3f m", measureTotal());
-                    if (ImGui::Button("Undo") && !measurePts.empty()) measurePts.pop_back();
-                    ImGui::SameLine();
-                    if (ImGui::Button("Clear")) measurePts.clear();
-                    ImGui::SameLine();
-                    if (ImGui::Button("Copy") && !measurePts.empty()) {
-                        std::string s;
-                        char ln[96];
-                        for (size_t i = 0; i < measurePts.size(); ++i) {
-                            snprintf(ln, sizeof(ln), "%.4f, %.4f, %.4f\n",
-                                     measurePts[i].x, measurePts[i].y, measurePts[i].z);
-                            s += ln;
-                        }
-                        if (measurePts.size() >= 2) {
-                            snprintf(ln, sizeof(ln), "total: %.4f m", measureTotal());
-                            s += ln;
-                        }
-                        SDL_SetClipboardText(s.c_str());
-                    }
-                    ImGui::SetItemTooltip("Copy all points + total length to the clipboard.");
-                    ImGui::TreePop();
-                }
-
-                if (ImGui::TreeNode("Controller")) {
-                    if (ImGui::Checkbox("Enable controller", &padEnabled)) settingsChanged = true;
-                    if (pad.connected()) {
-                        ImGui::Text("Device: %s", pad.name());
-                        ImGui::Text("Type: %s", pad.isGameController() ? "Gamepad (auto-mapped)" : "Raw joystick");
-                        ImGui::TextColored(uiNavMode ? ImVec4(0.4f, 0.8f, 1, 1) : ImVec4(0.6f, 1, 0.6f, 1),
-                                           "Active: %s", uiNavMode ? "UI navigation" : "Camera");
-                    } else {
-                        ImGui::TextDisabled("No controller detected");
-                        if (ImGui::Button("Rescan")) pad.openFirst();
-                    }
-                    ImGui::Checkbox("UI navigation mode", &uiNavMode);
-                    ImGui::SetItemTooltip("Sticks drive the UI instead of the camera. Start/B toggles.");
-                    if (ImGui::SliderFloat("Deadzone", &pad.deadzone, 0.0f, 0.5f)) settingsChanged = true;
-                    if (ImGui::SliderFloat("Look sens", &padLookSens, 20.0f, 360.0f, "%.0f deg/s")) settingsChanged = true;
-                    if (ImGui::SliderFloat("Move sens", &padMoveSens, 0.1f, 5.0f, "%.1fx")) settingsChanged = true;
-                    if (ImGui::Checkbox("Invert look Y", &padInvertY)) settingsChanged = true;
-
-                    if (pad.connected() && !pad.isGameController()) {
-                        ImGui::SeparatorText("Custom mapping (raw joystick)");
-                        ImGui::TextDisabled("Live values (move stick / press buttons to find indices):");
-                        for (int i = 0; i < pad.rawAxisCount(); ++i)
-                            ImGui::Text("  axis %d: % .2f", i, pad.rawAxis(i));
-                        std::string down;
-                        for (int i = 0; i < pad.rawButtonCount(); ++i)
-                            if (pad.rawButton(i)) down += std::to_string(i) + " ";
-                        ImGui::Text("  buttons down: %s", down.empty() ? "-" : down.c_str());
-                        bool ch = false;
-                        ch |= ImGui::InputInt("Move X axis", &pad.jAxisX);
-                        ch |= ImGui::InputInt("Move Y axis", &pad.jAxisY);
-                        ch |= ImGui::InputInt("LB button",  &pad.jBtnLB);
-                        ch |= ImGui::InputInt("Button A",   &pad.jBtnA);
-                        ch |= ImGui::InputInt("Button B",   &pad.jBtnB);
-                        if (ch) settingsChanged = true;
-                        ImGui::TextWrapped("Hold LB + stick = look. A = frame all. B = toggle UI mode.");
-                    } else {
-                        ImGui::TextWrapped("Left stick: move | Right stick: look | Triggers: down/up | "
-                                           "RB: boost | A: frame | Y: measure | X: shot | Back: UI | Start: UI mode");
-                    }
-
-                    ImGui::SeparatorText("Custom serial controller (Bluetooth)");
-                    if (ImGui::Checkbox("Enable serial controller", &serialEnabled)) {
-                        settingsChanged = true;
-                        if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
-                        else serial.stop();
-                    }
-                    if (serial.connected())
-                        ImGui::TextColored(ImVec4(0.6f, 1, 0.6f, 1), "Connected: %s", serial.portName().c_str());
-                    else
-                        ImGui::TextDisabled("Not connected (waiting / not paired)");
-                    if (ImGui::Checkbox("Auto-detect by MAC", &serialAuto)) settingsChanged = true;
-                    char macBuf[32]; snprintf(macBuf, sizeof(macBuf), "%s", serialMac.c_str());
-                    if (ImGui::InputText("MAC", macBuf, sizeof(macBuf))) { serialMac = macBuf; settingsChanged = true; }
-                    char comBuf[16]; snprintf(comBuf, sizeof(comBuf), "%s", serialPort.c_str());
-                    if (ImGui::InputText("COM port", comBuf, sizeof(comBuf))) { serialPort = comBuf; settingsChanged = true; }
-                    if (ImGui::Button("Reconnect")) serial.start(serialMac, serialPort, serialAuto);
-                    if (serial.connected())
-                        ImGui::Text("X %.2f  Y %.2f  trigger %d",
-                                    serial.normX(), serial.normY(), serial.triggerHeld() ? 1 : 0);
-                    ImGui::TextWrapped("Joystick = look. Hold trigger = fly forward. "
-                                       "PAUSE = UI mode. PLAY = activate / frame all.");
-                    ImGui::TreePop();
-                }
-
-                if (settingsChanged) {
+                const char* modes[] = { "True Color", "Elevation", "Solid Color", "Intensity", "Classification" };
+                ImGui::SetNextItemWidth(130.0f * S);
+                if (ImGui::Combo("##colormode", &colorMode, modes, IM_ARRAYSIZE(modes))) saveSettings();
+                ImGui::SetItemTooltip("Color mode");
+                ImGui::SameLine();
+                const char* quals[] = { "Low", "Medium", "High", "Ultra" };
+                ImGui::SetNextItemWidth(100.0f * S);
+                if (ImGui::Combo("##quality", &qualityIdx, quals, IM_ARRAYSIZE(quals))) {
+                    applyQualityPreset(qualityIdx);
                     saveSettings();
                 }
+                ImGui::SetItemTooltip("Quality preset: LOD detail + GPU memory budget");
+                ImGui::EndDisabled();
 
-                ImGui::Separator();
-                ImGui::TextWrapped("LMB drag: orbit   2xLMB: focus   RMB drag: look   "
-                                   "wheel: zoom   Ctrl+wheel: point size   WASD/QE: fly   "
-                                   "Shift: fast   F: frame all   F11: fullscreen");
-            } else {
-                ImGui::TextColored(ImVec4(1, 1, 0, 1), "No octree loaded. Load or convert one.");
-            }
-        }
-        
-        if (ImGui::CollapsingHeader("Converter", octreeLoaded ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.02f, 0.02f, 0.02f, 1.0f));
-            ImGui::BeginChild("ConverterPanel", ImVec2(0, 0), true);
-            
-            // Top buttons
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth() * 0.5f - 100);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-            if (ImGui::Button(" HQ ")) presetIdx = 0; ImGui::SameLine();
-            if (ImGui::Button(" LQ ")) presetIdx = 2; ImGui::SameLine();
-            if (ImGui::Button(" M ")) presetIdx = 1; ImGui::SameLine();
-            if (ImGui::Button(" Fast ")) presetIdx = 2; ImGui::SameLine();
-            if (ImGui::Button(" Slow ")) presetIdx = 0;
-            ImGui::PopStyleColor(2);
-            
-            if (presetIdx == 0) { customOpts.targetLeafSize = 20000; customOpts.rootSpacing = 0.0; customOpts.compress = true; customOpts.gridDepth = 4; customOpts.maxDepth = 28; customOpts.flushBudget = 67108864; presetIdx = 3; }
-            if (presetIdx == 1) { customOpts.targetLeafSize = 50000; customOpts.rootSpacing = 0.0; customOpts.compress = true; customOpts.gridDepth = 3; customOpts.maxDepth = 24; customOpts.flushBudget = 33554432; presetIdx = 3; }
-            if (presetIdx == 2) { customOpts.targetLeafSize = 100000; customOpts.rootSpacing = 0.0; customOpts.compress = false; customOpts.gridDepth = 2; customOpts.maxDepth = 20; customOpts.flushBudget = 16777216; presetIdx = 3; }
-            
-            ImGui::Spacing(); ImGui::Spacing(); ImGui::Spacing();
-            
-            float labelWidth = 140.0f;
-            float inputWidth = ImGui::GetWindowWidth() - labelWidth - 30.0f;
-            if (inputWidth < 100.0f) inputWidth = 100.0f;
-            ImVec4 descColor = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
-            
-            // Source File
-            ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Default bold-ish label
-            ImGui::Text("Source File"); ImGui::PopFont(); 
-            ImGui::SameLine(labelWidth);
-            if (ImGui::Button("Browse")) {
-                std::string f = pf::openFileDialog("Point Clouds\0*.las;*.laz;*.e57;*.ply;*.pts;*.xyz\0All Files\0*.*\0");
-                if (!f.empty()) {
-                    convInput = f;
-                    std::filesystem::path p(f);
-                    convOutput = (p.parent_path() / ("PointForgeCache_" + p.stem().string())).string();
-                }
-            }
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(inputWidth - 80.0f);
-            char buf[512];
-            snprintf(buf, sizeof(buf), "%s", convInput.empty() ? "Enter Path to *.laz;*.las;*.ply;*.e57;*.pts;*.xyz models" : convInput.c_str());
-            ImGui::InputText("##sourcefile", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Spacing
-            ImGui::Text("Spacing"); ImGui::SameLine(labelWidth);
-            ImGui::SetNextItemWidth(60.0f);
-            float spacingFloat = (float)customOpts.rootSpacing;
-            if (ImGui::DragFloat("##spacing", &spacingFloat, 0.01f, 0.0f, 10.0f)) customOpts.rootSpacing = spacingFloat;
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Minimum distance between points after decimation.");
-            ImGui::TextWrapped("Spacing = 0 Keep all points. Spacing = 0.01 Remove points closer than 1 cm. 1,000,000 points -> 700,000 points");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Leaf Size
-            ImGui::Text("Leaf Size"); ImGui::SameLine(labelWidth);
-            ImGui::SetNextItemWidth(inputWidth);
-            int leafSize = customOpts.targetLeafSize;
-            if (ImGui::DragInt("##leafsize", &leafSize, 1000, 1000, 1000000)) customOpts.targetLeafSize = leafSize;
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Maximum points allowed inside a leaf node.");
-            ImGui::TextWrapped("Smaller Leaf Size = More nodes, Better culling, Better LOD, Larger octree");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // MaxDepth
-            ImGui::Text("MaxDepth"); ImGui::SameLine(labelWidth);
-            ImGui::SetNextItemWidth(inputWidth);
-            ImGui::DragInt("##maxdepth", &customOpts.maxDepth, 1, 4, 32);
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Maximum octree depth.");
-            ImGui::TextWrapped("Higher depth = More precise, Better close-up detail, More nodes; Lower depth: Less detail, Faster conversion");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Chunk
-            ImGui::Text("Chunk"); ImGui::SameLine(labelWidth);
-            ImGui::SetNextItemWidth(inputWidth);
-            ImGui::DragInt("##chunk", &customOpts.gridDepth, 1, 1, 8);
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Controls how many chunks of points are processed simultaneously");
-            ImGui::TextWrapped("Higher: Faster conversion More RAM; Lower: Less RAM Slower conversion");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Flush
-            ImGui::Text("Flush"); ImGui::SameLine(labelWidth);
-            ImGui::SetNextItemWidth(inputWidth);
-            int flushBudget = customOpts.flushBudget;
-            if (ImGui::DragInt("##flush", &flushBudget, 1024, 1024, 1024*1024*1024)) customOpts.flushBudget = flushBudget;
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Controls how many chunks of points are processed simultaneously.");
-            ImGui::TextWrapped("Higher = Faster conversion, More RAM; Lower = Less RAM, Slower conversion");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Keep Chunk
-            ImGui::Text("Keep Chunk"); ImGui::SameLine(labelWidth);
-            ImGui::Checkbox("##keepchunk", &customOpts.keepChunks);
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Controls how many chunks of points are processed simultaneously.");
-            ImGui::TextWrapped("Higher: Faster conversion. More RAM; Lower: Less RAM, Slower conversion");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Verbose
-            static bool verboseLogs = false;
-            ImGui::Text("Verbose"); ImGui::SameLine(labelWidth);
-            ImGui::Checkbox("##verbose", &verboseLogs);
-            ImGui::PushStyleColor(ImGuiCol_Text, descColor);
-            ImGui::TextWrapped("Shows detailed logs.");
-            ImGui::PopStyleColor();
-            ImGui::Spacing(); ImGui::Spacing();
-            
-            // Status & Cache
-            ImGui::Text("Status"); ImGui::SameLine(labelWidth);
-            if (isConverting) {
-                std::string statusMsg;
-                {
-                    std::lock_guard<std::mutex> lk(convertStatusMutex);
-                    statusMsg = convertStatus;
-                }
-                ImGui::TextColored(ImVec4(0, 1, 0, 1), "%s", statusMsg.c_str());
-                ImGui::SameLine();
-                ImGui::ProgressBar(convertProgress.load(), ImVec2(220, 15));
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel")) cancelConvert = true;
-            } else {
-                if (ImGui::Button("Convert!", ImVec2(100, 30))) {
-                    if (!convInput.empty() && !convOutput.empty()) {
-                        isConverting = true;
-                        convertDone = false;
-                        cancelConvert = false;
-                        convertProgress = 0.0f;
-                        convertStatus = "Starting...";
-
-                        pf::IndexOptions opts = customOpts;
-                        opts.cancel = &cancelConvert;
-                        opts.progressCb = [&convertProgress, &convertStatusMutex, &convertStatus](float pct, const std::string& msg) {
-                            convertProgress = pct;
-                            std::lock_guard<std::mutex> lk(convertStatusMutex);
-                            convertStatus = msg;
-                        };
-
-                        convertThread = std::thread([input = convInput, outDir = convOutput, opts, &convertSuccess, &isConverting, &convertDone]() {
-                            bool success = pf::buildOctree(input, outDir, opts);
-                            convertSuccess = success;
-                            isConverting = false;
-                            convertDone = true;
-                        });
-                    }
-                }
-            }
-            
-                ImGui::Spacing(); ImGui::Spacing();
-                ImGui::Text("Cache"); ImGui::SameLine(labelWidth);
-                float mb = 0.0f; // Could compute actual directory size if needed
-                ImGui::Text("Cache: %.1f MB", mb);
-                
-                ImGui::EndChild();
-                ImGui::PopStyleColor();
+                ImGui::SameLine(); ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+                if (ImGui::Button("Shot")) pendingShot = true;
+                ImGui::SetItemTooltip("Save a screenshot — F12");
             }
             ImGui::End();
-        }
+            ImGui::PopStyleVar();
 
-        // ---- always-on status bar ----------------------------------------
-        if (showStatusBar) {
-            float barH = ImGui::GetTextLineHeightWithSpacing() + 8.0f;
-            ImGui::SetNextWindowPos(ImVec2(0.0f, (float)winH - barH));
-            ImGui::SetNextWindowSize(ImVec2((float)winW, barH));
-            ImGui::SetNextWindowBgAlpha(0.70f);
-            ImGuiWindowFlags sf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
-                                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoScrollbar;
-            if (ImGui::Begin("##statusbar", nullptr, sf)) {
-                ImGui::Text("FPS %.0f", dt > 0 ? 1.0f / dt : 0.0f); ImGui::SameLine(0, 18);
-                if (octreeLoaded) {
-                    const char* mode = mouseLook ? "Look" : (measureMode ? "Measure" : (orbitDrag ? "Orbit" : "Idle"));
-                    ImGui::Text("Pts %llu / %llu", (unsigned long long)drawnPoints,
-                                (unsigned long long)store.meta().pointCount); ImGui::SameLine(0, 18);
-                    ImGui::Text("GPU %.0f MB", renderer.residentBytes() / 1048576.0); ImGui::SameLine(0, 18);
-                    ImGui::Text("Mode %s", mode); ImGui::SameLine(0, 18);
-                    if (hoverValid)
-                        ImGui::Text("XYZ %.2f, %.2f, %.2f", hoverWorld.x, hoverWorld.y, hoverWorld.z);
-                    else
-                        ImGui::TextDisabled("XYZ --");
-                    size_t pend = store.pendingRequests();
-                    if (pend > 0) {
+            // ---- dockspace host (between toolbar and status bar) -------------
+            ImVec2 hostPos(vp->WorkPos.x, vp->WorkPos.y + toolbarH);
+            ImVec2 hostSize(vp->WorkSize.x, vp->WorkSize.y - toolbarH - statusH);
+            ImGui::SetNextWindowPos(hostPos);
+            ImGui::SetNextWindowSize(hostSize);
+            ImGuiWindowFlags hostFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                                         ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking |
+                                         ImGuiWindowFlags_NoSavedSettings;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::Begin("##dockhost", nullptr, hostFlags);
+            ImGui::PopStyleVar(3);
+            ImGuiID dockspaceId = ImGui::GetID("PFDockSpace");
+            if (resetDockLayout || ImGui::DockBuilderGetNode(dockspaceId) == nullptr) {
+                resetDockLayout = false;
+                ImGui::DockBuilderRemoveNode(dockspaceId);
+                ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+                ImGui::DockBuilderSetNodeSize(dockspaceId, hostSize);
+                ImGuiID centerId = dockspaceId;
+                ImGuiID rightId  = ImGui::DockBuilderSplitNode(centerId, ImGuiDir_Right, 0.25f, nullptr, &centerId);
+                ImGuiID bottomId = ImGui::DockBuilderSplitNode(centerId, ImGuiDir_Down, 0.30f, nullptr, &centerId);
+                ImGui::DockBuilderDockWindow("Properties", rightId);
+                ImGui::DockBuilderDockWindow("Jobs", bottomId);
+                ImGui::DockBuilderDockWindow("Console", bottomId);
+                ImGui::DockBuilderDockWindow("Performance", bottomId);
+                ImGui::DockBuilderFinish(dockspaceId);
+            }
+            ImGui::DockSpace(dockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
+            ImGui::End();
+
+            bool settingsChanged = false;
+            auto helpMarker = [](const char* desc) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                ImGui::SetItemTooltip("%s", desc);
+            };
+
+            // ---- Properties panel (right dock) --------------------------------
+            if (showProperties) {
+                if (ImGui::Begin("Properties", &showProperties)) {
+                    // Cloud Info
+                    if (ImGui::CollapsingHeader("Cloud Info", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        if (octreeLoaded) {
+                            ImGui::Text("%s", baseName(loadedDir).c_str());
+                            ImGui::SetItemTooltip("%s", loadedDir.c_str());
+                            ImGui::Text("%s points, %s nodes",
+                                        prettyCount(store.meta().pointCount).c_str(),
+                                        prettyCount(store.meta().nodeCount).c_str());
+                            ImGui::Text("Cube size: %.1f m", store.meta().cubeSize);
+                        } else {
+                            ImGui::TextDisabled("No cloud loaded.");
+                            ImGui::TextWrapped("Open a converted octree or convert a scan to begin.");
+                        }
+                    }
+
+                    // Display
+                    if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        const char* quals[] = { "Low", "Medium", "High", "Ultra" };
+                        if (ImGui::Combo("Quality", &qualityIdx, quals, IM_ARRAYSIZE(quals))) {
+                            applyQualityPreset(qualityIdx);
+                            settingsChanged = true;
+                        }
+                        ImGui::SetItemTooltip("One-knob preset for LOD detail + GPU budget.");
+                        if (ImGui::SliderFloat("Point size", &pointSize, 1.0f, 16.0f)) settingsChanged = true;
+                        ImGui::SetItemTooltip("Splat size in pixels. Also: Ctrl+mouse wheel.");
+                        const char* modes[] = { "True Color", "Elevation", "Solid Color", "Intensity", "Classification" };
+                        if (ImGui::Combo("Color Mode", &colorMode, modes, IM_ARRAYSIZE(modes))) settingsChanged = true;
+                        if (colorMode == 2) {
+                            if (ImGui::ColorEdit3("Solid Color", solidColor)) settingsChanged = true;
+                        }
+                        if (ImGui::Checkbox("Eye-Dome Lighting", &enableEDL)) settingsChanged = true;
+                        ImGui::SetItemTooltip("Shades depth edges for much better depth perception on uncoloured clouds.");
+                        if (enableEDL) {
+                            ImGui::Indent();
+                            if (ImGui::SliderFloat("Strength", &edlStrength, 0.1f, 5.0f)) settingsChanged = true;
+                            if (ImGui::SliderFloat("Radius", &edlRadius, 0.5f, 4.0f)) settingsChanged = true;
+                            ImGui::Unindent();
+                        }
+                        if (ImGui::TreeNode("Advanced")) {
+                            if (ImGui::SliderFloat("LOD budget (px)", &sseBudget, 0.3f, 8.0f)) settingsChanged = true;
+                            ImGui::SetItemTooltip("Screen-space error target. Lower = more detail loaded (slower).");
+                            if (ImGui::SliderInt("GPU budget (MB)", &gpuBudgetMB, 128, 8192)) settingsChanged = true;
+                            ImGui::SetItemTooltip("Max GPU memory for resident points before LRU eviction.");
+                            if (ImGui::SliderInt("Uploads/frame", &uploadsPerFrame, 1, 256)) settingsChanged = true;
+                            ImGui::SetItemTooltip("Node VBO uploads per frame. Higher = faster streaming, more hitches.");
+                            if (ImGui::Checkbox("Round points", &roundPoints)) settingsChanged = true;
+                            ImGui::SameLine();
+                            if (ImGui::Checkbox("Attenuate", &attenuate)) settingsChanged = true;
+                            if (ImGui::ColorEdit3("Background", clearColor)) settingsChanged = true;
+                            ImGui::TreePop();
+                        }
+                    }
+
+                    // Camera
+                    if (ImGui::CollapsingHeader("Camera")) {
+                        if (ImGui::Checkbox("Orthographic", &cam.isOrtho)) settingsChanged = true;
+                        if (cam.isOrtho) {
+                            if (ImGui::SliderFloat("Ortho Size", &cam.orthoSize, 1.0f, 5000.0f, "%.1f", ImGuiSliderFlags_Logarithmic)) settingsChanged = true;
+                        }
+                        if (ImGui::SliderFloat("Fly Speed", &camSpeedMultiplier, 0.1f, 10.0f, "%.1fx")) settingsChanged = true;
+                        ImGui::BeginDisabled(!octreeLoaded);
+                        if (ImGui::Button("Reset View")) setupCamera();
+                        ImGui::SameLine();
+                        if (ImGui::Button("Frame All")) frameAllReq = true;
+                        ImGui::Text("Presets:");
+                        ImGui::SameLine(); if (ImGui::SmallButton("Front (1)")) camPresetFront();
+                        ImGui::SameLine(); if (ImGui::SmallButton("Side (3)")) camPresetSide();
+                        ImGui::SameLine(); if (ImGui::SmallButton("Top (7)")) camPresetTop();
+                        ImGui::EndDisabled();
+                    }
+
+                    // Tool sections APPEND (never replace the panel) so display
+                    // settings stay reachable mid-tool.
+                    if (toolMode == TOOL_MEASURE) {
+                        ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+                        if (ImGui::CollapsingHeader("Measure")) {
+                            ImGui::TextWrapped("Click points in the viewport to build a polyline.");
+                            ImGui::Text("Points: %d", (int)measurePts.size());
+                            for (size_t i = 0; i < measurePts.size(); ++i)
+                                ImGui::Text("%2d: %.2f, %.2f, %.2f", (int)i + 1,
+                                            measurePts[i].x, measurePts[i].y, measurePts[i].z);
+                            if (measurePts.size() >= 2)
+                                ImGui::TextColored(ImVec4(1, 0.86f, 0.16f, 1),
+                                                   "Total: %.3f m", measureTotal());
+                            if (ImGui::Button("Undo") && !measurePts.empty()) measurePts.pop_back();
+                            ImGui::SameLine();
+                            if (ImGui::Button("Clear")) measurePts.clear();
+                            ImGui::SameLine();
+                            if (ImGui::Button("Copy") && !measurePts.empty()) {
+                                std::string s;
+                                char ln[96];
+                                for (size_t i = 0; i < measurePts.size(); ++i) {
+                                    snprintf(ln, sizeof(ln), "%.4f, %.4f, %.4f\n",
+                                             measurePts[i].x, measurePts[i].y, measurePts[i].z);
+                                    s += ln;
+                                }
+                                if (measurePts.size() >= 2) {
+                                    snprintf(ln, sizeof(ln), "total: %.4f m", measureTotal());
+                                    s += ln;
+                                }
+                                SDL_SetClipboardText(s.c_str());
+                            }
+                            ImGui::SetItemTooltip("Copy all points + total length to the clipboard.");
+                            ImGui::SameLine();
+                            if (ImGui::Button("Done")) toolMode = TOOL_NAV;
+                        }
+                    }
+
+                    if (toolMode == TOOL_CLIP || enableClipping) {
+                        ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+                        if (ImGui::CollapsingHeader("Clip")) {
+                            if (ImGui::Checkbox("Enable Clipping", &enableClipping)) settingsChanged = true;
+                            if (enableClipping && octreeLoaded) {
+                                float ext = (float)store.cube(store.rootIndex()).size * 2.0f;
+                                if (ImGui::SliderFloat3("Min", clipMin, -ext, ext)) settingsChanged = true;
+                                if (ImGui::SliderFloat3("Max", clipMax, -ext, ext)) settingsChanged = true;
+                                if (ImGui::Button("Reset Planes")) {
+                                    clipMin[0] = clipMin[1] = clipMin[2] = -ext;
+                                    clipMax[0] = clipMax[1] = clipMax[2] =  ext;
+                                    settingsChanged = true;
+                                }
+                                if (toolMode == TOOL_CLIP) {
+                                    ImGui::SameLine();
+                                    if (ImGui::Button("Done")) toolMode = TOOL_NAV;
+                                }
+                            }
+                        }
+                    }
+                }
+                ImGui::End();
+            }
+
+            // ---- Jobs panel (bottom dock) --------------------------------------
+            if (showJobsPanel) {
+                if (ImGui::Begin("Jobs", &showJobsPanel)) {
+                    auto jobList = jobs.jobs();
+                    if (jobList.empty()) {
+                        ImGui::TextDisabled("No jobs. Convert a scan (Ctrl+I) to enqueue one.");
+                    } else {
+                        if (ImGui::SmallButton("Clear finished")) jobs.clearFinished();
+                        ImGui::Separator();
+                    }
+                    int idx = 0;
+                    for (auto& job : jobList) {
+                        ImGui::PushID(idx++);
+                        ConvertJob::State st = job->state.load();
+                        switch (st) {
+                            case ConvertJob::State::Queued:
+                                ImGui::TextDisabled("[queued]");
+                                break;
+                            case ConvertJob::State::Running:
+                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1), "[running]");
+                                break;
+                            case ConvertJob::State::Succeeded:
+                                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1), "[done]");
+                                break;
+                            case ConvertJob::State::Failed:
+                                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1), "[FAILED]");
+                                break;
+                            case ConvertJob::State::Canceled:
+                                ImGui::TextDisabled("[canceled]");
+                                break;
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%s", job->name.c_str());
+                        ImGui::SetItemTooltip("%s -> %s", job->input.c_str(), job->output.c_str());
+                        ImGui::SameLine();
+                        if (st == ConvertJob::State::Running) {
+                            char ov[16]; snprintf(ov, sizeof(ov), "%.0f%%", job->progress.load() * 100.0f);
+                            ImGui::ProgressBar(job->progress.load(), ImVec2(160.0f * S, 0), ov);
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%s", job->message().c_str());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Cancel")) JobQueue::cancel(job);
+                        } else if (st == ConvertJob::State::Queued) {
+                            if (ImGui::SmallButton("Cancel")) JobQueue::cancel(job);
+                        } else if (st == ConvertJob::State::Succeeded) {
+                            if (ImGui::SmallButton("Open")) loadOctree(job->output);
+#ifdef _WIN32
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reveal"))
+                                ShellExecuteA(nullptr, "open", job->output.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+                        } else if (st == ConvertJob::State::Failed) {
+                            ImGui::TextDisabled("%s", job->message().c_str());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Console")) showConsole = true;
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::End();
+            }
+
+            // ---- Console panel (bottom dock) -----------------------------------
+            if (showConsole) {
+                if (ImGui::Begin("Console", &showConsole)) {
+                    pf::UiLogBuffer& buf = pf::UiLogBuffer::instance();
+                    buf.unseenIssues = 0;   // shown -> badge resets
+                    ImGui::Checkbox("Debug", &logShowDebug); ImGui::SameLine();
+                    ImGui::Checkbox("Info", &logShowInfo); ImGui::SameLine();
+                    ImGui::Checkbox("Warn", &logShowWarn); ImGui::SameLine();
+                    ImGui::Checkbox("Error", &logShowError); ImGui::SameLine();
+                    ImGui::Checkbox("Auto-scroll", &logAutoScroll); ImGui::SameLine();
+                    if (ImGui::SmallButton("Clear")) buf.clear();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Copy")) {
+                        std::string all;
+                        std::lock_guard<std::mutex> lk(buf.mutex());
+                        for (const auto& en : buf.entries()) { all += en.text; all += '\n'; }
+                        SDL_SetClipboardText(all.c_str());
+                    }
+                    ImGui::Separator();
+                    if (ImGui::BeginChild("##logscroll", ImVec2(0, 0), false,
+                                          ImGuiWindowFlags_HorizontalScrollbar)) {
+                        std::lock_guard<std::mutex> lk(buf.mutex());
+                        for (const auto& en : buf.entries()) {
+                            bool show = (en.level == pf::LogLevel::Debug && logShowDebug) ||
+                                        (en.level == pf::LogLevel::Info  && logShowInfo)  ||
+                                        (en.level == pf::LogLevel::Warn  && logShowWarn)  ||
+                                        (en.level == pf::LogLevel::Error && logShowError);
+                            if (!show) continue;
+                            ImVec4 col = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+                            if (en.level == pf::LogLevel::Error) col = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
+                            else if (en.level == pf::LogLevel::Warn) col = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
+                            else if (en.level == pf::LogLevel::Debug) col = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+                            ImGui::TextColored(col, "%s", en.text.c_str());
+                        }
+                        if (logAutoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+                            ImGui::SetScrollHereY(1.0f);
+                    }
+                    ImGui::EndChild();
+                }
+                ImGui::End();
+            }
+
+            // ---- Performance panel (bottom dock) -------------------------------
+            if (showPerf) {
+                if (ImGui::Begin("Performance", &showPerf)) {
+                    float fps = dt > 0 ? 1.0f / dt : 0.0f;
+                    char overlay[32]; snprintf(overlay, sizeof(overlay), "%.0f FPS", fps);
+                    ImGui::PlotLines("##fpsplot", fpsHist, IM_ARRAYSIZE(fpsHist), fpsHistIdx,
+                                     overlay, 0.0f, FLT_MAX, ImVec2(-FLT_MIN, 60.0f * S));
+                    if (octreeLoaded) {
+                        ImGui::Separator();
+                        ImGui::Text("Visible nodes:  %zu", visibleNodes);
+                        ImGui::Text("Drawn nodes:    %zu", drawnNodes);
+                        ImGui::Text("Drawn points:   %s", prettyCount(drawnPoints).c_str());
+                        ImGui::Text("Points on GPU:  %s", prettyCount(renderer.pointsOnGpu()).c_str());
+                        ImGui::Text("Load queue:     %zu", store.pendingRequests());
+                        float residentMB = (float)(renderer.residentBytes() / (1024.0 * 1024.0));
+                        char budgetOv[48];
+                        snprintf(budgetOv, sizeof(budgetOv), "%.0f / %d MB GPU", residentMB, gpuBudgetMB);
+                        ImGui::ProgressBar(gpuBudgetMB > 0 ? residentMB / (float)gpuBudgetMB : 0.0f,
+                                           ImVec2(-FLT_MIN, 0), budgetOv);
+                    } else {
+                        ImGui::TextDisabled("No cloud loaded.");
+                    }
+                }
+                ImGui::End();
+            }
+
+            // ---- Convert dialog -------------------------------------------------
+            if (showConvertDialog) {
+                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                               vp->WorkPos.y + vp->WorkSize.y * 0.45f),
+                                        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowSizeConstraints(ImVec2(540.0f * S, 0), ImVec2(540.0f * S, FLT_MAX));
+                if (ImGui::Begin("Convert to Octree", &showConvertDialog,
+                                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
+                    // Source
+                    ImGui::Text("Source");
+                    ImGui::SameLine(90.0f * S);
+                    if (ImGui::Button("Browse...##src")) {
+                        std::string f = pf::openFileDialog("Point Clouds\0*.las;*.laz;*.e57;*.ply;*.pts;*.xyz\0All Files\0*.*\0");
+                        if (!f.empty()) openConvertDialog(f);
+                    }
+                    ImGui::SameLine();
+                    if (convInput.empty()) ImGui::TextDisabled("LAS / LAZ / E57 / PLY / PTS / XYZ");
+                    else {
+                        ImGui::Text("%s", baseName(convInput).c_str());
+                        ImGui::SetItemTooltip("%s", convInput.c_str());
+                    }
+                    if (!convInput.empty()) {
+                        std::error_code ec;
+                        auto sz = std::filesystem::file_size(convInput, ec);
+                        if (!ec) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("(%.2f GB)", sz / (1024.0 * 1024.0 * 1024.0));
+                        }
+                    }
+
+                    // Output
+                    ImGui::Text("Output");
+                    ImGui::SameLine(90.0f * S);
+                    if (ImGui::Button("Browse...##out")) {
+                        std::string d = pf::openFolderDialog();
+                        if (!d.empty()) convOutput = d;
+                    }
+                    ImGui::SameLine();
+                    {
+                        char outBuf[512];
+                        snprintf(outBuf, sizeof(outBuf), "%s", convOutput.c_str());
+                        ImGui::SetNextItemWidth(-FLT_MIN);
+                        if (ImGui::InputText("##outdir", outBuf, sizeof(outBuf))) convOutput = outBuf;
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::SeparatorText("Quality");
+                    if (ImGui::RadioButton("Balanced - recommended", convPreset == 1)) { convPreset = 1; applyConvertPreset(1); }
+                    if (ImGui::RadioButton("Draft - fastest, coarse detail", convPreset == 0)) { convPreset = 0; applyConvertPreset(0); }
+                    if (ImGui::RadioButton("High - best close-up detail, slower", convPreset == 2)) { convPreset = 2; applyConvertPreset(2); }
+                    if (ImGui::RadioButton("Custom", convPreset == 3)) convPreset = 3;
+
+                    // Advanced (rarely touched; edits switch the preset to Custom)
+                    if (ImGui::CollapsingHeader("Advanced")) {
+                        ImGui::SeparatorText("Sampling");
+                        float spacingFloat = (float)customOpts.rootSpacing;
+                        ImGui::SetNextItemWidth(120.0f * S);
+                        if (ImGui::DragFloat("Spacing", &spacingFloat, 0.01f, 0.0f, 10.0f, "%.3f m")) {
+                            customOpts.rootSpacing = spacingFloat; convPreset = 3;
+                        }
+                        helpMarker("Root sample spacing. 0 = auto (cubeSize / 128). Smaller = denser coarse levels.");
+                        int leafSize = (int)customOpts.targetLeafSize;
+                        ImGui::SetNextItemWidth(120.0f * S);
+                        if (ImGui::DragInt("Leaf size", &leafSize, 1000, 1000, 1000000)) {
+                            customOpts.targetLeafSize = (uint32_t)std::max(1000, leafSize); convPreset = 3;
+                        }
+                        helpMarker("Max points per leaf node. Smaller = more nodes, better culling/LOD, larger octree.");
+                        ImGui::SetNextItemWidth(120.0f * S);
+                        if (ImGui::DragInt("Max depth", &customOpts.maxDepth, 1, 4, 32)) convPreset = 3;
+                        helpMarker("Hard cap on octree depth. Higher = better close-up precision, more nodes, slower conversion.");
+
+                        ImGui::SeparatorText("Resources");
+                        ImGui::SetNextItemWidth(120.0f * S);
+                        if (ImGui::DragInt("Chunk grid depth", &customOpts.gridDepth, 1, 1, 8)) convPreset = 3;
+                        helpMarker("Coarse chunk grid depth L; the grid is (2^L)^3 cells. Higher = more, smaller chunks (lower peak RAM, more files).");
+                        int flushM = (int)(customOpts.flushBudget / 1000000ull);
+                        ImGui::SetNextItemWidth(120.0f * S);
+                        if (ImGui::DragInt("Flush budget", &flushM, 1, 1, 1024, "%d Mpts")) {
+                            customOpts.flushBudget = (uint64_t)std::max(1, flushM) * 1000000ull; convPreset = 3;
+                        }
+                        helpMarker("Chunker memory budget in points; buffers flush to disk when exceeded. Higher = faster, more RAM (~20 bytes/point).");
+
+                        ImGui::SeparatorText("Output");
+                        if (ImGui::Checkbox("Compress nodes (zstd)", &customOpts.compress)) convPreset = 3;
+                        helpMarker("Per-node zstd compression of point payloads. Smaller octree on disk, slightly slower load.");
+                        ImGui::SameLine();
+                        if (ImGui::Checkbox("Keep chunk files", &customOpts.keepChunks)) convPreset = 3;
+                        helpMarker("Keep the intermediate chunk files after indexing (debugging only).");
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Checkbox("Load in viewer when done", &convLoadWhenDone);
+                    ImGui::Spacing();
+
+                    bool canConvert = !convInput.empty() && !convOutput.empty();
+                    ImGui::BeginDisabled(!canConvert);
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.85f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.53f, 0.95f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.38f, 0.75f, 1.0f));
+                    if (ImGui::Button("Convert", ImVec2(-FLT_MIN, 34.0f * S))) enqueueConvert();
+                    ImGui::PopStyleColor(3);
+                    ImGui::EndDisabled();
+                    if (!canConvert) ImGui::TextDisabled("Choose a source file first.");
+                    ImGui::TextDisabled("Runs in the background - watch it in the Jobs panel.");
+                }
+                ImGui::End();
+            }
+
+            // ---- Preferences dialog ---------------------------------------------
+            if (showPrefs) {
+                ImGui::SetNextWindowSize(ImVec2(560.0f * S, 480.0f * S), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                               vp->WorkPos.y + vp->WorkSize.y * 0.45f),
+                                        ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+                if (ImGui::Begin("Preferences", &showPrefs, ImGuiWindowFlags_NoDocking)) {
+                    if (ImGui::BeginTabBar("##prefsTabs")) {
+                        if (ImGui::BeginTabItem("General")) {
+                            bool lightTheme = !darkTheme;
+                            if (ImGui::Checkbox("Light theme", &lightTheme)) {
+                                darkTheme = !lightTheme;
+                                applyUiScale(uiScale);
+                                settingsChanged = true;
+                            }
+                            if (ImGui::SliderFloat("UI Scale", &uiScale, 0.5f, 3.0f, "%.2fx")) {
+                                uiScale = std::clamp(uiScale, 0.5f, 4.0f);
+                                applyUiScale(uiScale);
+                                settingsChanged = true;
+                            }
+                            if (ImGui::Checkbox("Auto-load last cloud on startup", &autoLoadLast)) settingsChanged = true;
+                            if (ImGui::Button("Clear recent files")) { recentDirs.clear(); settingsChanged = true; }
+                            ImGui::EndTabItem();
+                        }
+                        if (ImGui::BeginTabItem("Display")) {
+                            ImGui::SeparatorText("Stereoscopic (side-by-side)");
+                            ImGui::TextWrapped("Toggle with F9 or View > Stereoscopic. All UI hides in "
+                                               "stereo so each eye sees only the cloud; F9 or Esc exits.");
+                            if (ImGui::SliderFloat("Eye Separation (IPD)", &eyeSeparation, 0.01f, 0.2f)) settingsChanged = true;
+                            if (ImGui::SliderFloat("Focal Distance", &focalDistance, 1.0f, 100.0f)) settingsChanged = true;
+                            ImGui::EndTabItem();
+                        }
+                        if (ImGui::BeginTabItem("Input")) {
+                            ImGui::SeparatorText("Gamepad / joystick");
+                            if (ImGui::Checkbox("Enable controller", &padEnabled)) settingsChanged = true;
+                            if (pad.connected()) {
+                                ImGui::Text("Device: %s", pad.name());
+                                ImGui::Text("Type: %s", pad.isGameController() ? "Gamepad (auto-mapped)" : "Raw joystick");
+                                ImGui::TextColored(uiNavMode ? ImVec4(0.4f, 0.8f, 1, 1) : ImVec4(0.6f, 1, 0.6f, 1),
+                                                   "Active: %s", uiNavMode ? "UI navigation" : "Camera");
+                            } else {
+                                ImGui::TextDisabled("No controller detected");
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("Rescan")) pad.openFirst();
+                            }
+                            ImGui::Checkbox("UI navigation mode", &uiNavMode);
+                            ImGui::SetItemTooltip("Sticks drive the UI instead of the camera. Start/B toggles.");
+                            if (ImGui::SliderFloat("Deadzone", &pad.deadzone, 0.0f, 0.5f)) settingsChanged = true;
+                            if (ImGui::SliderFloat("Look sens", &padLookSens, 20.0f, 360.0f, "%.0f deg/s")) settingsChanged = true;
+                            if (ImGui::SliderFloat("Move sens", &padMoveSens, 0.1f, 5.0f, "%.1fx")) settingsChanged = true;
+                            if (ImGui::Checkbox("Invert look Y", &padInvertY)) settingsChanged = true;
+
+                            if (pad.connected() && !pad.isGameController()) {
+                                if (ImGui::TreeNode("Calibrate (raw joystick mapping)")) {
+                                    ImGui::TextDisabled("Live values (move stick / press buttons to find indices):");
+                                    for (int i = 0; i < pad.rawAxisCount(); ++i)
+                                        ImGui::Text("  axis %d: % .2f", i, pad.rawAxis(i));
+                                    std::string down;
+                                    for (int i = 0; i < pad.rawButtonCount(); ++i)
+                                        if (pad.rawButton(i)) down += std::to_string(i) + " ";
+                                    ImGui::Text("  buttons down: %s", down.empty() ? "-" : down.c_str());
+                                    bool ch = false;
+                                    ch |= ImGui::InputInt("Move X axis", &pad.jAxisX);
+                                    ch |= ImGui::InputInt("Move Y axis", &pad.jAxisY);
+                                    ch |= ImGui::InputInt("LB button",  &pad.jBtnLB);
+                                    ch |= ImGui::InputInt("Button A",   &pad.jBtnA);
+                                    ch |= ImGui::InputInt("Button B",   &pad.jBtnB);
+                                    if (ch) settingsChanged = true;
+                                    ImGui::TextWrapped("Hold LB + stick = look. A = frame all. B = toggle UI mode.");
+                                    ImGui::TreePop();
+                                }
+                            } else {
+                                ImGui::TextWrapped("Left stick: move | Right stick: look | Triggers: down/up | "
+                                                   "RB: boost | A: frame | Y: measure | X: shot | Back: UI | Start: UI mode");
+                            }
+
+                            ImGui::SeparatorText("Custom serial controller (Bluetooth)");
+                            if (ImGui::Checkbox("Enable serial controller", &serialEnabled)) {
+                                settingsChanged = true;
+                                if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
+                                else serial.stop();
+                            }
+                            if (serial.connected())
+                                ImGui::TextColored(ImVec4(0.6f, 1, 0.6f, 1), "Connected: %s", serial.portName().c_str());
+                            else
+                                ImGui::TextDisabled("Not connected (waiting / not paired)");
+                            if (ImGui::Checkbox("Auto-detect by MAC", &serialAuto)) settingsChanged = true;
+                            char macBuf[32]; snprintf(macBuf, sizeof(macBuf), "%s", serialMac.c_str());
+                            if (ImGui::InputText("MAC", macBuf, sizeof(macBuf))) { serialMac = macBuf; settingsChanged = true; }
+                            char comBuf[16]; snprintf(comBuf, sizeof(comBuf), "%s", serialPort.c_str());
+                            if (ImGui::InputText("COM port", comBuf, sizeof(comBuf))) { serialPort = comBuf; settingsChanged = true; }
+                            if (ImGui::Button("Reconnect")) serial.start(serialMac, serialPort, serialAuto);
+                            if (serial.connected())
+                                ImGui::Text("X %.2f  Y %.2f  trigger %d",
+                                            serial.normX(), serial.normY(), serial.triggerHeld() ? 1 : 0);
+                            ImGui::TextWrapped("Joystick = look. Hold trigger = fly forward. "
+                                               "PAUSE = UI mode. PLAY = activate / frame all.");
+                            ImGui::EndTabItem();
+                        }
+                        if (ImGui::BeginTabItem("Advanced")) {
+                            if (ImGui::Button("Reset all settings to defaults")) ImGui::OpenPopup("Reset?");
+                            if (ImGui::BeginPopupModal("Reset?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                                ImGui::TextUnformatted("Reset all viewer settings to defaults?");
+                                if (ImGui::Button("Yes", ImVec2(80, 0))) {
+                                    doResetSettings = true;
+                                    ImGui::CloseCurrentPopup();
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Cancel", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+                                ImGui::EndPopup();
+                            }
+                            ImGui::EndTabItem();
+                        }
+                        ImGui::EndTabBar();
+                    }
+                }
+                ImGui::End();
+            }
+            if (doResetSettings) {
+                resetSettings();
+                applyUiScale(uiScale);
+                if (octreeLoaded) setupCamera();
+                settingsChanged = true;
+            }
+
+            // ---- welcome / empty state ------------------------------------------
+            if ((!octreeLoaded || showWelcomeOverride) && !showConvertDialog) {
+                ImGui::SetNextWindowPos(ImVec2(hostPos.x + hostSize.x * 0.5f,
+                                               hostPos.y + hostSize.y * 0.45f),
+                                        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGuiWindowFlags wf = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration |
+                                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                      ImGuiWindowFlags_NoDocking;
+                ImGui::SetNextWindowBgAlpha(0.90f);
+                if (ImGui::Begin("##welcome", nullptr, wf)) {
+                    ImGui::SeparatorText("PointForge");
+                    ImGui::TextDisabled("Out-of-core point cloud viewer");
+                    ImGui::Spacing();
+                    float bw = 360.0f * S;
+                    if (ImGui::Button("Open Octree Folder...", ImVec2(bw, 34.0f * S))) browseAndLoad();
+                    if (ImGui::Button("Convert a Scan...", ImVec2(bw, 34.0f * S))) openConvertDialog("");
+                    if (!recentDirs.empty()) {
+                        ImGui::Spacing();
+                        ImGui::SeparatorText("Recent");
+                        for (size_t i = 0; i < recentDirs.size() && i < 6; ++i) {
+                            ImGui::PushID((int)i);
+                            if (ImGui::Selectable(baseName(recentDirs[i]).c_str(), false, 0, ImVec2(bw, 0)))
+                                loadOctree(recentDirs[i]);
+                            ImGui::SetItemTooltip("%s", recentDirs[i].c_str());
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("Drop a LAS/LAZ/E57/PLY file or an octree folder anywhere.");
+                    ImGui::TextDisabled("F1 shortcuts  -  Ctrl+P commands");
+                    if (octreeLoaded) {   // opened via View > Welcome Screen
+                        ImGui::Spacing();
+                        if (ImGui::SmallButton("Close")) showWelcomeOverride = false;
+                    }
+                }
+                ImGui::End();
+            }
+
+            // ---- keyboard shortcuts window (F1) ----------------------------------
+            if (showHelp) {
+                ImGui::SetNextWindowPos(ImVec2(winW * 0.5f, winH * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowSize(ImVec2(460.0f * S, 480.0f * S), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Keyboard Shortcuts", &showHelp, ImGuiWindowFlags_NoDocking)) {
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    ImGui::InputTextWithHint("##kbfilter", "Filter...", shortcutFilter, sizeof(shortcutFilter));
+                    ImGui::Separator();
+                    if (ImGui::BeginChild("##kbscroll")) {
+                        const char* lastCat = nullptr;
+                        std::string filt = shortcutFilter;
+                        for (const auto& kb : kKeyBinds) {
+                            if (!filt.empty() && !icontains(kb.keys, filt) && !icontains(kb.action, filt))
+                                continue;
+                            if (!lastCat || strcmp(lastCat, kb.category) != 0) {
+                                ImGui::SeparatorText(kb.category);
+                                lastCat = kb.category;
+                            }
+                            ImGui::Text("%-16s", kb.keys);
+                            ImGui::SameLine(150.0f * S);
+                            ImGui::TextDisabled("%s", kb.action);
+                        }
+                    }
+                    ImGui::EndChild();
+                }
+                ImGui::End();
+            }
+
+            // ---- command palette (Ctrl+P) ----------------------------------------
+            if (showPalette) {
+                struct Cmd { std::string label; const char* keys; std::function<void()> fn; };
+                std::vector<Cmd> cmds;
+                cmds.push_back({"Open Octree Folder...", "Ctrl+O", [&] { browseAndLoad(); }});
+                cmds.push_back({"Convert a Scan...", "Ctrl+I", [&] { openConvertDialog(""); }});
+                cmds.push_back({"Frame All", "F", [&] { frameAllReq = true; }});
+                cmds.push_back({"Reset View", "", [&] { if (octreeLoaded) setupCamera(); }});
+                cmds.push_back({"View: Front", "1", [&] { if (octreeLoaded) camPresetFront(); }});
+                cmds.push_back({"View: Side", "3", [&] { if (octreeLoaded) camPresetSide(); }});
+                cmds.push_back({"View: Top", "7", [&] { if (octreeLoaded) camPresetTop(); }});
+                cmds.push_back({"Toggle Orthographic", "5", [&] { cam.isOrtho = !cam.isOrtho; }});
+                cmds.push_back({"Tool: Measure", "M", [&] { toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE; }});
+                cmds.push_back({"Tool: Clip", "C", [&] { toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP; }});
+                cmds.push_back({"Toggle Eye-Dome Lighting", "", [&] { enableEDL = !enableEDL; saveSettings(); }});
+                cmds.push_back({"Toggle Stereoscopic (SBS)", "F9", [&] { toggleStereo(); }});
+                cmds.push_back({"Screenshot", "F12", [&] { pendingShot = true; }});
+                cmds.push_back({"Stats Overlay", "F3", [&] { showStatsOverlay = !showStatsOverlay; }});
+                cmds.push_back({"Panel: Jobs", "", [&] { showJobsPanel = true; }});
+                cmds.push_back({"Panel: Console", "", [&] { showConsole = true; }});
+                cmds.push_back({"Panel: Performance", "", [&] { showPerf = true; }});
+                cmds.push_back({"Panel: Properties", "", [&] { showProperties = true; }});
+                cmds.push_back({"Preferences...", "Ctrl+,", [&] { showPrefs = true; }});
+                cmds.push_back({"Keyboard Shortcuts", "F1", [&] { showHelp = true; }});
+                cmds.push_back({"Reset Layout", "", [&] { resetDockLayout = true; showProperties = true; }});
+                cmds.push_back({"Toggle Fullscreen", "F11", [&] { toggleFullscreen(); }});
+                cmds.push_back({"Hide UI (zen)", "F5", [&] { showUI = false; }});
+                cmds.push_back({"Quit", "Esc Esc", [&] { running = false; }});
+
+                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + 80.0f * S),
+                                        ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+                ImGui::SetNextWindowSize(ImVec2(480.0f * S, 0));
+                ImGuiWindowFlags pf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
+                if (ImGui::Begin("##palette", nullptr, pf)) {
+                    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    bool submit = ImGui::InputTextWithHint("##palinput", "Type a command...",
+                                                           paletteBuf, sizeof(paletteBuf),
+                                                           ImGuiInputTextFlags_EnterReturnsTrue);
+                    std::string filt = paletteBuf;
+                    const Cmd* first = nullptr;
+                    if (ImGui::BeginChild("##pallist", ImVec2(0, 240.0f * S))) {
+                        for (const auto& c : cmds) {
+                            if (!icontains(c.label, filt)) continue;
+                            if (!first) first = &c;
+                            char row[160];
+                            snprintf(row, sizeof(row), "%s", c.label.c_str());
+                            if (ImGui::Selectable(row)) {
+                                c.fn();
+                                showPalette = false;
+                            }
+                            if (c.keys && c.keys[0]) {
+                                ImGui::SameLine(360.0f * S);
+                                ImGui::TextDisabled("%s", c.keys);
+                            }
+                        }
+                    }
+                    ImGui::EndChild();
+                    if (submit && first) {
+                        first->fn();
+                        showPalette = false;
+                    }
+                    // Click-away closes.
+                    if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                        !ImGui::IsWindowAppearing())
+                        showPalette = false;
+                }
+                ImGui::End();
+            }
+
+            // ---- stats overlay (F3) ----------------------------------------------
+            if (showStatsOverlay && octreeLoaded) {
+                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 12.0f,
+                                               hostPos.y + 12.0f),
+                                        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+                ImGui::SetNextWindowBgAlpha(0.55f);
+                ImGuiWindowFlags of = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking;
+                if (ImGui::Begin("##statsoverlay", nullptr, of)) {
+                    ImGui::Text("FPS %.1f", dt > 0 ? 1.0f / dt : 0.0f);
+                    ImGui::Text("Nodes %zu vis / %zu drawn", visibleNodes, drawnNodes);
+                    ImGui::Text("Points %s drawn / %s GPU",
+                                prettyCount(drawnPoints).c_str(),
+                                prettyCount(renderer.pointsOnGpu()).c_str());
+                    ImGui::Text("GPU %.0f / %d MB",
+                                renderer.residentBytes() / (1024.0 * 1024.0), gpuBudgetMB);
+                    ImGui::Text("Queue %zu", store.pendingRequests());
+                }
+                ImGui::End();
+            }
+
+            // ---- status bar -------------------------------------------------------
+            if (showStatusBar) {
+                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - statusH));
+                ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, statusH));
+                ImGui::SetNextWindowBgAlpha(0.85f);
+                ImGuiWindowFlags sf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoScrollbar |
+                                      ImGuiWindowFlags_NoDocking;
+                if (ImGui::Begin("##statusbar", nullptr, sf)) {
+                    if (octreeLoaded) {
+                        // Mode + contextual hint.
+                        const char* mode = mouseLook ? "Look"
+                                         : (toolMode == TOOL_MEASURE) ? "Measure"
+                                         : (toolMode == TOOL_CLIP) ? "Clip"
+                                         : (orbitDrag ? "Orbit" : "Nav");
+                        ImGui::Text("%s", mode);
+                        ImGui::SameLine(0, 12);
+                        if (toolMode == TOOL_MEASURE)
+                            ImGui::TextDisabled("LMB add point - Esc done");
+                        else if (toolMode == TOOL_CLIP)
+                            ImGui::TextDisabled("Adjust planes in Properties - Esc done");
+                        else
+                            ImGui::TextDisabled("LMB orbit - RMB look - F frame");
                         ImGui::SameLine(0, 18);
-                        ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", pend);
+                        if (hoverValid)
+                            ImGui::Text("XYZ %.2f, %.2f, %.2f", hoverWorld.x, hoverWorld.y, hoverWorld.z);
+                        else
+                            ImGui::TextDisabled("XYZ --");
+                    } else {
+                        ImGui::TextDisabled("No cloud loaded - F1 shortcuts");
+                    }
+
+                    // Job pill (click -> Jobs panel).
+                    if (auto job = jobs.active()) {
+                        ImGui::SameLine(0, 18);
+                        char pill[96];
+                        if (job->state.load() == ConvertJob::State::Running)
+                            snprintf(pill, sizeof(pill), "%s %.0f%%##pill", job->name.c_str(), job->progress.load() * 100.0f);
+                        else
+                            snprintf(pill, sizeof(pill), "%s queued##pill", job->name.c_str());
+                        if (ImGui::SmallButton(pill)) showJobsPanel = true;
+                        ImGui::SetItemTooltip("Click to open the Jobs panel");
+                    }
+                    if (octreeLoaded) {
+                        size_t pend = store.pendingRequests();
+                        if (pend > 0) {
+                            ImGui::SameLine(0, 18);
+                            ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", pend);
+                        }
                     }
                     if (padEnabled && pad.connected()) {
                         ImGui::SameLine(0, 18);
@@ -1463,40 +2186,95 @@ int main(int argc, char** argv) {
                         ImGui::SameLine(0, 18);
                         ImGui::TextColored(ImVec4(0.6f, 0.9f, 1, 1), "BT:%s", uiNavMode ? "UI" : "Cam");
                     }
-                } else {
-                    ImGui::TextDisabled("No cloud loaded  -  press F1 for help");
+
+                    // Right-aligned stats cluster (tier-1 monitoring).
+                    char stats[128];
+                    if (octreeLoaded) {
+                        snprintf(stats, sizeof(stats), "GPU %.0f MB   %s / %s pts   %.0f FPS",
+                                 renderer.residentBytes() / 1048576.0,
+                                 prettyCount(drawnPoints).c_str(),
+                                 prettyCount(store.meta().pointCount).c_str(),
+                                 dt > 0 ? 1.0f / dt : 0.0f);
+                    } else {
+                        snprintf(stats, sizeof(stats), "%.0f FPS", dt > 0 ? 1.0f / dt : 0.0f);
+                    }
+                    float sw = ImGui::CalcTextSize(stats).x;
+                    ImGui::SameLine(ImGui::GetWindowWidth() - sw - 16.0f);
+                    ImGui::TextUnformatted(stats);
+                }
+                ImGui::End();
+            }
+
+            // ---- toasts (bottom-right, above the status bar) ----------------------
+            {
+                float ty = vp->WorkPos.y + vp->WorkSize.y - statusH - 10.0f;
+                for (size_t i = toasts.size(); i-- > 0;) {
+                    Toast& t = toasts[i];
+                    t.ttl -= dt;
+                    if (t.ttl <= 0.0f) { toasts.erase(toasts.begin() + i); continue; }
+                    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 12.0f, ty),
+                                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+                    ImGui::SetNextWindowBgAlpha(0.88f);
+                    ImGuiWindowFlags tf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                          ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking;
+                    char id[32]; snprintf(id, sizeof(id), "##toast%zu", i);
+                    if (t.isError) ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 0.35f, 0.35f, 1));
+                    if (ImGui::Begin(id, nullptr, tf)) {
+                        if (t.isError) ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "%s", t.text.c_str());
+                        else ImGui::TextUnformatted(t.text.c_str());
+                        if (!t.openDir.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Open")) {
+                                loadOctree(t.openDir);
+                                t.ttl = 0.0f;
+                            }
+                        }
+                        ty -= ImGui::GetWindowSize().y + 8.0f;
+                    }
+                    ImGui::End();
+                    if (t.isError) ImGui::PopStyleColor();
                 }
             }
-            ImGui::End();
-        }
 
-        // ---- controls help overlay (F1) ----------------------------------
-        if (showHelp) {
+            // ---- About modal -------------------------------------------------------
+            if (aboutOpenReq) { ImGui::OpenPopup("About PointForge"); aboutOpenReq = false; }
             ImGui::SetNextWindowPos(ImVec2(winW * 0.5f, winH * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-            if (ImGui::Begin("Controls  (F1 to close)", &showHelp, ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::SeparatorText("Navigation");
-                ImGui::BulletText("LMB drag        Orbit around pivot");
-                ImGui::BulletText("Double-click    Focus pivot on point");
-                ImGui::BulletText("RMB drag        Free look");
-                ImGui::BulletText("Wheel           Zoom to cursor");
-                ImGui::BulletText("Ctrl + Wheel    Point size");
-                ImGui::BulletText("WASD / Q E      Fly  (Shift = fast)");
-                ImGui::BulletText("F               Frame all");
-                ImGui::SeparatorText("Controller");
-                ImGui::BulletText("Left stick      Move");
-                ImGui::BulletText("Right stick     Look  (custom: hold LB + stick)");
-                ImGui::BulletText("Triggers        Down / up");
-                ImGui::BulletText("A / Y / X       Frame / measure / screenshot");
-                ImGui::BulletText("Start (or B)    Toggle UI navigation mode");
-                ImGui::SeparatorText("Tools");
-                ImGui::BulletText("Measure mode    LMB picks points");
-                ImGui::SeparatorText("View");
-                ImGui::BulletText("F5              Toggle UI panel");
-                ImGui::BulletText("F11             Fullscreen");
-                ImGui::BulletText("F1              This help");
-                ImGui::BulletText("Esc Esc         Quit (double press)");
+            if (ImGui::BeginPopupModal("About PointForge", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("PointForge Viewer 0.1.0");
+                ImGui::TextDisabled("Out-of-core point cloud importer + viewer");
+                ImGui::TextDisabled("SDL2 - OpenGL 3.3 - Dear ImGui (docking)");
+                ImGui::Spacing();
+                if (ImGui::Button("Close", ImVec2(100, 0))) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
             }
-            ImGui::End();
+
+            if (settingsChanged) saveSettings();
+
+            // ---- first-load fading nav hint ---------------------------------------
+            if (navHintT > 0.0f && octreeLoaded) {
+                navHintT -= dt;
+                float a = std::clamp(navHintT / 1.5f, 0.0f, 1.0f);
+                const char* msg = "LMB orbit  -  double-click focus  -  RMB look  -  WASD fly  -  F1 shortcuts";
+                ImVec2 ts = ImGui::CalcTextSize(msg);
+                ImGui::GetForegroundDrawList()->AddText(
+                    ImVec2(winW * 0.5f - ts.x * 0.5f, winH - statusH - 40.0f),
+                    IM_COL32(255, 255, 255, (int)(a * 200)), msg);
+            }
+        } else if (stereoSBS) {
+            // ---- stereo mode: zero chrome; short per-eye exit hint ----------------
+            if (stereoHintT > 0.0f) {
+                stereoHintT -= dt;
+                float a = std::clamp(stereoHintT / 1.5f, 0.0f, 1.0f);
+                const char* msg = "Stereoscopic mode - press F9 or Esc to exit";
+                ImVec2 ts = ImGui::CalcTextSize(msg);
+                ImU32 col = IM_COL32(255, 255, 255, (int)(a * 220));
+                ImDrawList* dl = ImGui::GetForegroundDrawList();
+                float y = winH * 0.85f;
+                // Drawn once per eye so the hint fuses correctly in the stereoscope.
+                dl->AddText(ImVec2(winW * 0.25f - ts.x * 0.5f, y), col, msg);
+                dl->AddText(ImVec2(winW * 0.75f - ts.x * 0.5f, y), col, msg);
+            }
         }
 
         ImGui::Render();
@@ -1518,9 +2296,7 @@ int main(int argc, char** argv) {
     }
 
     // ---- shutdown ---------------------------------------------------------
-    if (convertThread.joinable()) {
-        convertThread.join();
-    }
+    jobs.shutdown();   // cancels the running conversion (if any) and joins the worker
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();

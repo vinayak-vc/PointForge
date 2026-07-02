@@ -139,7 +139,7 @@ include(FetchContent)
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.5     # last series shipping the SDL2 backend
+    GIT_TAG        v1.91.5-docking  # docking branch of the last series shipping the SDL2 backend
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(imgui)   # imgui has no CMakeLists -> just populates

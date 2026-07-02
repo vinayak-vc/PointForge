@@ -27,6 +27,27 @@
         (camera, actions, ImGui UI-nav mode, deadzone/sens config, live rebind panel)
 - `[x]` Custom ESP32 Bluetooth-SPP controller (Win32 serial reader, MAC auto-detect):
         joystick=look, trigger=fly-forward, PAUSE=UI mode, PLAY=activate/frame-all
+- `[x]` Docked UI shell redesign: menu bar + toolbar + central passthru viewport +
+        Properties (right dock, collapsing sections) + Jobs/Console/Performance
+        (bottom dock, closed by default) + status bar; ImGui repinned to
+        `v1.91.5-docking`
+- `[x]` Conversion moved to a background `JobQueue` (`src/viewer/Jobs.h`) — Convert
+        dialog enqueues, Jobs panel + status-bar pill + completion toast monitor;
+        never blocks the viewport
+- `[x]` Log fan-out: `pf::setLogSink()` mirrors all `pf::log()` calls into a
+        Console panel ring buffer (`src/viewer/UiLog.h`), filterable by severity
+- `[x]` F1 searchable keyboard-shortcut sheet (single source-of-truth table) +
+        Ctrl+P command palette
+- `[x]` Controller/ESP32 config moved out of the daily panel into a Preferences
+        dialog (Edit > Preferences); Convert dialog params collapsed under
+        Advanced with `(?)` tooltips (replacing inline gray description text,
+        and fixing copy-pasted Flush/KeepChunk descriptions)
+- `[x]` Stereoscopic SBS (F9) now hides all UI chrome — menu/toolbar/docks/status
+        bar/watermark/overlays all suppressed; per-eye fading exit hint only
+- `[x]` Single-file static build toolset-mismatch fixed via overlay-triplet
+        `VCPKG_PLATFORM_TOOLSET_VERSION` pin (`triplets/x64-windows-static.cmake`) —
+        no Ninja/vcvars dev-shell step needed; re-verified zero non-system DLL
+        imports and a clean launch isolated in an empty directory
 
 ## In Progress
 - (none)
@@ -37,3 +58,7 @@
 - `[ ]` Linearised-depth EDL (current uses raw depth diff; tune for ortho)
 - `[ ]` Convert cancel for Phase A/B (currently aborts at Phase C chunk boundaries)
 - `[ ]` VR/OpenXR initialization support
+- `[ ]` Multi-select batch conversion in the Convert dialog (queue already supports N jobs)
+- `[ ]` Workspace layout presets (Window menu: save/restore named DockBuilder layouts)
+- `[ ]` Recent-files pin/unpin + cached point-count/size metadata
+- `[ ]` Scene panel (multi-cloud) — deferred until multi-cloud rendering exists

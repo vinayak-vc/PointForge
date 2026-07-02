@@ -150,7 +150,47 @@ and supports an optional fixed-pixel mode. Coordinates are uploaded relative to
 the cube centre as `float`; the model matrix re-adds the centre in double on the
 CPU side to keep large-coordinate clouds stable.
 
-## 6. Extension points (deliberate TODOs)
+## 7. Viewer UI shell (docked, job-queue based)
+
+`pfview`'s UI is a viewport-centric docked shell built on ImGui's docking
+branch (`v1.91.5-docking`, `ImGuiConfigFlags_DockingEnable` +
+`DockSpaceOverViewport`-style passthru central node): menu bar + thin
+toolbar + central 3D viewport (never occluded) + a right "Properties" dock
+(collapsing sections, not tabs — tool options append rather than replace, so
+Display settings stay reachable mid-Measure) + a bottom dock holding
+Jobs/Console/Performance (closed by default) + a status bar. This replaced an
+earlier single scrolling 350px panel that mixed viewer and converter settings.
+
+**Why not top-level page tabs**: the viewport is the application — a tab that
+hides it to show converter or settings controls amputates the one thing that
+justifies the app, and cannot represent a long-running background job (which
+needs to stay visible while the user keeps navigating). Every reference
+desktop tool in this space (Unreal, Unity, Blender, Visual Studio,
+CloudCompare) converges on the same menu+dock shell for this reason.
+
+**Conversion as a background job, not a modal operation**: `src/viewer/Jobs.h`
+defines a `JobQueue` — one worker thread pulls `ConvertJob`s sequentially
+(conversion is disk/CPU bound; parallel jobs would fight for the same
+resources) and calls the existing `buildOctree()` with a per-job
+`progressCb`/`cancel` atomic, exactly the same contract `IndexOptions` already
+exposed for the old inline converter. The Convert dialog only *enqueues*; all
+progress/cancel/failure surfaces through the Jobs panel and a status-bar pill.
+This is deliberately the same abstraction that will carry batch conversion
+(multi-job enqueue, no new UI) and AI segmentation (another job type) later.
+
+**Logging fan-out**: `pf::setLogSink()` (added to `src/common/Log.h/.cpp`) lets
+the viewer mirror every `pf::log()` call — including from the converter's
+worker thread — into `src/viewer/UiLog.h`'s ring buffer, which backs the
+Console panel. The original stdout/stderr sink is unchanged; the UI sink is
+additive and thread-safe (same mutex-guarded pattern as the existing logger).
+
+**Stereoscopic SBS = zero chrome**: when SBS is active, the entire ImGui frame
+for the shell (menu, toolbar, docks, status bar, watermark, measure overlay,
+colour legend) is suppressed — only a fading "F9/Esc to exit" hint is drawn,
+once per eye viewport, so it fuses correctly through a stereoscope. Hotkeys
+(F9, Esc) still process normally; only rendering is suppressed.
+
+## 8. Extension points (deliberate TODOs)
 
 * **LAZ via PDAL**: `laszip_api` covers LAS/LAZ directly; swap to PDAL if you need
   exotic formats.
