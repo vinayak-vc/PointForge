@@ -105,26 +105,32 @@ endif()
 # --- Zstd (payload compression) ---
 # Prefer the CMake config target (zstd::libzstd) so debug/release libs are chosen
 # per-config automatically; fall back to a release-hinted find_library.
+# PF_ZSTD_LIB/PF_ZSTD_INC are kept separate from PF_OPTIONAL_* because the Unity
+# plugin (pfunity) needs zstd alone, without laszip/E57.
+set(PF_ZSTD_LIB "")
+set(PF_ZSTD_INC "")
 find_package(zstd CONFIG QUIET)
 if(TARGET zstd::libzstd)
-    list(APPEND PF_OPTIONAL_LIBS zstd::libzstd)
-    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+    set(PF_ZSTD_LIB zstd::libzstd)
     message(STATUS "Zstd: target zstd::libzstd")
 elseif(TARGET zstd::libzstd_static)
-    list(APPEND PF_OPTIONAL_LIBS zstd::libzstd_static)
-    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+    set(PF_ZSTD_LIB zstd::libzstd_static)
     message(STATUS "Zstd: target zstd::libzstd_static")
 else()
     find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
     find_library(ZSTD_LIB NAMES zstd libzstd HINTS "${_PF_REL_LIB}")
     if(ZSTD_INCLUDE_DIR AND ZSTD_LIB)
-        list(APPEND PF_OPTIONAL_INCS ${ZSTD_INCLUDE_DIR})
-        list(APPEND PF_OPTIONAL_LIBS ${ZSTD_LIB})
-        list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+        set(PF_ZSTD_LIB ${ZSTD_LIB})
+        set(PF_ZSTD_INC ${ZSTD_INCLUDE_DIR})
         message(STATUS "Zstd: ${ZSTD_LIB}")
     else()
         message(WARNING "Zstd not found -> Node compression disabled")
     endif()
+endif()
+if(PF_ZSTD_LIB)
+    list(APPEND PF_OPTIONAL_INCS ${PF_ZSTD_INC})
+    list(APPEND PF_OPTIONAL_LIBS ${PF_ZSTD_LIB})
+    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
 endif()
 
 message(STATUS "PointForge optional format libs: ${PF_OPTIONAL_LIBS}")
@@ -178,6 +184,32 @@ target_include_directories(pfcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(pfcore PRIVATE ${PF_OPTIONAL_INCS})
 target_link_libraries(pfcore PUBLIC glm::glm ${PF_OPTIONAL_LIBS} ole32)
 target_compile_definitions(pfcore PUBLIC ${PF_OPTIONAL_DEFS})
+
+# ---------------------------------------------------------------------------
+# pfunity — native plugin DLL for the Unity integration (branch library/unity).
+# Streaming reader only: OctreeStore + Log + the flat C API. Deliberately does
+# NOT link pfcore, so no laszip/E57/SDL/GL/ImGui dependencies leak into Unity.
+# Build with the x64-windows-static triplet for a single self-contained DLL
+# (static CRT + static zstd).
+# ---------------------------------------------------------------------------
+option(PF_BUILD_UNITY_PLUGIN "Build the PointForgeUnity native plugin DLL" ON)
+if(PF_BUILD_UNITY_PLUGIN)
+    add_library(pfunity SHARED
+        src/library/unity/PointForgeC.cpp
+        src/viewer/OctreeStore.cpp
+        src/common/Log.cpp
+    )
+    target_include_directories(pfunity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(pfunity PRIVATE glm::glm Threads::Threads)
+    if(PF_ZSTD_LIB)
+        target_link_libraries(pfunity PRIVATE ${PF_ZSTD_LIB})
+        target_compile_definitions(pfunity PRIVATE PF_WITH_ZSTD)
+        if(PF_ZSTD_INC)
+            target_include_directories(pfunity PRIVATE ${PF_ZSTD_INC})
+        endif()
+    endif()
+    set_target_properties(pfunity PROPERTIES OUTPUT_NAME "PointForgeUnity" PREFIX "")
+endif()
 
 # ---------------------------------------------------------------------------
 # pfconvert — the importer CLI
