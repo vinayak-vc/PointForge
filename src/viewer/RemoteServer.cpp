@@ -28,6 +28,7 @@
 #  ifdef _WIN32
 #    include <mfapi.h>
 #    include <mfidl.h>
+#    include <mftransform.h>
 #    include <mfreadwrite.h>
 #    include <mferror.h>
 #    include <codecapi.h>
@@ -44,12 +45,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <map>
 #include <mutex>
 #include <random>
 #include <thread>
+#include <variant>
 
 using json = nlohmann::json;
 
@@ -102,6 +105,10 @@ struct RemoteServerImpl {
     std::string ip;
     bool        forceDiskWeb = false;
 
+    // ---- last screenshot (PNG bytes), served at /shot.png?pin=<PIN> -------
+    std::mutex           shotMx;
+    std::vector<uint8_t> lastShot;
+
     // ---- input state (server threads write, main loop reads) --------------
     std::atomic<float> f{0}, s{0}, u{0}, yaw{0}, pit{0};
     std::atomic<bool>  boost{false};
@@ -148,30 +155,63 @@ struct RemoteServerImpl {
 
 #if defined(PF_REMOTE_WEBRTC) && defined(_WIN32)
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        IMFTransform* pMFEncoder = nullptr;
+        IMFTransform*           pMFEncoder = nullptr;
+        IMFMediaEventGenerator* pMFEvents  = nullptr; // async (hardware) MFTs only
         bool mfInit = false;
-        int mfW = 0, mfH = 0;
+        bool mfIsAsync = false;   // hardware MFTs use the async event model
+        bool mfHwFailed = false;  // sticky: hardware failed once -> software only
+        int  mfW = 0, mfH = 0;
+        int  mfNeedInput = 0;     // pending METransformNeedInput credits (async)
         uint64_t mfFrameTime = 0;
         std::vector<uint8_t> nv12Buf;
 
-        auto initMF = [&](int w, int h) {
-            if (mfInit && w == mfW && h == mfH) return true;
+        auto releaseEncoder = [&]() {
+            if (pMFEvents) { pMFEvents->Release(); pMFEvents = nullptr; }
             if (pMFEncoder) {
                 pMFEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                 pMFEncoder->Release();
                 pMFEncoder = nullptr;
             }
-            mfW = w; mfH = h;
-            
-            if (FAILED(MFStartup(MF_VERSION))) {
-                pf::logError("MFStartup failed");
-                return false;
+            mfInit = false;
+            mfIsAsync = false;
+            mfNeedInput = 0;
+        };
+
+        // Instantiate a hardware H.264 encoder MFT (NVENC / QuickSync / AMD VCE)
+        // if one exists. Hardware codec MFTs are async by spec — the caller must
+        // drive them with the METransformNeedInput/HaveOutput event model.
+        auto createHardwareEncoder = [&]() -> IMFTransform* {
+            MFT_REGISTER_TYPE_INFO inInfo  = { MFMediaType_Video, MFVideoFormat_NV12 };
+            MFT_REGISTER_TYPE_INFO outInfo = { MFMediaType_Video, MFVideoFormat_H264 };
+            IMFActivate** acts = nullptr;
+            UINT32 nActs = 0;
+            if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                                 MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                                 &inInfo, &outInfo, &acts, &nActs)) || nActs == 0)
+                return nullptr;
+            IMFTransform* enc = nullptr;
+            for (UINT32 i = 0; i < nActs; ++i) {
+                if (!enc && SUCCEEDED(acts[i]->ActivateObject(IID_PPV_ARGS(&enc))) && enc) {
+                    WCHAR name[256] = {};
+                    UINT32 len = 0;
+                    if (SUCCEEDED(acts[i]->GetString(MFT_FRIENDLY_NAME_Attribute, name, 255, &len))) {
+                        char utf8[512] = {};
+                        WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, 511, nullptr, nullptr);
+                        pf::logInfo(std::string("WebRTC: hardware H.264 encoder: ") + utf8);
+                    }
+                }
+                acts[i]->Release();
             }
-            if (FAILED(CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pMFEncoder)))) {
-                pf::logError("CoCreateInstance H264 Encoder failed");
-                return false;
-            }
-            
+            CoTaskMemFree(acts);
+            return enc;
+        };
+
+        // Configure the current pMFEncoder (codec settings + media types +
+        // streaming start). Returns false on any required failure so the caller
+        // can fall back — never leaves the encoder half-configured "successfully".
+        auto configureEncoder = [&](int w, int h) -> bool {
+            if (!pMFEncoder) return false;
+
             ICodecAPI* pCodecApi = nullptr;
             if (SUCCEEDED(pMFEncoder->QueryInterface(IID_PPV_ARGS(&pCodecApi)))) {
                 VARIANT var;
@@ -184,14 +224,32 @@ struct RemoteServerImpl {
                 var.vt = VT_UI4;
                 var.ulVal = 30; // 30 frames GOP (1 keyframe per second at 30fps)
                 pCodecApi->SetValue(&CODECAPI_AVEncMPVGOPSize, &var);
+
+                // Quality-based VBR: point clouds (dense high-contrast dots)
+                // defeat inter-frame prediction, so constant-bitrate CBR smears
+                // badly. Quality mode lets the encoder spend whatever the frame
+                // needs; MF_MT_AVG_BITRATE below becomes a hint only. If the
+                // encoder rejects the mode, it silently stays CBR at the raised
+                // bitrate — still a large improvement over the old 2 Mbps.
+                var.vt = VT_UI4;
+                var.ulVal = eAVEncCommonRateControlMode_Quality;
+                if (SUCCEEDED(pCodecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &var))) {
+                    var.vt = VT_UI4;
+                    var.ulVal = 78; // 0-100; ~visually clean for dot content without runaway bitrate
+                    pCodecApi->SetValue(&CODECAPI_AVEncCommonQuality, &var);
+                } else {
+                    pf::logWarn("H264 encoder rejected Quality rate control; using CBR");
+                }
                 pCodecApi->Release();
             }
-            
+
             IMFMediaType* pOutType = nullptr;
             MFCreateMediaType(&pOutType);
             pOutType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             pOutType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-            pOutType->SetUINT32(MF_MT_AVG_BITRATE, 2000000);
+            // 12 Mbps — LAN-only stream; roughly matches the JPEG "med" preset's
+            // effective data rate (was 2 Mbps, which starved point-cloud content).
+            pOutType->SetUINT32(MF_MT_AVG_BITRATE, 12000000);
             MFSetAttributeSize(pOutType, MF_MT_FRAME_SIZE, w, h);
             MFSetAttributeRatio(pOutType, MF_MT_FRAME_RATE, 30, 1);
             pOutType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
@@ -213,6 +271,68 @@ struct RemoteServerImpl {
             pMFEncoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             pMFEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
             pMFEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+            return true;
+        };
+
+        auto initMF = [&](int w, int h) {
+            if (mfInit && w == mfW && h == mfH) return true;
+            releaseEncoder();
+            mfW = w; mfH = h;
+
+            if (FAILED(MFStartup(MF_VERSION))) {
+                pf::logError("MFStartup failed");
+                return false;
+            }
+
+            // Hardware first (NVENC/QuickSync/VCE), unless it already failed
+            // once this session — then software-only, no repeated churn.
+            bool usingHw = false;
+            if (!mfHwFailed) {
+                pMFEncoder = createHardwareEncoder();
+                if (pMFEncoder) {
+                    usingHw = true;
+                    UINT32 isAsync = 0;
+                    IMFAttributes* attrs = nullptr;
+                    if (SUCCEEDED(pMFEncoder->GetAttributes(&attrs)) && attrs) {
+                        attrs->GetUINT32(MF_TRANSFORM_ASYNC, &isAsync);
+                        if (isAsync) attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+                        attrs->SetUINT32(MF_LOW_LATENCY, TRUE); // ignored if unsupported
+                        attrs->Release();
+                    }
+                    mfIsAsync = isAsync != 0;
+                    if (mfIsAsync && FAILED(pMFEncoder->QueryInterface(IID_PPV_ARGS(&pMFEvents)))) {
+                        pf::logWarn("WebRTC: hardware encoder has no event generator; using software");
+                        releaseEncoder();
+                        mfHwFailed = true;
+                        usingHw = false;
+                    }
+                }
+            }
+            if (!pMFEncoder) {
+                mfIsAsync = false;
+                if (FAILED(CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pMFEncoder)))) {
+                    pf::logError("CoCreateInstance H264 Encoder failed");
+                    pMFEncoder = nullptr;
+                    return false;
+                }
+                pf::logInfo("WebRTC: using software H.264 encoder");
+            }
+
+            if (!configureEncoder(w, h)) {
+                releaseEncoder();
+                if (!usingHw) return false;
+                // Hardware rejected the configuration — one-shot software retry.
+                pf::logWarn("WebRTC: hardware encoder rejected configuration; using software");
+                mfHwFailed = true;
+                if (FAILED(CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pMFEncoder)))) {
+                    pf::logError("CoCreateInstance H264 Encoder failed");
+                    pMFEncoder = nullptr;
+                    return false;
+                }
+                if (!configureEncoder(w, h)) { releaseEncoder(); return false; }
+            }
+
+            mfNeedInput = 0;
             mfInit = true;
             return true;
         };
@@ -283,10 +403,115 @@ struct RemoteServerImpl {
                     }
                 }
 
+                // ---- shared: fan an encoded sample out to WebRTC clients ----
+                auto sendEncodedSample = [&](IMFSample* smp) {
+                    IMFMediaBuffer* outBuf = nullptr;
+                    smp->ConvertToContiguousBuffer(&outBuf);
+                    if (!outBuf) return;
+                    BYTE* outData = nullptr;
+                    DWORD outLen = 0;
+                    if (SUCCEEDED(outBuf->Lock(&outData, nullptr, &outLen))) {
+                        static bool loggedFirst = false;
+                        if (!loggedFirst && outLen >= 4) {
+                            loggedFirst = true;
+                            pf::logInfo("H.264 First frame bytes: " +
+                                std::to_string(outData[0]) + " " +
+                                std::to_string(outData[1]) + " " +
+                                std::to_string(outData[2]) + " " +
+                                std::to_string(outData[3]));
+                        }
+                        std::lock_guard<std::mutex> g(clMx);
+                        for (auto& kv : clients) {
+                            if (kv.second.authed && kv.second.webrtc && kv.second.videoTrack) {
+                                try {
+                                    if (kv.second.videoTrack->isOpen()) {
+                                        kv.second.videoTrack->sendFrame(reinterpret_cast<const std::byte*>(outData), outLen, rtc::FrameInfo(static_cast<uint32_t>(nowMs() * 90)));
+                                    }
+                                } catch (const std::exception& e) {
+                                    pf::logError("WebRTC sendFrame exception: " + std::string(e.what()));
+                                } catch (...) {
+                                    pf::logError("WebRTC sendFrame unknown exception");
+                                }
+                            }
+                        }
+                        outBuf->Unlock();
+                    }
+                    outBuf->Release();
+                };
+
+                // ---- shared: one ProcessOutput call, allocating the output
+                // sample ourselves when the MFT doesn't provide its own.
+                // Returns the HRESULT so callers can distinguish "need more
+                // input" from real failure.
+                auto processOneOutput = [&]() -> HRESULT {
+                    MFT_OUTPUT_STREAM_INFO info = {};
+                    pMFEncoder->GetOutputStreamInfo(0, &info);
+
+                    MFT_OUTPUT_DATA_BUFFER outputData = {};
+                    if ((info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) == 0) {
+                        DWORD cbSize = info.cbSize ? info.cbSize : (DWORD)(w * h * 3);
+                        IMFSample* outSample = nullptr;
+                        IMFMediaBuffer* outBuffer = nullptr;
+                        if (SUCCEEDED(MFCreateSample(&outSample)) && SUCCEEDED(MFCreateMemoryBuffer(cbSize, &outBuffer))) {
+                            outSample->AddBuffer(outBuffer);
+                            outputData.pSample = outSample;
+                        }
+                        if (outBuffer) outBuffer->Release();
+                    }
+
+                    DWORD status = 0;
+                    HRESULT hr = pMFEncoder->ProcessOutput(0, 1, &outputData, &status);
+
+                    if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+                        // Encoder wants a fresh output type (common right after
+                        // a hardware MFT starts). Re-accept and report success —
+                        // the pending sample arrives with the next call.
+                        IMFMediaType* t = nullptr;
+                        if (SUCCEEDED(pMFEncoder->GetOutputAvailableType(0, 0, &t)) && t) {
+                            pMFEncoder->SetOutputType(0, t, 0);
+                            t->Release();
+                        }
+                    } else if (SUCCEEDED(hr) && outputData.pSample) {
+                        sendEncodedSample(outputData.pSample);
+                    }
+
+                    if (outputData.pSample) outputData.pSample->Release();
+                    if (outputData.pEvents) outputData.pEvents->Release();
+                    return hr == MF_E_TRANSFORM_STREAM_CHANGE ? S_OK : hr;
+                };
+
+                // ---- async (hardware) MFTs: drain queued events without ever
+                // blocking. Counts NeedInput credits; services HaveOutput
+                // immediately. Returns false only on a fatal encoder error.
+                auto pumpAsyncEvents = [&]() -> bool {
+                    while (pMFEvents) {
+                        IMFMediaEvent* ev = nullptr;
+                        HRESULT hr = pMFEvents->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
+                        if (hr == MF_E_NO_EVENTS_AVAILABLE) return true;
+                        if (FAILED(hr) || !ev) return false;
+                        MediaEventType met = MEUnknown;
+                        ev->GetType(&met);
+                        ev->Release();
+                        if (met == METransformNeedInput) {
+                            ++mfNeedInput;
+                        } else if (met == METransformHaveOutput) {
+                            if (FAILED(processOneOutput())) return false;
+                        }
+                        // other events (marker, drain complete) are ignored
+                    }
+                    return true;
+                };
+
                 IMFSample* pSample = nullptr;
                 MFCreateSample(&pSample);
                 IMFMediaBuffer* pBuffer = nullptr;
                 MFCreateMemoryBuffer(nv12Size, &pBuffer);
+                if (!pSample || !pBuffer) {
+                    if (pBuffer) pBuffer->Release();
+                    if (pSample) pSample->Release();
+                    encBusy = false;
+                    continue;
+                }
                 BYTE* pData = nullptr;
                 pBuffer->Lock(&pData, nullptr, nullptr);
                 memcpy(pData, nv12Buf.data(), nv12Size);
@@ -297,89 +522,45 @@ struct RemoteServerImpl {
                 pSample->SetSampleDuration(10000000 / 30);
                 mfFrameTime += 10000000 / 30;
 
-                HRESULT hr = pMFEncoder->ProcessInput(0, pSample, 0);
-                pBuffer->Release();
-                pSample->Release();
-
-                if (SUCCEEDED(hr)) {
-                    while (true) {
-                        MFT_OUTPUT_STREAM_INFO info = {};
-                        pMFEncoder->GetOutputStreamInfo(0, &info);
-                        
-                        DWORD cbSize = info.cbSize;
-                        if (cbSize == 0) cbSize = w * h * 3;
-                        
-                        IMFSample* outSample = nullptr;
-                        IMFMediaBuffer* outBuffer = nullptr;
-                        MFT_OUTPUT_DATA_BUFFER outputData = {};
-                        
-                        if ((info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) == 0) {
-                            if (SUCCEEDED(MFCreateSample(&outSample)) && SUCCEEDED(MFCreateMemoryBuffer(cbSize, &outBuffer))) {
-                                outSample->AddBuffer(outBuffer);
-                                outputData.pSample = outSample;
+                if (mfIsAsync) {
+                    // Event-driven feed: wait (bounded, non-blocking pump) for an
+                    // input credit; if the encoder is backed up, drop this frame
+                    // rather than stall the encode thread.
+                    bool ok = pumpAsyncEvents();
+                    int waitedMs = 0;
+                    while (ok && mfNeedInput == 0 && waitedMs < 150) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        waitedMs += 2;
+                        ok = pumpAsyncEvents();
+                    }
+                    if (ok && mfNeedInput > 0) {
+                        --mfNeedInput;
+                        if (FAILED(pMFEncoder->ProcessInput(0, pSample, 0))) ok = false;
+                        if (ok) ok = pumpAsyncEvents(); // service outputs promptly
+                    }
+                    if (!ok) {
+                        // Never crash the stream on a hardware hiccup: drop to the
+                        // software encoder permanently for this session.
+                        pf::logWarn("WebRTC: hardware encoder failed at runtime; switching to software");
+                        releaseEncoder();
+                        mfHwFailed = true; // next frame re-runs initMF with software
+                    }
+                } else {
+                    HRESULT hr = pMFEncoder->ProcessInput(0, pSample, 0);
+                    if (SUCCEEDED(hr)) {
+                        while (true) {
+                            hr = processOneOutput();
+                            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
+                            if (FAILED(hr)) {
+                                pf::logError("MF ProcessOutput failed");
+                                break;
                             }
-                            if (outBuffer) outBuffer->Release();
-                        }
-                        
-                        DWORD status = 0;
-                        hr = pMFEncoder->ProcessOutput(0, 1, &outputData, &status);
-                        
-                        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-                            if (outputData.pSample) outputData.pSample->Release();
-                            break;
-                        }
-                        
-                        if (FAILED(hr)) {
-                            pf::logError("MF ProcessOutput failed");
-                            if (outputData.pSample) outputData.pSample->Release();
-                            break;
-                        }
-                        
-                        if (SUCCEEDED(hr)) {
-                            if (outputData.pSample) {
-                                IMFMediaBuffer* outBuf = nullptr;
-                                outputData.pSample->ConvertToContiguousBuffer(&outBuf);
-                                if (outBuf) {
-                                    BYTE* outData = nullptr;
-                                    DWORD outLen = 0;
-                                    if (SUCCEEDED(outBuf->Lock(&outData, nullptr, &outLen))) {
-                                        static bool loggedFirst = false;
-                                        if (!loggedFirst && outLen >= 4) {
-                                            loggedFirst = true;
-                                            pf::logInfo("H.264 First frame bytes: " + 
-                                                std::to_string(outData[0]) + " " + 
-                                                std::to_string(outData[1]) + " " + 
-                                                std::to_string(outData[2]) + " " + 
-                                                std::to_string(outData[3]));
-                                        }
-                                        
-                                        // Send frame to WebRTC clients
-                                        std::lock_guard<std::mutex> g(clMx);
-                                        for (auto& kv : clients) {
-                                            if (kv.second.authed && kv.second.webrtc && kv.second.videoTrack) {
-                                                try {
-                                                    if (kv.second.videoTrack->isOpen()) {
-                                                        kv.second.videoTrack->sendFrame(reinterpret_cast<const std::byte*>(outData), outLen, rtc::FrameInfo(static_cast<uint32_t>(nowMs() * 90)));
-                                                    }
-                                                } catch (const std::exception& e) {
-                                                    pf::logError("WebRTC sendFrame exception: " + std::string(e.what()));
-                                                } catch (...) {
-                                                    pf::logError("WebRTC sendFrame unknown exception");
-                                                }
-                                            }
-                                        }
-                                        outBuf->Unlock();
-                                    }
-                                    outBuf->Release();
-                                }
-                                outputData.pSample->Release();
-                            }
-                            if (outputData.pEvents) outputData.pEvents->Release();
-                        } else {
-                            break;
                         }
                     }
                 }
+
+                pBuffer->Release();
+                pSample->Release();
             }
 #endif
             encBusy = false;
@@ -389,10 +570,7 @@ struct RemoteServerImpl {
         if (tj) tjDestroy(tj);
 #endif
 #if defined(PF_REMOTE_WEBRTC) && defined(_WIN32)
-        if (pMFEncoder) {
-            pMFEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-            pMFEncoder->Release();
-        }
+        releaseEncoder(); // frees pMFEvents + pMFEncoder
         MFShutdown();
         CoUninitialize();
 #endif
@@ -466,19 +644,63 @@ struct RemoteServerImpl {
             try {
                 cl.webrtc = true;
                 cl.stream = false; // disable jpeg
-                
+
+                // Parse the browser's offer FIRST. libdatachannel matches local
+                // tracks to remote m-lines strictly by mid — an unmatched mid
+                // makes the answer reject the video line (port 0) and no media
+                // ever flows. The answer must also reuse the offer's H264
+                // payload type + fmtp, not a hardcoded one.
+                rtc::Description offerDesc(m.value("sdp", ""), rtc::Description::Type::Offer);
+
+                std::string mid = "video";
+                int pt = -1;
+                std::string fmtp; // the browser's own H264 fmtp, mirrored back
+                for (int i = 0; i < offerDesc.mediaCount(); ++i) {
+                    auto entry = offerDesc.media(i);
+                    auto** mediaPtr = std::get_if<rtc::Description::Media*>(&entry);
+                    if (!mediaPtr || (*mediaPtr)->type() != "video") continue;
+                    mid = (*mediaPtr)->mid();
+                    for (int cand : (*mediaPtr)->payloadTypes()) {
+                        const auto* map = (*mediaPtr)->rtpMap(cand);
+                        if (!map) continue;
+                        std::string fmt = map->format;
+                        std::transform(fmt.begin(), fmt.end(), fmt.begin(),
+                                       [](unsigned char c) { return (char)std::tolower(c); });
+                        if (fmt != "h264") continue;
+                        // Prefer packetization-mode=1 (FU-A) — what our
+                        // packetizer emits; keep first H264 as fallback.
+                        bool pm1 = false;
+                        for (const auto& f : map->fmtps)
+                            if (f.find("packetization-mode=1") != std::string::npos) pm1 = true;
+                        if (pt < 0 || pm1) {
+                            pt = cand;
+                            fmtp = map->fmtps.empty() ? std::string() : map->fmtps[0];
+                        }
+                        if (pm1) break;
+                    }
+                    break;
+                }
+                if (pt < 0) {
+                    pf::logError("WebRTC offer has no H264 codec — cannot stream (browser lacks H264 support?)");
+                    cl.webrtc = false;
+                    recountLocked();
+                    return 1;
+                }
+                pf::logInfo("WebRTC offer: video mid=\"" + mid + "\" H264 pt=" + std::to_string(pt));
+
                 rtc::Configuration config;
                 config.iceServers.emplace_back("stun:stun.l.google.com:19302");
                 cl.pc = std::make_shared<rtc::PeerConnection>(config);
-                
-                rtc::Description::Video video("video");
-                video.addH264Codec(96);
+
+                rtc::Description::Video video(mid);
+                if (fmtp.empty()) video.addH264Codec(pt);
+                else              video.addH264Codec(pt, fmtp);
                 video.addSSRC(1111, "video-stream");
                 cl.videoTrack = cl.pc->addTrack(video);
 
                 auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
-                    1111, "video-stream", 96, rtc::H264RtpPacketizer::ClockRate);
-                
+                    1111, "video-stream", pt, rtc::H264RtpPacketizer::ClockRate);
+
                 auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(rtc::NalUnit::Separator::StartSequence, rtpConfig);
                 packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfig));
                 packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
@@ -502,7 +724,11 @@ struct RemoteServerImpl {
                     sendTo(conn, cand.dump());
                 });
 
-                cl.pc->setRemoteDescription(rtc::Description(m.value("sdp", ""), m.value("type", "")));
+                cl.pc->onStateChange([](rtc::PeerConnection::State s) {
+                    pf::logInfo("WebRTC pc state: " + std::to_string((int)s));
+                });
+
+                cl.pc->setRemoteDescription(std::move(offerDesc));
             } catch (const std::exception& e) {
                 pf::logError("WebRTC offer exception: " + std::string(e.what()));
             } catch (...) {
@@ -591,6 +817,45 @@ static int embedded_handler(struct mg_connection* conn, void* fn_data) {
     }
     return 0; // Not handled
 }
+// GET /shot.png?pin=<PIN> — download the viewer's last screenshot. PIN-gated
+// so the viewport image is never exposed to unauthenticated LAN peers.
+static int shot_handler(struct mg_connection* conn, void* ud) {
+    auto* impl = static_cast<RemoteServerImpl*>(ud);
+    const struct mg_request_info* ri = mg_get_request_info(conn);
+    pf::logInfo("shot_handler: enter");
+
+    char pin[16] = {};
+    if (ri->query_string)
+        mg_get_var(ri->query_string, strlen(ri->query_string), "pin", pin, sizeof(pin));
+    pf::logInfo("shot_handler: pin parsed");
+    if (impl->pinCode.empty() || impl->pinCode != pin) {
+        mg_send_http_error(conn, 403, "%s", "bad pin");
+        pf::logInfo("shot_handler: 403 sent");
+        return 403;
+    }
+
+    std::vector<uint8_t> png;
+    {
+        std::lock_guard<std::mutex> g(impl->shotMx);
+        png = impl->lastShot; // copy so the lock is not held while writing
+    }
+    pf::logInfo("shot_handler: png copied, " + std::to_string(png.size()) + " bytes");
+    if (png.empty()) {
+        mg_send_http_error(conn, 404, "%s", "no screenshot yet");
+        return 404;
+    }
+    mg_printf(conn,
+              "HTTP/1.1 200 OK\r\n"
+              "Content-Type: image/png\r\n"
+              "Content-Length: %lu\r\n"
+              "Content-Disposition: attachment; filename=\"viitorxpc_shot.png\"\r\n"
+              "Cache-Control: no-store\r\n\r\n",
+              (unsigned long)png.size());
+    mg_write(conn, reinterpret_cast<const char*>(png.data()), png.size());
+    pf::logInfo("shot_handler: 200 sent");
+    return 200;
+}
+
 static int wsConnect(const mg_connection*, void*) { return 0; }   // accept all
 
 static void wsReady(mg_connection* conn, void* ud) {
@@ -650,13 +915,16 @@ bool RemoteServer::start(int port, const std::string& webRoot) {
         nullptr
     };
     impl_->ctx = mg_start(nullptr, nullptr, options);
-    // If forcing disk web, skip embedding handler
-    if (PF_EMBED_WEB && !impl_->forceDiskWeb) {
-        mg_set_request_handler(impl_->ctx, "/*", embedded_handler, impl_);
-    }
     if (!impl_->ctx) {
         pf::logError("Remote: failed to start server on port " + std::to_string(port) + " (in use?)");
         return false;
+    }
+    // Specific routes must be registered before the "/*" embedded catch-all —
+    // civetweb picks the first matching handler in registration order.
+    mg_set_request_handler(impl_->ctx, "/shot.png", shot_handler, impl_);
+    // If forcing disk web, skip embedding handler
+    if (PF_EMBED_WEB && !impl_->forceDiskWeb) {
+        mg_set_request_handler(impl_->ctx, "/*", embedded_handler, impl_);
     }
     mg_set_websocket_handler(impl_->ctx, "/ws",
                              wsConnect, wsReady, wsData, wsClose, impl_);
@@ -774,7 +1042,8 @@ void RemoteServer::publishConfig(const RemoteConfig& c) {
         {"pts", c.pointCount}, {"nodes", c.nodeCount}, {"cubeSize", c.cubeSize},
         {"streamAvailable", c.streamAvailable},
         {"webrtcAvailable", c.webrtcAvailable},
-        {"preferredStream", c.preferredStream}
+        {"preferredStream", c.preferredStream},
+        {"bookmarks", c.bookmarks}
     };
     json mp = json::array();
     for (const auto& p : c.measurePts) mp.push_back({p[0], p[1], p[2]});
@@ -833,6 +1102,19 @@ void RemoteServer::publishFrame(const uint8_t*, int, int) {}
 
 int RemoteServer::streamMaxWidth() const { return impl_->streamW.load(); }
 
+void RemoteServer::publishShot(const std::vector<uint8_t>& png) {
+    if (!impl_->ctx || png.empty()) return;
+    {
+        std::lock_guard<std::mutex> g(impl_->shotMx);
+        impl_->lastShot = png;
+    }
+    // Tell authed clients a fresh capture is downloadable at /shot.png.
+    const std::string msg = R"({"t":"shot_ready"})";
+    std::lock_guard<std::mutex> g(impl_->clMx);
+    for (auto& kv : impl_->clients)
+        if (kv.second.authed) impl_->sendTo(kv.first, msg);
+}
+
 } // namespace pf
 
 #else // ---- stub build (civetweb / nlohmann-json missing) -------------------
@@ -868,6 +1150,7 @@ bool RemoteServer::webrtcAvailable() { return false; }
 bool RemoteServer::wantFrame() { return false; }
 void RemoteServer::publishFrame(const uint8_t*, int, int) {}
 int  RemoteServer::streamMaxWidth() const { return 0; }
+void RemoteServer::publishShot(const std::vector<uint8_t>&) {}
 } // namespace pf
 
 #endif

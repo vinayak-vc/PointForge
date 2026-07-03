@@ -54,6 +54,10 @@ struct RemoteConfig {
     bool streamAvailable = false;
     bool webrtcAvailable = false;
     int preferredStream = 0; // 0: JPEG, 1: WebRTC
+    // camera bookmarks for the loaded cloud (names only; recall by index via
+    // {"t":"cmd","n":"bookmark_goto","v":<idx>}, save via "bookmark_add",
+    // delete via "bookmark_del")
+    std::vector<std::string> bookmarks;
 };
 
 struct RemoteServerImpl;   // defined in RemoteServer.cpp (civetweb kept out of headers)
@@ -130,6 +134,13 @@ public:
     int  streamMaxWidth() const;      // client-requested output width cap
 
     static bool webrtcAvailable();
+
+    // ---- screenshot download (phone grabs the last capture) ---------------
+    // Store the most recent screenshot (PNG bytes). Served over HTTP at
+    // /shot.png?pin=<PIN> — PIN required so the viewport image is not exposed
+    // to unauthenticated LAN peers. Also notifies authed WS clients with
+    // {"t":"shot_ready"} so the web UI can offer the download.
+    void publishShot(const std::vector<uint8_t>& png);
 
 private:
     RemoteServerImpl* impl_;

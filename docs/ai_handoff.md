@@ -1,6 +1,201 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-03, cont.) - Logo, Branding, and 3D Watermark
+## Latest Session (2026-07-03, cont.) - Web Remote UX Polishing & Orbit Snapping Bugfix
+
+### What was built / Fixed
+- **Orbit Snapping Bug (C++ App)**: The user reported the camera violently snapping when left-clicking to orbit after right-clicking to look. This was because the `pivot` coordinate was being left stale when the camera rotation changed. Fixed in `main.cpp` by re-projecting the pivot directly onto the camera's current forward axis right as the left-click drag starts, preserving distance without teleporting the camera.
+- **Web Remote Speed Controls**: Raised the maximum speed slider caps for Look, Pan, and Zoom from 1.0 to 5.0. 
+- **Global UI Scale**: Increased the Web Remote's entire UI size by 20% globally via `zoom: 1.2` on the `body` tag.
+- **Always-on Fly Controls**: Removed the Fly controls from the properties panel and overlaid them permanently over the viewport. The speed slider values are now preserved because the tab never unmounts.
+- **Resizable Properties Panel**: Used native CSS resize handles (`resize: horizontal`, `direction: rtl`) to allow the right-hand Inspector rail to be dragged to expand its width.
+- **Watermark & Branding**: Wired the C++ app's SVG logo to the Web Remote's favicon, Connect screen, and an always-visible viewport watermark.
+
+### Modified files
+- `src/viewer/main.cpp`
+- `webremote/src/index.css`
+- `webremote/src/FlyTab.tsx`
+- `webremote/src/App.tsx`
+- `docs/{tasks,ai_handoff}.md`
+
+### Next Recommended Task
+The web remote `webapp-controller` feature branch is complete and fully polished.
+- Merge `webapp-controller` into the main branch.
+
+User report: pressing Front/Side/Top (keys 1/3/7 or remote `preset*` cmds) made
+the model vanish; 'F' (frame) recovered it.
+
+### Root cause (`src/viewer/main.cpp` camPreset* lambdas)
+Two independent bugs:
+1. **Wrong space**: presets set `cam.position = store.cubeCenter() + offset`,
+   but the camera/render space is CENTRED (cube centre = origin — see
+   `frameAll`, `pivot`, and the GPU-precision convention in CLAUDE.md). Adding
+   the world-space cube centre teleported the camera by the cloud's world
+   offset — kilometres for georeferenced scans.
+2. **Wrong orientation**: the hardcoded yaw/pitch never pointed at the model
+   anyway (e.g. Top placed the camera above but pitch +89 = looking straight UP;
+   Front sat at -Y but looked -X). front() convention: Z-up, yaw=0 → +Y.
+
+### Fix
+Single `presetView(dir)` helper: distance from the frameAll fit formula
+(`cs*0.5/tan(fov/2)*1.4`), `pivot = origin`, `cam.position = dir*dist`,
+`cam.lookAt(pivot)` (safe at straight-down — pitch clamped ±89). Presets also
+reset the orbit pivot now, so orbiting after a preset behaves.
+Rebuilt `build-static/Release/ViitorXPCViewer.exe` — this build also embeds the
+redesigned webremote UI (web_build target ran npm install for lucide-react).
+
+### Modified files
+- src/viewer/main.cpp (camPresetTop/Front/Side → presetView helper)
+- docs/{tasks,ai_handoff}.md
+
+### Next Recommended Task
+Verify presets on the loaded NTPC.laz scan (1/3/7 + remote Camera tab), then
+proceed with the merge plan below.
+
+## Previous Session (2026-07-03, cont.) - Web Remote Premium UI Redesign
+
+User requested a full visual redesign of the ViitorXPC Remote Controller web application into a premium, enterprise-grade interface, without altering any backend logic, API contracts, or existing features.
+
+### What was built / Fixed
+- **App Shell Architecture**: Restructured the layout into a fixed desktop-like shell consisting of a Top Toolbar, a central Workspace (Viewport + Right Inspector), and a bottom Status Bar. On mobile screens, the inspector docks to the bottom.
+- **CSS Design System**: Created a handcrafted CSS variables design system in `index.css` to avoid complex build configurations. Used a dark, technical color palette (`#0D0F12` background, `#17191E` panels, `#4DA3FF` accent).
+- **Component Upgrades**: Replaced default browser inputs with custom styled components: animated iOS-style toggles, segmented controls, custom slider thumbs, and glowing buttons.
+- **Iconography**: Integrated `lucide-react` for clean, professional icons across the toolbar, inspector tabs, and status bar.
+- **Gesture Preservation**: Carefully ported the existing multi-touch and mouse gesture logic into the new floating glass-morphic `FlyTab` without any regressions.
+
+### Modified files
+- webremote/package.json
+- webremote/src/index.css
+- webremote/src/controls.tsx
+- webremote/src/App.tsx
+- webremote/src/ActionBar.tsx
+- webremote/src/StatusHUD.tsx
+- webremote/src/FlyTab.tsx
+- docs/{tasks,decisions,ai_handoff}.md
+
+### Next Recommended Task
+- Merge `webapp-controller` branch into main.
+- Validate the new UI performance on various mobile and desktop browsers.
+
+## Previous Session (2026-07-03, cont.) - WebRTC Streaming Bugfix (client signaling)
+
+User reported: WebRTC video stream not working; JPEG stream fine. Root cause was
+entirely client-side (webremote React app) — three signaling bugs. No C++ changes.
+
+### Bugs found & fixed
+1. **Fatal — answer never delivered** (`App.tsx`): the `onWebRTC` option passed to
+   `useWebSocket` was a `let` no-op placeholder; reassigning the local variable
+   after `useWebRTC()` returned did NOT update the already-constructed options
+   object, so `optsRef.current.onWebRTC` stayed the no-op every render. The
+   server's `webrtc_answer` was silently dropped → `setRemoteDescription` never
+   ran → PC stuck in `have-local-offer` → no video ever. Fixed with a
+   `webrtcMsgRef` ref + stable `useCallback` that forwards to the latest handler.
+2. **Fatal — server ICE dropped** : server (RemoteServer.cpp `onLocalCandidate`)
+   sends trickle candidates as `{"t":"webrtc_candidate"}`, but the client switch
+   in `useWebSocket.ts` only forwarded `webrtc_ice`/`webrtc_answer`. libdatachannel
+   emits the answer SDP *before* gathering, so the answer carries no candidates —
+   client had zero remote candidates and ICE could not pair. Client now accepts
+   both `webrtc_ice` and `webrtc_candidate` (server also lacks `sdpMLineIndex`;
+   defaulted to mid `video` / index 0).
+3. **Race** (`useWebRTC.ts`): `addIceCandidate` throws if called before
+   `setRemoteDescription` resolves. Added a pending-candidate queue flushed after
+   the answer is applied. Also: offer message now includes `type:'offer'` (server
+   reads `m.value("type","")`), and `onnegotiationneeded` got try/catch.
+
+### Verified
+- `npm run build` clean (tsc --noEmit + vite).
+- Rebuilt `build-static/Release/ViitorXPCViewer.exe` (web app is embedded via
+  generated `EmbeddedWeb.h`; a webremote change ALWAYS requires an exe rebuild —
+  `cmake --build build-static --config Release --target pfview`).
+- Not yet re-tested on physical phone — that is the next step.
+
+### Modified files
+- webremote/src/App.tsx (ref-based onWebRTC wiring)
+- webremote/src/useWebSocket.ts (accept `webrtc_candidate`)
+- webremote/src/useWebRTC.ts (candidate queue, offer `type`, error handling)
+- docs/{tasks,ai_handoff}.md
+
+### Round 2 (same day) — mobile showed play button, desktop Chrome black
+Two more root causes found and fixed:
+
+4. **Fatal — answer rejected the video m-line** (`RemoteServer.cpp` webrtc_offer):
+   libdatachannel matches local tracks to remote m-lines strictly by mid
+   (`mTracks.find(remoteMedia->mid())` in populateLocalDescription). Browser
+   offer mid is `"0"`; server track was hardcoded mid `"video"` → no match →
+   answer marked the video line removed (port 0) → no media could ever flow.
+   Payload type was also hardcoded 96 instead of mirroring the offer's H264 PT.
+   Fix: parse the offer with `rtc::Description`, extract the video m-line's mid
+   + the browser's H264 payload type (prefer packetization-mode=1) + its fmtp,
+   and build the local track from those. Logs
+   `WebRTC offer: video mid="..." H264 pt=...` on offer, plus pc state changes.
+   If the browser offers no H264 at all, logs an error and stays on JPEG.
+5. **Mobile autoplay blocked** (`VideoLayer.tsx`): React does not reliably
+   reflect the `muted` prop into the DOM before the autoplay policy check —
+   mobile browsers blocked playback and showed a play overlay. Fix: set
+   `v.muted = true` imperatively before `play()`, plus a
+   pointerdown/touchend fallback that resumes a paused video on first gesture.
+
+Also added console diagnostics in `useWebRTC.ts`: ICE/pc state transitions and
+a 2 s inbound-rtp stats log (`[webrtc] frames=... bytes=... keyframes=...`).
+Rebuilt webremote + `build-static/Release/ViitorXPCViewer.exe`.
+
+### Round 3 (same day) — WebRTC works but quality/perf worse than JPEG
+Expected with old settings: encoder was hardcoded to 2 Mbps CBR while the JPEG
+"med" preset effectively uses 12–18 Mbps; point-cloud content (dense
+high-contrast dots) defeats H.264 inter prediction, so starved CBR smears.
+Applied in `RemoteServer.cpp` `initMF`:
+- `MF_MT_AVG_BITRATE` 2 Mbps → 12 Mbps (LAN-only stream).
+- Quality-based VBR: `CODECAPI_AVEncCommonRateControlMode` =
+  `eAVEncCommonRateControlMode_Quality`, `CODECAPI_AVEncCommonQuality` = 78.
+  Falls back to CBR@12Mbps with a logWarn if the encoder rejects the mode.
+Rebuilt exe. NOT yet done (option #3, discussed): hardware encoder via
+`MFTEnumEx(MFT_ENUM_FLAG_HARDWARE)` (NVENC/QuickSync) — the current
+`CLSID_CMSH264EncoderMFT` is Microsoft's software encoder and burns CPU
+(plus CPU RGB→NV12) competing with the renderer; that is the remaining
+perf gap vs turbojpeg if WebRTC still feels slow.
+
+### Round 4 (same day) — hardware H.264 encoder (option #3), verified live
+`RemoteServer.cpp` `encodeLoop` reworked for hardware encoding:
+- `initMF` now tries `MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE)`
+  first (NVENC/QuickSync/VCE), falls back to `CLSID_CMSH264EncoderMFT` software.
+- Hardware codec MFTs are **async** — added the METransformNeedInput/HaveOutput
+  event model (`IMFMediaEventGenerator`, `MF_TRANSFORM_ASYNC_UNLOCK`), driven by
+  a non-blocking pump (`MF_EVENT_FLAG_NO_WAIT`, bounded 150 ms credit wait —
+  drops the frame if the encoder is backed up; never blocks/hangs).
+- Crash safety: every failure path (enum, activate, configure, runtime
+  ProcessInput/Output, stream change) releases the encoder and falls back to
+  the software MFT via a sticky `mfHwFailed` flag — stream continues, no crash.
+  `MF_E_TRANSFORM_STREAM_CHANGE` handled by re-accepting the output type.
+- Shared `sendEncodedSample`/`processOneOutput` lambdas serve both sync
+  (software) and async (hardware) paths.
+
+**Live-verified on this machine** (Playwright against the real exe):
+log shows `WebRTC: hardware H.264 encoder: NVIDIA H.264 Encoder MFT`, browser
+`<video>` decodes 1280×734 and currentTime advances; 4× JPEG↔WebRTC toggles +
+client reconnects survived; process stayed alive, zero error lines in the log.
+
+### Session modified files (uncommitted, branch `webapp-controller`)
+- src/viewer/RemoteServer.cpp — offer mid/PT mirroring, quality VBR + 12 Mbps,
+  hardware-first async-MFT encoder with software fallback
+- webremote/src/useWebRTC.ts — candidate queue, `webrtc_candidate` handling,
+  offer `type`, ICE/stats console diagnostics
+- webremote/src/useWebSocket.ts — forward `webrtc_candidate`
+- webremote/src/VideoLayer.tsx — imperative `muted` + gesture autoplay fallback
+- webremote/src/{App,ActionBar,FlyTab,StatusHUD,controls}.tsx, index.css,
+  package.json — webremote UI redesign (premium connect screen, lucide-react
+  icons, StatusHUD, toolbar shell) — also uncommitted on this branch
+- docs/{project-overview,architecture,roadmap,decisions,tasks,ai_handoff}.md —
+  architecture.md gained §8 "Web Remote"; decisions.md gained the two WebRTC
+  decisions; overview/roadmap refreshed (web embedding is DONE, not a milestone)
+
+### Next Recommended Task
+Physical test with the NEW exe (`build-static/Release/ViitorXPCViewer.exe`):
+set preferred stream to WebRTC, connect, watch browser console —
+ICE should reach `connected` and `frames=` should climb. If ICE connects but
+frames stay 0, the remaining suspect is the MF H.264 encoder output
+(SPS/PPS/IDR); check viewer Console for `WebRTC offer:` / pc state logs.
+Then merge `webapp-controller`.
+
+## Previous Session (2026-07-03, cont.) - Logo, Branding, and 3D Watermark
 
 ### What was built / Fixed
 - **Configuration Routing**: Modified `main.cpp` to use `SDL_GetPrefPath` to route the `pfview_config.txt` serialization to the user's local `AppData` directory (`AppData/Roaming/ViitorX/ViitorXPC/`). This ensures standard desktop behavior without requiring admin privileges to save settings when installed in `Program Files`.

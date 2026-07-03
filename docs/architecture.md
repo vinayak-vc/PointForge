@@ -190,7 +190,37 @@ colour legend) is suppressed — only a fading "F9/Esc to exit" hint is drawn,
 once per eye viewport, so it fuses correctly through a stereoscope. Hotkeys
 (F9, Esc) still process normally; only rendering is suppressed.
 
-## 8. Extension points (deliberate TODOs)
+## 8. Web Remote (embedded server + viewport streaming)
+
+`RemoteServer` (src/viewer/RemoteServer.cpp, guarded by `PF_WITH_REMOTE`) embeds
+a civetweb HTTP+WebSocket server in the viewer. The React app (`webremote/`,
+Vite build) is embedded into the exe via a generated `EmbeddedWeb.h`
+(`PF_EMBED_WEB`) — **any webremote change requires an exe rebuild**. Protocol is
+JSON over WS: `hello{pin}`, `move` @30 Hz, `cmd`, `set`, plus `cfg`/`state`
+broadcasts back.
+
+Two viewport stream engines, selected by the `preferredStream` cfg key:
+
+* **JPEG** (`PF_REMOTE_STREAM`): turbojpeg-compressed frames pushed as binary
+  WS messages. Robust, per-frame crisp, ~12–18 Mbps at the "med" preset.
+* **WebRTC H.264** (`PF_REMOTE_WEBRTC`): libdatachannel + Media Foundation.
+  Browser is the offerer; the server **mirrors the offer's video mid + H264
+  payload type + fmtp** when building its answer track (libdatachannel matches
+  tracks to m-lines strictly by mid — a mismatched mid makes the answer reject
+  the video line). RTP SSRC fixed at 1111; Annex-B NALs fed to
+  `H264RtpPacketizer`.
+
+Encoding runs on a dedicated thread (`encodeLoop`, latest-frame slot — the main
+thread never blocks). Encoder selection is **hardware-first**:
+`MFTEnumEx(MFT_ENUM_FLAG_HARDWARE)` (NVENC/QuickSync/VCE) driven through the
+async-MFT event model (`METransformNeedInput`/`HaveOutput`, non-blocking pump,
+bounded 150 ms input-credit wait → frame drop when backed up), falling back to
+the synchronous software `CLSID_CMSH264EncoderMFT` on any init or runtime
+failure (sticky `mfHwFailed` flag — the stream degrades, never crashes).
+Rate control: quality-based VBR (quality 78) with a 12 Mbps average-bitrate
+hint; GOP 30 for a 1 s keyframe cadence so clients joining mid-stream recover.
+
+## 9. Extension points (deliberate TODOs)
 
 * **LAZ via PDAL**: `laszip_api` covers LAS/LAZ directly; swap to PDAL if you need
   exotic formats.

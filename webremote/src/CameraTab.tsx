@@ -70,6 +70,41 @@ export default function CameraTab({ cfg, setValue, send }: CameraTabProps) {
         </div>
       </Card>
 
+      <Card title="Bookmarks">
+        {(cfg.bookmarks ?? []).length === 0 ? (
+          <p className="dim">No saved views for this cloud yet.</p>
+        ) : (
+          (cfg.bookmarks ?? []).map((name, i) => (
+            <div className="bookmark-row" key={`${i}-${name}`}>
+              <button
+                type="button"
+                className="recent-btn"
+                onClick={() => send({ t: 'cmd', n: 'bookmark_goto', v: i })}
+              >
+                {name}
+              </button>
+              <button
+                type="button"
+                className="bookmark-del"
+                aria-label={`Delete bookmark ${name}`}
+                onClick={() => {
+                  if (window.confirm(`Delete bookmark "${name}"?`)) {
+                    send({ t: 'cmd', n: 'bookmark_del', v: i });
+                  }
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))
+        )}
+        <div className="btn-grid">
+          <button type="button" onClick={cmd('bookmark_add')}>
+            Save current view
+          </button>
+        </div>
+      </Card>
+
       <Card title="Stereo 3D">
         <Toggle
           label="Stereo (side-by-side)"

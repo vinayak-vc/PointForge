@@ -57,10 +57,25 @@ const VideoLayer = forwardRef<VideoLayerHandle, VideoLayerProps>(function VideoL
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    if (props.type === 'webrtc' && videoRef.current && props.rtcStream) {
-      videoRef.current.srcObject = props.rtcStream;
-      videoRef.current.play().catch(e => console.warn('Video auto-play prevented:', e));
-    }
+    const v = videoRef.current;
+    if (props.type !== 'webrtc' || !v || !props.rtcStream) return;
+    // React does not reliably reflect the `muted` prop into the DOM before
+    // the autoplay policy check — set it imperatively or mobile browsers
+    // block playback and show a play overlay.
+    v.muted = true;
+    v.srcObject = props.rtcStream;
+    const tryPlay = () => v.play().catch(e => console.warn('Video auto-play prevented:', e));
+    tryPlay();
+    // Fallback: resume on the first user gesture if autoplay was blocked.
+    const onGesture = () => {
+      if (v.paused) tryPlay();
+    };
+    document.addEventListener('pointerdown', onGesture);
+    document.addEventListener('touchend', onGesture);
+    return () => {
+      document.removeEventListener('pointerdown', onGesture);
+      document.removeEventListener('touchend', onGesture);
+    };
   }, [props.type, props.rtcStream]);
 
   if (props.type === 'webrtc') {

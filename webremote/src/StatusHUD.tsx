@@ -1,7 +1,8 @@
 import type { StateMsg, WsStatus } from './useWebSocket';
+import { Activity, Cpu, MapPin, FileText } from 'lucide-react';
 
-// Small overlay showing viewer telemetry from the ~5 Hz state messages,
-// plus a connection dot (green = connected, orange = handshaking, red = down).
+// Premium status bar — rendered at the bottom of the app shell.
+// Previously a floating overlay; now a fixed-height bar with chip layout.
 
 export interface StatusHUDProps {
   state: StateMsg | null;
@@ -18,25 +19,61 @@ export function formatPoints(n: number): string {
 function dotClass(status: WsStatus): string {
   if (status === 'connected') return 'dot-green';
   if (status === 'disconnected') return 'dot-red';
-  return 'dot-orange'; // connecting / pin / pin_bad
+  return 'dot-orange';
+}
+
+function statusLabel(status: WsStatus): string {
+  if (status === 'connected') return 'Connected';
+  if (status === 'disconnected') return 'Disconnected';
+  if (status === 'pin' || status === 'pin_bad') return 'Awaiting PIN';
+  return 'Connecting…';
 }
 
 export default function StatusHUD({ state, status }: StatusHUDProps) {
   return (
-    <div className="status-hud">
-      <span className={`conn-dot ${dotClass(status)}`} />
+    <div className="status-bar">
+      {/* Connection */}
+      <div className="status-chip">
+        <span className={`conn-dot ${dotClass(status)}`} />
+        <span className="status-chip-val">{statusLabel(status)}</span>
+      </div>
+
       {state ? (
         <>
-          <span className="hud-file">{state.file || '—'}</span>
-          <span>{Math.round(state.fps)} fps</span>
-          <span>{formatPoints(state.pts)} pts</span>
-          <span className="hud-pos">
-            {state.pos[0].toFixed(1)}, {state.pos[1].toFixed(1)},{' '}
-            {state.pos[2].toFixed(1)}
-          </span>
+          {/* FPS */}
+          <div className="status-chip">
+            <Activity />
+            <span>{Math.round(state.fps)}</span>
+            <span className="status-chip-val"> fps</span>
+          </div>
+
+          {/* Points */}
+          <div className="status-chip">
+            <Cpu />
+            <span className="status-chip-accent">{formatPoints(state.pts)}</span>
+            <span> pts</span>
+          </div>
+
+          {/* File */}
+          {state.file && (
+            <div className="status-chip">
+              <FileText />
+              <span className="status-chip-val">{state.file}</span>
+            </div>
+          )}
+
+          {/* Position */}
+          <div className="status-chip" style={{ marginLeft: 'auto', flexShrink: 0 }}>
+            <MapPin />
+            <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: 10 }}>
+              {state.pos[0].toFixed(1)}, {state.pos[1].toFixed(1)}, {state.pos[2].toFixed(1)}
+            </span>
+          </div>
         </>
       ) : (
-        <span className="hud-file">waiting for state…</span>
+        <div className="status-chip">
+          <span>Waiting for telemetry…</span>
+        </div>
       )}
     </div>
   );

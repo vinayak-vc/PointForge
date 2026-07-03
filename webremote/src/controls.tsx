@@ -2,9 +2,8 @@ import type { ReactNode } from 'react';
 import { hexToRgb, rgbToHex } from './cfg';
 import type { Vec3 } from './cfg';
 
-// Small shared building blocks for the settings tabs: Card, Slider, Toggle,
-// Segmented and ColorRow. Touch-first (>= 44 px targets), dark theme, no
-// external deps. Send throttling lives in useCfg, so these stay dumb.
+// Premium shared building blocks: Card, Slider, Toggle, Segmented, ColorRow.
+// Same API as before — only markup/styling upgraded.
 
 // -------------------------------------------------------------------- Card
 
@@ -27,24 +26,14 @@ export interface SliderProps {
   min: number;
   max: number;
   step?: number;
-  /** Logarithmic feel: internal track is 0..1, value maps exponentially. */
   log?: boolean;
   disabled?: boolean;
   format?: (v: number) => string;
   onChange: (v: number) => void;
 }
 
-export function Slider({
-  label,
-  value,
-  min,
-  max,
-  step,
-  log,
-  disabled,
-  format,
-  onChange,
-}: SliderProps) {
+
+export function Slider({ label, value, min, max, step, log, disabled, format, onChange }: SliderProps) {
   const fmt = format ?? ((v: number) => String(Math.round(v * 100) / 100));
   const toTrack = (v: number) =>
     log ? Math.log(clamp(v, min, max) / min) / Math.log(max / min) : clamp(v, min, max);
@@ -100,7 +89,7 @@ export function Toggle({ label, on, disabled, onChange }: ToggleProps) {
 
 export interface SegmentedProps {
   options: readonly string[];
-  value: number; // active index
+  value: number;
   onChange: (index: number) => void;
   ariaLabel?: string;
 }
@@ -126,7 +115,7 @@ export function Segmented({ options, value, onChange, ariaLabel }: SegmentedProp
 
 export interface ColorRowProps {
   label: string;
-  value: Vec3; // 0-1 floats
+  value: Vec3;
   onChange: (c: Vec3) => void;
 }
 

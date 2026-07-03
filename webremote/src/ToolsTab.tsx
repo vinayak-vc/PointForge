@@ -61,11 +61,18 @@ export default function ToolsTab({ cfg, setValue, send }: ToolsTabProps) {
         </p>
         {cfg.measurePts.length > 0 && (
           <ol className="measure-list">
-            {cfg.measurePts.map((p, i) => (
-              <li key={i}>
-                {p[0].toFixed(2)}, {p[1].toFixed(2)}, {p[2].toFixed(2)}
-              </li>
-            ))}
+            {cfg.measurePts.map((p, i) => {
+              const prev = i > 0 ? cfg.measurePts[i - 1] : null;
+              const seg = prev
+                ? Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2])
+                : 0;
+              return (
+                <li key={i}>
+                  {p[0].toFixed(2)}, {p[1].toFixed(2)}, {p[2].toFixed(2)}
+                  {prev && <span className="dim"> — seg {seg.toFixed(2)}</span>}
+                </li>
+              );
+            })}
           </ol>
         )}
         <div className="btn-grid">

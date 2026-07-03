@@ -47,6 +47,8 @@ export interface UseWebSocketOptions {
   onCfg?: (msg: Record<string, unknown>) => void;
   /** Called for WebRTC signaling messages. */
   onWebRTC?: (msg: Record<string, unknown>) => void;
+  /** Called when the server reports a fresh screenshot at /shot.png. */
+  onShotReady?: () => void;
 }
 
 export interface UseWebSocketResult {
@@ -147,7 +149,11 @@ export function useWebSocket(opts: UseWebSocketOptions = {}): UseWebSocketResult
           break;
         case 'webrtc_answer':
         case 'webrtc_ice':
+        case 'webrtc_candidate': // server-side trickle ICE (libdatachannel)
           optsRef.current.onWebRTC?.(msg as Record<string, unknown>);
+          break;
+        case 'shot_ready':
+          optsRef.current.onShotReady?.();
           break;
         default:
           break; // unknown message types are ignored (forward compat)

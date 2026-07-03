@@ -15,7 +15,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>    // SHGetKnownFolderPath (screenshot dir)
 #endif
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "viewer/stb_image_write.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder API (initial dock layout)
@@ -43,6 +47,7 @@
 #include "indexer/OctreeIndexer.h"
 #include <thread>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <filesystem>
 
@@ -120,22 +125,90 @@ static GLuint loadTextureBMP(SDL_RWops* rw, int freeRw) {
     return tex;
 }
 
-// Save the current GL framebuffer to a BMP (no image-library dependency).
-static bool saveScreenshotBMP(const char* path, int w, int h) {
-    if (w <= 0 || h <= 0) return false;
-    std::vector<unsigned char> px((size_t)w * h * 4);
+// ---- screenshots (PNG via vendored stb_image_write, public domain) ---------
+
+// Read the current GL framebuffer as top-down RGBA with opaque alpha.
+static std::vector<unsigned char> readFramebufferRGBA(int w, int h) {
+    std::vector<unsigned char> bottomUp((size_t)w * h * 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    // GL is bottom-up; SDL surface is top-down -> flip rows.
-    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ABGR8888);
-    if (!s) return false;
-    for (int y = 0; y < h; ++y)
-        std::memcpy((unsigned char*)s->pixels + (size_t)y * s->pitch,
-                    px.data() + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
-    bool ok = SDL_SaveBMP(s, path) == 0;
-    SDL_FreeSurface(s);
-    return ok;
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, bottomUp.data());
+    std::vector<unsigned char> topDown((size_t)w * h * 4);
+    for (int y = 0; y < h; ++y) {
+        const unsigned char* src = bottomUp.data() + (size_t)(h - 1 - y) * w * 4;
+        unsigned char* dst = topDown.data() + (size_t)y * w * 4;
+        std::memcpy(dst, src, (size_t)w * 4);
+        for (int x = 0; x < w; ++x) dst[x * 4 + 3] = 0xFF; // blending leaves junk alpha
+    }
+    return topDown;
 }
+
+// Encode top-down RGBA to an in-memory PNG (also reused by the web remote).
+static std::vector<unsigned char> encodePNG(int w, int h, const unsigned char* rgbaTopDown) {
+    std::vector<unsigned char> out;
+    stbi_write_png_to_func(
+        [](void* ctx, void* data, int size) {
+            auto* v = (std::vector<unsigned char>*)ctx;
+            v->insert(v->end(), (unsigned char*)data, (unsigned char*)data + size);
+        },
+        &out, w, h, 4, rgbaTopDown, w * 4);
+    return out;
+}
+
+// Screenshots land in <Pictures>\ViitorXPC on Windows — the exe may live in a
+// read-only Program Files dir, so never write beside it. Elsewhere: cwd.
+static std::string screenshotDir() {
+#ifdef _WIN32
+    PWSTR wpath = nullptr;
+    std::string dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, KF_FLAG_CREATE, nullptr, &wpath))) {
+        char utf8[1024] = {};
+        WideCharToMultiByte(CP_UTF8, 0, wpath, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+        dir = std::string(utf8) + "\\ViitorXPC";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        dir += "\\";
+    }
+    if (wpath) CoTaskMemFree(wpath);
+    return dir;
+#else
+    return "";
+#endif
+}
+
+#ifdef _WIN32
+// Copy a top-down RGBA image to the Windows clipboard as a 32-bit DIB.
+static void copyImageToClipboard(int w, int h, const unsigned char* rgbaTopDown) {
+    const size_t pxBytes = (size_t)w * h * 4;
+    HGLOBAL hMem = GlobalAlloc(GHND, sizeof(BITMAPINFOHEADER) + pxBytes);
+    if (!hMem) return;
+    auto* hdr = (BITMAPINFOHEADER*)GlobalLock(hMem);
+    if (!hdr) { GlobalFree(hMem); return; }
+    hdr->biSize = sizeof(BITMAPINFOHEADER);
+    hdr->biWidth = w;
+    hdr->biHeight = h;              // positive = bottom-up DIB
+    hdr->biPlanes = 1;
+    hdr->biBitCount = 32;
+    hdr->biCompression = BI_RGB;
+    auto* dst = (unsigned char*)(hdr + 1);
+    for (int y = 0; y < h; ++y) {
+        const unsigned char* src = rgbaTopDown + (size_t)(h - 1 - y) * w * 4;
+        unsigned char* row = dst + (size_t)y * w * 4;
+        for (int x = 0; x < w; ++x) {   // RGBA -> BGRA
+            row[x * 4 + 0] = src[x * 4 + 2];
+            row[x * 4 + 1] = src[x * 4 + 1];
+            row[x * 4 + 2] = src[x * 4 + 0];
+            row[x * 4 + 3] = 0xFF;
+        }
+    }
+    GlobalUnlock(hMem);
+    if (OpenClipboard(nullptr)) {
+        EmptyClipboard();
+        if (!SetClipboardData(CF_DIB, hMem)) GlobalFree(hMem); // clipboard owns on success
+        CloseClipboard();
+    } else {
+        GlobalFree(hMem);
+    }
+}
+#endif
 
 // ---- UI helpers -------------------------------------------------------------
 enum ToolMode { TOOL_NAV = 0, TOOL_MEASURE = 1, TOOL_CLIP = 2 };
@@ -604,7 +677,77 @@ int main(int argc, char** argv) {
         fclose(f);
     };
 
+    // ---- camera bookmarks (named poses, persisted per-cloud) ---------------
+    // Stored in AppData bookmarks.txt as TSV: <cloudDir> \t <name> \t pose.
+    // Positions are in centred space (cube centre = origin), so bookmarks are
+    // only meaningful for the cloud they were saved with — hence per-dir keying.
+    struct CamBookmark {
+        std::string name;
+        float px = 0, py = 0, pz = 0, yaw = 0, pitch = 0;
+        int   ortho = 0;
+        float orthoSize = 100;
+    };
+    std::map<std::string, std::vector<CamBookmark>> allBookmarks;
+
+    auto bookmarksPath = [&]() -> std::string {
+        std::string p = "bookmarks.txt";
+        if (char* pref = SDL_GetPrefPath("ViitorX", "PointForge")) {
+            p = std::string(pref) + "bookmarks.txt";
+            SDL_free(pref);
+        }
+        return p;
+    };
+    auto loadBookmarks = [&]() {
+        allBookmarks.clear();
+        FILE* f = fopen(bookmarksPath().c_str(), "r");
+        if (!f) return;
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+            char* t1 = strchr(line, '\t'); if (!t1) continue;
+            char* t2 = strchr(t1 + 1, '\t'); if (!t2) continue;
+            *t1 = 0; *t2 = 0;
+            CamBookmark b;
+            b.name = t1 + 1;
+            if (sscanf(t2 + 1, "%f %f %f %f %f %d %f",
+                       &b.px, &b.py, &b.pz, &b.yaw, &b.pitch, &b.ortho, &b.orthoSize) == 7)
+                allBookmarks[line].push_back(std::move(b));
+        }
+        fclose(f);
+    };
+    auto saveBookmarks = [&]() {
+        FILE* f = fopen(bookmarksPath().c_str(), "w");
+        if (!f) return;
+        for (const auto& kv : allBookmarks)
+            for (const auto& b : kv.second)
+                fprintf(f, "%s\t%s\t%f %f %f %f %f %d %f\n",
+                        kv.first.c_str(), b.name.c_str(),
+                        b.px, b.py, b.pz, b.yaw, b.pitch, b.ortho, b.orthoSize);
+        fclose(f);
+    };
+    auto gotoBookmark = [&](const CamBookmark& b) {
+        cam.position = glm::vec3(b.px, b.py, b.pz);
+        cam.yaw = b.yaw; cam.pitch = b.pitch;
+        cam.isOrtho = b.ortho != 0;
+        cam.orthoSize = b.orthoSize;
+        pivot = glm::vec3(0.0f);
+    };
+    auto addBookmark = [&](std::string name) {
+        if (!octreeLoaded) return;
+        auto& v = allBookmarks[loadedDir];
+        // Tabs/newlines would corrupt the TSV file.
+        name.erase(std::remove_if(name.begin(), name.end(),
+                                  [](char c) { return c == '\t' || c == '\n' || c == '\r'; }),
+                   name.end());
+        if (name.empty()) name = "View " + std::to_string(v.size() + 1);
+        v.push_back({name,
+                     cam.position.x, cam.position.y, cam.position.z,
+                     cam.yaw, cam.pitch, cam.isOrtho ? 1 : 0, cam.orthoSize});
+        saveBookmarks();
+        logInfo("Bookmark saved: " + name); // (addToast is defined later)
+    };
+
     loadSettings();
+    loadBookmarks();
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
@@ -654,8 +797,8 @@ int main(int argc, char** argv) {
 
     // ---- background conversion jobs ----------------------------------------
     JobQueue jobs;
-    std::string convInput;             // Convert dialog: source scan
-    std::string convOutput;            // Convert dialog: output octree dir
+    std::vector<std::string> convInputs; // Convert dialog: source scans (1..N)
+    std::string convOutput;            // Convert dialog: output octree dir (N>1: parent dir)
     int  convPreset = 1;               // 0 Draft, 1 Balanced, 2 High, 3 Custom
     bool convLoadWhenDone = true;
     pf::IndexOptions customOpts;
@@ -724,10 +867,20 @@ int main(int argc, char** argv) {
     // Open the Convert dialog, optionally pre-filled with a source file.
     auto openConvertDialog = [&](const std::string& sourceFile) {
         if (!sourceFile.empty()) {
-            convInput = sourceFile;
+            convInputs = {sourceFile};
             std::filesystem::path p(sourceFile);
             convOutput = (p.parent_path() / (p.stem().string() + "_octree")).string();
         }
+        showConvertDialog = true;
+    };
+
+    // Multi-select: one job per file. convOutput becomes the PARENT dir —
+    // each file converts into <convOutput>\<stem>_octree.
+    auto setConvertSources = [&](std::vector<std::string> files) {
+        if (files.empty()) return;
+        if (files.size() == 1) { openConvertDialog(files[0]); return; }
+        convInputs = std::move(files);
+        convOutput = std::filesystem::path(convInputs[0]).parent_path().string();
         showConvertDialog = true;
     };
 
@@ -737,25 +890,36 @@ int main(int argc, char** argv) {
     };
 
     auto enqueueConvert = [&]() {
-        if (convInput.empty() || convOutput.empty()) return;
-        jobs.enqueue(convInput, convOutput, customOpts, convLoadWhenDone);
-        addToast("Queued: " + baseName(convInput));
+        if (convInputs.empty() || convOutput.empty()) return;
+        if (convInputs.size() == 1) {
+            jobs.enqueue(convInputs[0], convOutput, customOpts, convLoadWhenDone);
+            addToast("Queued: " + baseName(convInputs[0]));
+        } else {
+            for (const auto& in : convInputs) {
+                std::filesystem::path p(in);
+                std::string out = (std::filesystem::path(convOutput) / (p.stem().string() + "_octree")).string();
+                jobs.enqueue(in, out, customOpts, /*loadWhenDone=*/false);
+            }
+            addToast("Queued " + std::to_string(convInputs.size()) + " conversions");
+        }
         if (!firstJobRevealed) { firstJobRevealed = true; showJobsPanel = true; }
         showConvertDialog = false;
     };
 
-    auto camPresetTop = [&]() {
-        cam.yaw = -90; cam.pitch = 89;
-        cam.position = store.cubeCenter() + glm::dvec3(0, 0, store.cube(store.rootIndex()).size * 2);
+    // View presets work in CENTRED space (cube centre = origin) like frameAll —
+    // adding store.cubeCenter() here teleported the camera by the cloud's world
+    // offset (km for georeferenced scans), losing the model until 'F' recovered.
+    auto presetView = [&](const glm::vec3& dir) {
+        if (!octreeLoaded) return;
+        double cs = store.cube(store.rootIndex()).size;
+        float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
+        pivot = glm::vec3(0.0f);
+        cam.position = pivot + dir * dist;
+        cam.lookAt(pivot);
     };
-    auto camPresetFront = [&]() {
-        cam.yaw = -90; cam.pitch = 0;
-        cam.position = store.cubeCenter() + glm::dvec3(0, -store.cube(store.rootIndex()).size * 2, 0);
-    };
-    auto camPresetSide = [&]() {
-        cam.yaw = 0; cam.pitch = 0;
-        cam.position = store.cubeCenter() + glm::dvec3(store.cube(store.rootIndex()).size * 2, 0, 0);
-    };
+    auto camPresetTop   = [&]() { presetView(glm::vec3(0, 0, 1)); };  // above, looking down
+    auto camPresetFront = [&]() { presetView(glm::vec3(0, -1, 0)); }; // -Y, looking +Y
+    auto camPresetSide  = [&]() { presetView(glm::vec3(1, 0, 0)); };  // +X, looking -X
 
     auto toggleFullscreen = [&]() {
         Uint32 flags = SDL_GetWindowFlags(window);
@@ -802,6 +966,8 @@ int main(int argc, char** argv) {
                         pendingPick = true; pickX = e.button.x; pickY = e.button.y;
                     } else {
                         orbitDrag = true;                       // LMB drag = orbit
+                        float dist = glm::length(cam.position - pivot);
+                        pivot = cam.position + cam.front() * dist;
                         if (e.button.clicks == 2) {             // double-click = focus
                             pendingFocus = true; focusX = e.button.x; focusY = e.button.y;
                         }
@@ -1069,6 +1235,17 @@ int main(int argc, char** argv) {
                 else if (rc.name == "pointsize-") pointSize = std::clamp(pointSize - 1.0f, 1.0f, 16.0f);
                 else if (rc.name == "speed")
                     camSpeedMultiplier = std::clamp(rc.value, 0.1f, 10.0f);
+                else if (rc.name == "bookmark_add" && octreeLoaded) addBookmark("");
+                else if (rc.name == "bookmark_goto" && octreeLoaded) {
+                    auto& v = allBookmarks[loadedDir];
+                    int i = (int)rc.value;
+                    if (i >= 0 && i < (int)v.size()) gotoBookmark(v[i]);
+                }
+                else if (rc.name == "bookmark_del" && octreeLoaded) {
+                    auto& v = allBookmarks[loadedDir];
+                    int i = (int)rc.value;
+                    if (i >= 0 && i < (int)v.size()) { v.erase(v.begin() + i); saveBookmarks(); }
+                }
             }
             if (remoteChanged) remoteSaveT = 2.0f;   // debounced settings save
 
@@ -1116,6 +1293,7 @@ int main(int argc, char** argv) {
                 rc.streamAvailable = RemoteServer::streamAvailable();
                 rc.webrtcAvailable = RemoteServer::webrtcAvailable();
                 rc.preferredStream = remotePreferredStream;
+                for (const auto& b : allBookmarks[loadedDir]) rc.bookmarks.push_back(b.name);
                 remote.publishConfig(rc);
             }
         }
@@ -1775,6 +1953,32 @@ int main(int argc, char** argv) {
                         ImGui::SameLine(); if (ImGui::SmallButton("Front (1)")) camPresetFront();
                         ImGui::SameLine(); if (ImGui::SmallButton("Side (3)")) camPresetSide();
                         ImGui::SameLine(); if (ImGui::SmallButton("Top (7)")) camPresetTop();
+
+                        ImGui::SeparatorText("Bookmarks");
+                        {
+                            auto& bms = allBookmarks[loadedDir];
+                            int delIdx = -1;
+                            for (int i = 0; i < (int)bms.size(); ++i) {
+                                ImGui::PushID(i);
+                                if (ImGui::SmallButton(bms[i].name.c_str())) gotoBookmark(bms[i]);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("x")) delIdx = i;
+                                ImGui::PopID();
+                            }
+                            if (delIdx >= 0) {
+                                bms.erase(bms.begin() + delIdx);
+                                saveBookmarks();
+                            }
+                            static char bmName[48] = "";
+                            ImGui::SetNextItemWidth(140 * uiScale);
+                            ImGui::InputTextWithHint("##bmname", "name", bmName, sizeof(bmName));
+                            ImGui::SameLine();
+                            if (ImGui::Button("Add Bookmark")) {
+                                addBookmark(bmName);
+                                addToast(std::string("Bookmark saved"));
+                                bmName[0] = 0;
+                            }
+                        }
                         ImGui::EndDisabled();
                     }
 
@@ -1977,26 +2181,50 @@ int main(int argc, char** argv) {
                 ImGui::SetNextWindowSizeConstraints(ImVec2(540.0f * S, 0), ImVec2(540.0f * S, FLT_MAX));
                 if (ImGui::Begin("Convert to Octree", &showConvertDialog,
                                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
-                    // Source
+                    // Source (multi-select: one background job per file)
                     ImGui::Text("Source");
                     ImGui::SameLine(90.0f * S);
                     if (ImGui::Button("Browse...##src")) {
-                        std::string f = pf::openFileDialog("Point Clouds\0*.las;*.laz;*.e57;*.ply;*.pts;*.xyz\0All Files\0*.*\0");
-                        if (!f.empty()) openConvertDialog(f);
+                        auto fs = pf::openFileDialogMulti("Point Clouds\0*.las;*.laz;*.e57;*.ply;*.pts;*.xyz\0All Files\0*.*\0");
+                        if (!fs.empty()) setConvertSources(std::move(fs));
                     }
                     ImGui::SameLine();
-                    if (convInput.empty()) ImGui::TextDisabled("LAS / LAZ / E57 / PLY / PTS / XYZ");
-                    else {
-                        ImGui::Text("%s", baseName(convInput).c_str());
-                        ImGui::SetItemTooltip("%s", convInput.c_str());
-                    }
-                    if (!convInput.empty()) {
+                    if (convInputs.empty()) {
+                        ImGui::TextDisabled("LAS / LAZ / E57 / PLY / PTS / XYZ (multi-select OK)");
+                    } else if (convInputs.size() == 1) {
+                        ImGui::Text("%s", baseName(convInputs[0]).c_str());
+                        ImGui::SetItemTooltip("%s", convInputs[0].c_str());
                         std::error_code ec;
-                        auto sz = std::filesystem::file_size(convInput, ec);
+                        auto sz = std::filesystem::file_size(convInputs[0], ec);
                         if (!ec) {
                             ImGui::SameLine();
                             ImGui::TextDisabled("(%.2f GB)", sz / (1024.0 * 1024.0 * 1024.0));
                         }
+                    } else {
+                        uintmax_t total = 0;
+                        for (const auto& in : convInputs) {
+                            std::error_code ec;
+                            auto sz = std::filesystem::file_size(in, ec);
+                            if (!ec) total += sz;
+                        }
+                        ImGui::Text("%d files", (int)convInputs.size());
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(%.2f GB total)", total / (1024.0 * 1024.0 * 1024.0));
+                        // Scrollable file list with per-file remove.
+                        float listH = std::min(6, (int)convInputs.size()) * ImGui::GetTextLineHeightWithSpacing() + 8.0f * S;
+                        if (ImGui::BeginChild("##srclist", ImVec2(-FLT_MIN, listH), ImGuiChildFlags_FrameStyle)) {
+                            int removeIdx = -1;
+                            for (int i = 0; i < (int)convInputs.size(); ++i) {
+                                ImGui::PushID(i);
+                                if (ImGui::SmallButton("x")) removeIdx = i;
+                                ImGui::SameLine();
+                                ImGui::Text("%s", baseName(convInputs[i]).c_str());
+                                ImGui::SetItemTooltip("%s", convInputs[i].c_str());
+                                ImGui::PopID();
+                            }
+                            if (removeIdx >= 0) convInputs.erase(convInputs.begin() + removeIdx);
+                        }
+                        ImGui::EndChild();
                     }
 
                     // Output
@@ -2060,10 +2288,16 @@ int main(int argc, char** argv) {
                     }
 
                     ImGui::Spacing();
+                    ImGui::BeginDisabled(convInputs.size() > 1);
                     ImGui::Checkbox("Load in viewer when done", &convLoadWhenDone);
+                    ImGui::EndDisabled();
+                    if (convInputs.size() > 1) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(batch: each file -> <output>\\<name>_octree)");
+                    }
                     ImGui::Spacing();
 
-                    bool canConvert = !convInput.empty() && !convOutput.empty();
+                    bool canConvert = !convInputs.empty() && !convOutput.empty();
                     ImGui::BeginDisabled(!canConvert);
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.85f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.53f, 0.95f, 1.0f));
@@ -2591,16 +2825,44 @@ int main(int argc, char** argv) {
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        if (pendingShot) {
+        if (pendingShot && winW > 0 && winH > 0) {
             pendingShot = false;
+            std::vector<unsigned char> rgba = readFramebufferRGBA(winW, winH);
+            std::vector<unsigned char> png  = encodePNG(winW, winH, rgba.data());
+
             char fn[64];
-            snprintf(fn, sizeof(fn), "screenshot_%04d.bmp", ++shotCounter);
-            if (saveScreenshotBMP(fn, winW, winH)) {
-                logInfo(std::string("Saved ") + fn);
+            time_t now = time(nullptr);
+            struct tm tmv;
+#ifdef _WIN32
+            localtime_s(&tmv, &now);
+#else
+            localtime_r(&now, &tmv);
+#endif
+            strftime(fn, sizeof(fn), "shot_%Y%m%d_%H%M%S.png", &tmv);
+            std::string path = screenshotDir() + fn;
+
+            bool saved = false;
+            if (!png.empty()) {
+                if (FILE* f = fopen(path.c_str(), "wb")) {
+                    saved = fwrite(png.data(), 1, png.size(), f) == png.size();
+                    fclose(f);
+                }
+            }
+#ifdef _WIN32
+            copyImageToClipboard(winW, winH, rgba.data());
+#endif
+            remote.publishShot(png); // phone can download the last capture
+            if (saved) {
+                logInfo("Saved " + path + " (copied to clipboard)");
+                addToast(std::string("Screenshot: ") + fn);
 #ifdef _WIN32
                 MessageBeep(MB_OK);
 #endif
+            } else {
+                logError("Screenshot save failed: " + path);
             }
+        } else {
+            pendingShot = false;
         }
 
         SDL_GL_SwapWindow(window);

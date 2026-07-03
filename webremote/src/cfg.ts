@@ -56,6 +56,9 @@ export type Cfg = {
   streamAvailable: boolean;
   webrtcAvailable: boolean;
   preferredStream: number;
+  /** Camera bookmark names for the loaded cloud; recall/save/delete via
+   *  cmds bookmark_goto/bookmark_add/bookmark_del (v = index). */
+  bookmarks: string[];
 };
 
 // Keys the client may write back with {"t":"set",...}. (tool/fullscreen and
