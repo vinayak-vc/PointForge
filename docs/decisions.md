@@ -19,9 +19,14 @@ This document records major design decisions.
 - **Decision**: The executable is built as a WIN32 subsystem application (on Windows) rather than a Console App.
 - **Reason**: This prevents a persistent and ugly DOS prompt terminal window from opening alongside the ViitorX Viewer application.
 
-## Settings Persistence
-- **Decision**: Viewer settings are serialized to a local `pfview_config.txt` file manually rather than relying on a complex JSON parser.
-- **Reason**: Avoids heavy dependencies, keeping the repository light and builds fast.
+## Settings Persistence (User AppData)
+- **Decision**: Viewer settings (`pfview_config.txt`) are serialized into the user's `AppData` directory via `SDL_GetPrefPath("ViitorX", "ViitorXPC")`, rather than alongside the executable.
+- **Reason**: Standard desktop application behavior. Keeping it in `AppData` ensures the executable can be deployed to a read-only directory (e.g., `Program Files`) without triggering UAC virtualization or permission-denied errors when users modify UI settings.
+
+## Application Branding and Visuals
+- **Decision**: The project is officially branded as `ViitorXPC` (executable `ViitorXPCViewer.exe`). A Windows Resource Script (`app.rc`) embeds a transparent Windows icon (`vx.ico`) for native File Explorer/Taskbar integration.
+- **Decision**: The background watermark logo in Stereoscopic SBS mode renders twice with a negative parallax shift (15px convergence).
+- **Reason**: A 2D overlay across the whole screen breaks stereoscopic fusion. Rendering it twice natively in the SBS buffer with negative parallax makes the logo fuse correctly and "pop out" of the 3D depth field towards the user.
 
 ## Point Picking (synchronous on-click disk read)
 - **Decision**: `OctreeStore::pickPoint()` casts the ray against resident node cubes and reads the payloads of intersected nodes off `octree.bin` synchronously at click time (reusing the streaming decode path `readNodeInto`), rather than keeping every point's coordinates resident in CPU RAM.

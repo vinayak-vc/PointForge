@@ -31,6 +31,8 @@
 #include "viewer/PointRenderer.h"
 #include "viewer/Controller.h"
 #include "viewer/SerialController.h"
+#include "viewer/RemoteServer.h"
+#include "viewer/qrcodegen.hpp"
 #include "viewer/EmbeddedShaders.h"
 #include "viewer/EmbeddedImage.h"
 #include "viewer/Jobs.h"
@@ -206,7 +208,18 @@ static const KeyBindInfo kKeyBinds[] = {
 
 int main(int argc, char** argv) {
     std::string initialDir = "";
-    if (argc >= 2) initialDir = argv[1];
+    // Runtime flags
+    bool remoteForceDiskWeb = false; // default: use embedded web assets when available
+    // Simple argument parsing
+    for (int i = 1; i < argc; ++i) {
+        const char* a = argv[i];
+        if (strcmp(a, "--use-disk-web") == 0) {
+            remoteForceDiskWeb = true;
+        } else if (i == 1) {
+            // First positional argument interpreted as initial directory
+            initialDir = a;
+        }
+    }
 
     // Mirror every pf::log() message into the Console panel's ring buffer.
     pf::setLogSink([](pf::LogLevel level, const std::string& msg) {
@@ -328,6 +341,26 @@ int main(int argc, char** argv) {
         fboW = w; fboH = h;
     };
 
+    // Small FBO the backbuffer is downscaled into before the CPU readback for
+    // the web-remote viewport stream (full-res glReadPixels would stall).
+    GLuint streamFbo = 0, streamTex = 0;
+    int streamFboW = 0, streamFboH = 0;
+    std::vector<uint8_t> streamPixels;
+    auto ensureStreamFbo = [&](int w, int h) {
+        if (w == streamFboW && h == streamFboH && streamFbo) return;
+        if (!streamFbo) glGenFramebuffers(1, &streamFbo);
+        if (!streamTex) glGenTextures(1, &streamTex);
+        glBindTexture(GL_TEXTURE_2D, streamTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, streamFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, streamTex, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        streamFboW = w; streamFboH = h;
+    };
+
     // ---- camera initial framing ------------------------------------------
     Camera cam;
     auto setupCamera = [&]() {
@@ -382,6 +415,24 @@ int main(int argc, char** argv) {
     std::string serialMac     = "B4BFE90B6036"; // from the user's JoystickReceiver
     std::string serialPort    = "COM4";
     bool        serialNavRelease = false;       // pending ImGui activate-release
+
+    // ---- web remote controller (phone browser over LAN) -------------------
+    RemoteServer remote;
+    bool remoteEnabled = false;
+    int  remotePort    = 8899;
+    // Apply the runtime flag to force using disk‑based web resources
+    remote.setForceDiskWeb(remoteForceDiskWeb);
+    bool showRemoteQR  = false;      // Preferences -> "Show connect QR" modal
+    float remoteCfgT   = 0.0f;       // cfg broadcast heartbeat accumulator
+    float remoteSaveT  = -1.0f;      // debounced saveSettings() after remote edits
+    int remotePreferredStream = 0;   // 0: JPEG, 1: WebRTC
+    // Control page lives beside the exe (like shaders/); resolve via the exe
+    // path, not the cwd, so launching from a terminal elsewhere still works.
+    std::string remoteWebRoot = "web";
+    if (char* bp = SDL_GetBasePath()) {
+        remoteWebRoot = std::string(bp) + "web";
+        SDL_free(bp);
+    }
 
     // ---- tools (Navigate / Measure / Clip) ---------------------------------
     int toolMode = TOOL_NAV;
@@ -438,10 +489,16 @@ int main(int argc, char** argv) {
         qualityIdx = 1;
         padEnabled = true; pad.deadzone = 0.18f; padLookSens = 120.0f;
         padMoveSens = 1.0f; padInvertY = false;
+        remoteEnabled = false; remotePort = 8899;
     };
 
     auto saveSettings = [&]() {
-        FILE* f = fopen("pfview_config.txt", "w");
+        std::string configPath = "pfview_config.txt";
+        if (char* prefPath = SDL_GetPrefPath("ViitorX", "PointForge")) {
+            configPath = std::string(prefPath) + "pfview_config.txt";
+            SDL_free(prefPath);
+        }
+        FILE* f = fopen(configPath.c_str(), "w");
         if (!f) return;
         fprintf(f, "pointSize=%f\n", pointSize);
         fprintf(f, "sseBudget=%f\n", sseBudget);
@@ -473,6 +530,8 @@ int main(int argc, char** argv) {
         fprintf(f, "padInvertY=%d\n", (int)padInvertY);
         fprintf(f, "jAxes=%d,%d,%d,%d\n", pad.jAxisX, pad.jAxisY, pad.jAxisRX, pad.jAxisRY);
         fprintf(f, "jBtns=%d,%d,%d,%d,%d,%d\n", pad.jBtnA, pad.jBtnB, pad.jBtnLB, pad.jBtnRB, pad.jBtnBack, pad.jBtnStart);
+        fprintf(f, "remoteEnabled=%d\n", (int)remoteEnabled);
+        fprintf(f, "remotePort=%d\n", remotePort);
         fprintf(f, "serialEnabled=%d\n", (int)serialEnabled);
         fprintf(f, "serialAuto=%d\n", (int)serialAuto);
         fprintf(f, "serialMac=%s\n", serialMac.c_str());
@@ -482,7 +541,12 @@ int main(int argc, char** argv) {
     };
 
     auto loadSettings = [&]() {
-        FILE* f = fopen("pfview_config.txt", "r");
+        std::string configPath = "pfview_config.txt";
+        if (char* prefPath = SDL_GetPrefPath("ViitorX", "PointForge")) {
+            configPath = std::string(prefPath) + "pfview_config.txt";
+            SDL_free(prefPath);
+        }
+        FILE* f = fopen(configPath.c_str(), "r");
         if (!f) return;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
@@ -517,6 +581,8 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "padInvertY=%d", &i) == 1) padInvertY = (i != 0);
             else if (sscanf(line, "jAxes=%d,%d,%d,%d", &pad.jAxisX, &pad.jAxisY, &pad.jAxisRX, &pad.jAxisRY) == 4) {}
             else if (sscanf(line, "jBtns=%d,%d,%d,%d,%d,%d", &pad.jBtnA, &pad.jBtnB, &pad.jBtnLB, &pad.jBtnRB, &pad.jBtnBack, &pad.jBtnStart) == 6) {}
+            else if (sscanf(line, "remoteEnabled=%d", &i) == 1) remoteEnabled = (i != 0);
+            else if (sscanf(line, "remotePort=%d", &i) == 1) remotePort = std::clamp(i, 1024, 65535);
             else if (sscanf(line, "serialEnabled=%d", &i) == 1) serialEnabled = (i != 0);
             else if (sscanf(line, "serialAuto=%d", &i) == 1) serialAuto = (i != 0);
             else if (strncmp(line, "serialMac=", 10) == 0) {
@@ -542,6 +608,7 @@ int main(int argc, char** argv) {
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
+    if (remoteEnabled && RemoteServer::available()) remote.start(remotePort, remoteWebRoot);
     if (stereoSBS) stereoHintT = 5.0f;   // booted straight into stereo -> show the exit hint
 
     // Load an octree directory, reset view, record it as recent.
@@ -924,6 +991,138 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ---- web remote controller (phone browser over LAN) ----------------
+        if (remote.running()) {
+            // Held joysticks send velocity intent; integrate locally each frame
+            // so WiFi latency only affects start/stop, never smoothness.
+            if (octreeLoaded && remote.inputActive()) {
+                float boost = remote.boost() ? 5.0f : 1.0f;
+                float mv = cam.moveSpeed * dt * camSpeedMultiplier * padMoveSens * boost;
+                glm::vec3 fwd = cam.front(), rgt = cam.right();
+                cam.position += (fwd * remote.fwd() + rgt * remote.strafe()) * mv;
+                cam.position += glm::vec3(0, 0, 1) * remote.up() * mv;
+                // Web joystick: up = +1 = look up (already matches addYawPitch).
+                float invY = padInvertY ? -1.0f : 1.0f;
+                cam.addYawPitch(remote.yawRate() * padLookSens * dt,
+                                remote.pitchRate() * invY * padLookSens * dt);
+            }
+            // Settings ("set.<key>") + one-shot commands. Every key mirrors a
+            // Properties-panel control; clamps match the ImGui slider ranges.
+            bool remoteChanged = false;
+            for (const RemoteCmd& rc : remote.consumeCommands()) {
+                remoteChanged = true;
+                const float v = rc.value;
+                if (rc.name.rfind("set.", 0) == 0) {
+                    const std::string k = rc.name.substr(4);
+                    if      (k == "pointSize")   pointSize = std::clamp(v, 1.0f, 16.0f);
+                    else if (k == "quality")     { qualityIdx = std::clamp((int)v, 0, 3); applyQualityPreset(qualityIdx); }
+                    else if (k == "sse")         sseBudget = std::clamp(v, 0.3f, 8.0f);
+                    else if (k == "colorMode")   colorMode = std::clamp((int)v, 0, 4);
+                    else if (k == "solidColor" && rc.hasVec) { solidColor[0] = rc.vec[0]; solidColor[1] = rc.vec[1]; solidColor[2] = rc.vec[2]; }
+                    else if (k == "edl")         enableEDL = v != 0;
+                    else if (k == "edlStrength") edlStrength = std::clamp(v, 0.1f, 5.0f);
+                    else if (k == "edlRadius")   edlRadius = std::clamp(v, 0.5f, 4.0f);
+                    else if (k == "gpuBudget")   gpuBudgetMB = std::clamp((int)v, 128, 8192);
+                    else if (k == "uploads")     uploadsPerFrame = std::clamp((int)v, 1, 256);
+                    else if (k == "round")       roundPoints = v != 0;
+                    else if (k == "attenuate")   attenuate = v != 0;
+                    else if (k == "background" && rc.hasVec) { clearColor[0] = rc.vec[0]; clearColor[1] = rc.vec[1]; clearColor[2] = rc.vec[2]; }
+                    else if (k == "ortho")       cam.isOrtho = v != 0;
+                    else if (k == "orthoSize")   cam.orthoSize = std::clamp(v, 1.0f, 5000.0f);
+                    else if (k == "speed")       camSpeedMultiplier = std::clamp(v, 0.1f, 10.0f);
+                    else if (k == "stereo")      { stereoSBS = v != 0; if (stereoSBS) stereoHintT = 5.0f; }
+                    else if (k == "eyeSep")      eyeSeparation = std::clamp(v, 0.01f, 0.2f);
+                    else if (k == "focalDist")   focalDistance = std::clamp(v, 1.0f, 100.0f);
+                    else if (k == "clip")        enableClipping = v != 0;
+                    else if (k == "clipMin" && rc.hasVec) { clipMin[0] = rc.vec[0]; clipMin[1] = rc.vec[1]; clipMin[2] = rc.vec[2]; }
+                    else if (k == "clipMax" && rc.hasVec) { clipMax[0] = rc.vec[0]; clipMax[1] = rc.vec[1]; clipMax[2] = rc.vec[2]; }
+                    else if (k == "ui")          showUI = v != 0;
+                    else if (k == "stats")       showStatsOverlay = v != 0;
+                    else if (k == "darkTheme")   { darkTheme = v != 0; applyUiScale(uiScale); }
+                    else if (k == "preferredStream") remotePreferredStream = (int)v;
+                }
+                else if (rc.name == "frame")        frameAllReq = true;
+                else if (rc.name == "shot")         pendingShot = true;
+                else if (rc.name == "hideui")       showUI = !showUI;
+                else if (rc.name == "ortho")        cam.isOrtho = !cam.isOrtho;
+                else if (rc.name == "fullscreen")   toggleFullscreen();
+                else if (rc.name == "reset_view" && octreeLoaded) setupCamera();
+                else if (rc.name == "measure" && octreeLoaded)
+                    toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                else if (rc.name == "clip_tool" && octreeLoaded)
+                    toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
+                else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
+                else if (rc.name == "measure_clear") measurePts.clear();
+                else if (rc.name == "clip_reset" && octreeLoaded) {
+                    float ext = (float)store.cube(store.rootIndex()).size * 2.0f;
+                    clipMin[0] = clipMin[1] = clipMin[2] = -ext;
+                    clipMax[0] = clipMax[1] = clipMax[2] =  ext;
+                }
+                else if (rc.name == "loadrecent") {
+                    int idx = (int)v;
+                    if (idx >= 0 && idx < (int)recentDirs.size()) loadOctree(recentDirs[idx]);
+                }
+                else if (rc.name == "preset1" && octreeLoaded) camPresetFront();
+                else if (rc.name == "preset3" && octreeLoaded) camPresetSide();
+                else if (rc.name == "preset7" && octreeLoaded) camPresetTop();
+                else if (rc.name == "pointsize+") pointSize = std::clamp(pointSize + 1.0f, 1.0f, 16.0f);
+                else if (rc.name == "pointsize-") pointSize = std::clamp(pointSize - 1.0f, 1.0f, 16.0f);
+                else if (rc.name == "speed")
+                    camSpeedMultiplier = std::clamp(rc.value, 0.1f, 10.0f);
+            }
+            if (remoteChanged) remoteSaveT = 2.0f;   // debounced settings save
+
+            // Status back to the phone HUD (throttled to ~5 Hz inside).
+            float posv[3] = { (float)cam.position.x, (float)cam.position.y, (float)cam.position.z };
+            remote.publishState(dt > 0 ? 1.0f / dt : 0.0f,
+                                octreeLoaded ? store.meta().pointCount : 0,
+                                posv, showUI, baseName(loadedDir));
+
+            // Full config sync: ~1 Hz heartbeat + instant echo after changes.
+            remoteCfgT += dt;
+            if (remote.clientCount() > 0 && (remoteChanged || remoteCfgT >= 1.0f)) {
+                remoteCfgT = 0.0f;
+                RemoteConfig rc;
+                rc.qualityIdx = qualityIdx; rc.pointSize = pointSize; rc.sseBudget = sseBudget;
+                rc.colorMode = colorMode;
+                for (int i = 0; i < 3; ++i) {
+                    rc.solidColor[i] = solidColor[i];
+                    rc.clearColor[i] = clearColor[i];
+                    rc.clipMin[i] = clipMin[i];
+                    rc.clipMax[i] = clipMax[i];
+                }
+                rc.enableEDL = enableEDL; rc.edlStrength = edlStrength; rc.edlRadius = edlRadius;
+                rc.gpuBudgetMB = gpuBudgetMB; rc.uploadsPerFrame = uploadsPerFrame;
+                rc.roundPoints = roundPoints; rc.attenuate = attenuate;
+                rc.isOrtho = cam.isOrtho; rc.orthoSize = cam.orthoSize;
+                rc.camSpeed = camSpeedMultiplier;
+                rc.stereo = stereoSBS; rc.eyeSep = eyeSeparation; rc.focalDist = focalDistance;
+                rc.toolMode = (toolMode == TOOL_MEASURE) ? 1 : (toolMode == TOOL_CLIP) ? 2 : 0;
+                rc.clipEnabled = enableClipping;
+                rc.clipExt = octreeLoaded ? (float)store.cube(store.rootIndex()).size * 2.0f : 0.0f;
+                rc.measurePts.reserve(measurePts.size());
+                for (const auto& p : measurePts) rc.measurePts.push_back({p.x, p.y, p.z});
+                rc.measureTotal = measureTotal();
+                rc.uiVisible = showUI; rc.statsOverlay = showStatsOverlay;
+                rc.fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+                rc.darkTheme = darkTheme;
+                rc.recentDirs = recentDirs;
+                rc.loadedFile = baseName(loadedDir);
+                if (octreeLoaded) {
+                    rc.pointCount = store.meta().pointCount;
+                    rc.nodeCount  = store.meta().nodeCount;
+                    rc.cubeSize   = (float)store.meta().cubeSize;
+                }
+                rc.streamAvailable = RemoteServer::streamAvailable();
+                rc.webrtcAvailable = RemoteServer::webrtcAvailable();
+                rc.preferredStream = remotePreferredStream;
+                remote.publishConfig(rc);
+            }
+        }
+        // Debounced save: rapid slider streams from the phone shouldn't write
+        // the config file on every message.
+        if (remoteSaveT > 0.0f && (remoteSaveT -= dt) <= 0.0f) saveSettings();
+
         // ---- absorb finished async loads ---------------------------------
         if (octreeLoaded) {
             for (int i = 0; i < uploadsPerFrame; ++i) {
@@ -1137,6 +1336,26 @@ int main(int argc, char** argv) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
 
+        // ---- web-remote viewport stream capture ----------------------------
+        // Backbuffer now holds the post-EDL scene and no UI yet — exactly what
+        // the phone should see. wantFrame() gates on subscribers + encoder
+        // idle + fps interval, so the blit/readback cost is only paid then.
+        if (remote.wantFrame() && winW > 0 && winH > 0) {
+            int sw = std::max(2, std::min(remote.streamMaxWidth(), winW)) & ~1;
+            int sh = std::max(2, (int)((int64_t)sw * winH / winW)) & ~1;
+            ensureStreamFbo(sw, sh);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, streamFbo);
+            glBlitFramebuffer(0, 0, winW, winH, 0, 0, sw, sh,
+                              GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, streamFbo);
+            streamPixels.resize((size_t)sw * sh * 3);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, streamPixels.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            remote.publishFrame(streamPixels.data(), sw, sh);
+        }
+
         // ---- ImGui frame ---------------------------------------------------
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
@@ -1147,13 +1366,28 @@ int main(int argc, char** argv) {
         const bool uiVisible = showUI && !stereoSBS;
         const float S = uiScale;   // multiplier for explicit pixel sizes
 
-        // ---- background watermark (mono view only; would break stereo) ------
-        if (watermarkTex && !stereoSBS) {
+        // ---- background watermark (with 3D pop-out in SBS mode) ------
+        if (watermarkTex) {
             float wmSize = 80.0f;
-            ImVec2 p_min = ImVec2(winW - wmSize - 20, 20);
-            ImVec2 p_max = ImVec2(p_min.x + wmSize, p_min.y + wmSize);
             ImU32 col = IM_COL32(255, 255, 255, 25); // ~10% opacity
-            ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min, p_max, ImVec2(0,0), ImVec2(1,1), col);
+            
+            if (stereoSBS) {
+                float halfW = winW * 0.5f;
+                // Pop-out effect: negative parallax (left eye shifts right, right eye shifts left)
+                float popOut = 15.0f; 
+                
+                // Left eye
+                ImVec2 p_min_L = ImVec2(halfW - wmSize - 20 + popOut, 20);
+                ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min_L, ImVec2(p_min_L.x + wmSize, p_min_L.y + wmSize), ImVec2(0,0), ImVec2(1,1), col);
+                
+                // Right eye
+                ImVec2 p_min_R = ImVec2(winW - wmSize - 20 - popOut, 20);
+                ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min_R, ImVec2(p_min_R.x + wmSize, p_min_R.y + wmSize), ImVec2(0,0), ImVec2(1,1), col);
+            } else {
+                ImVec2 p_min = ImVec2(winW - wmSize - 20, 20);
+                ImVec2 p_max = ImVec2(p_min.x + wmSize, p_min.y + wmSize);
+                ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)watermarkTex, p_min, p_max, ImVec2(0,0), ImVec2(1,1), col);
+            }
         }
 
         // ---- measurement overlay (project polyline to screen) ---------------
@@ -1895,6 +2129,13 @@ int main(int argc, char** argv) {
                             if (ImGui::SliderFloat("Move sens", &padMoveSens, 0.1f, 5.0f, "%.1fx")) settingsChanged = true;
                             if (ImGui::Checkbox("Invert look Y", &padInvertY)) settingsChanged = true;
 
+                            if (RemoteServer::streamAvailable() || RemoteServer::webrtcAvailable()) {
+                                ImGui::SeparatorText("Remote Streaming Mode");
+                                if (ImGui::RadioButton("JPEG WebSocket", &remotePreferredStream, 0)) settingsChanged = true;
+                                ImGui::SameLine();
+                                if (ImGui::RadioButton("WebRTC", &remotePreferredStream, 1)) settingsChanged = true;
+                            }
+
                             if (pad.connected() && !pad.isGameController()) {
                                 if (ImGui::TreeNode("Calibrate (raw joystick mapping)")) {
                                     ImGui::TextDisabled("Live values (move stick / press buttons to find indices):");
@@ -1940,6 +2181,34 @@ int main(int argc, char** argv) {
                                             serial.normX(), serial.normY(), serial.triggerHeld() ? 1 : 0);
                             ImGui::TextWrapped("Joystick = look. Hold trigger = fly forward. "
                                                "PAUSE = UI mode. PLAY = activate / frame all.");
+
+                            ImGui::SeparatorText("Web remote (phone browser)");
+                            if (!RemoteServer::available()) {
+                                ImGui::TextDisabled("Built without web-remote support (civetweb/json missing)");
+                            } else {
+                                if (ImGui::Checkbox("Enable web remote", &remoteEnabled)) {
+                                    settingsChanged = true;
+                                    if (remoteEnabled) remote.start(remotePort, remoteWebRoot);
+                                    else remote.stop();
+                                }
+                                int rp = remotePort;
+                                if (ImGui::InputInt("Port", &rp)) {
+                                    remotePort = std::clamp(rp, 1024, 65535);
+                                    settingsChanged = true;
+                                }
+                                if (remote.running()) {
+                                    ImGui::TextColored(ImVec4(0.6f, 1, 0.6f, 1), "Serving: %s", remote.url().c_str());
+                                    ImGui::Text("PIN: %s   Clients: %d", remote.pin().c_str(), remote.clientCount());
+                                    if (ImGui::Button("Show connect QR")) showRemoteQR = true;
+                                    ImGui::SameLine();
+                                    if (ImGui::Button("Restart (new PIN)")) remote.start(remotePort, remoteWebRoot);
+                                } else if (remoteEnabled) {
+                                    ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "Failed to start (port in use?)");
+                                }
+                                ImGui::TextWrapped("Open the URL in a phone browser on the same WiFi and enter "
+                                                   "the PIN. Left stick = move, right stick = look. Windows "
+                                                   "Firewall must allow the viewer on private networks.");
+                            }
                             ImGui::EndTabItem();
                         }
                         if (ImGui::BeginTabItem("Advanced")) {
@@ -1966,6 +2235,48 @@ int main(int argc, char** argv) {
                 applyUiScale(uiScale);
                 if (octreeLoaded) setupCamera();
                 settingsChanged = true;
+            }
+
+            // ---- web remote connect QR (from Preferences > Input) ----------
+            if (showRemoteQR) { ImGui::OpenPopup("Connect phone"); showRemoteQR = false; }
+            if (ImGui::BeginPopupModal("Connect phone", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                if (remote.running()) {
+                    const std::string curUrl = remote.url();
+                    // Re-encode only when the URL changes (port/IP edit or restart).
+                    static std::string qrUrl;
+                    static std::vector<uint8_t> qrGrid;
+                    static int qrN = 0;
+                    if (qrUrl != curUrl) {
+                        qrUrl = curUrl;
+                        auto qr = qrcodegen::QrCode::encodeText(curUrl.c_str(),
+                                                                qrcodegen::QrCode::Ecc::MEDIUM);
+                        qrN = qr.getSize();
+                        qrGrid.assign((size_t)qrN * qrN, 0);
+                        for (int y = 0; y < qrN; ++y)
+                            for (int x = 0; x < qrN; ++x)
+                                qrGrid[(size_t)y * qrN + x] = qr.getModule(x, y) ? 1 : 0;
+                    }
+                    ImGui::TextUnformatted("Scan with the phone camera (same WiFi):");
+                    const float mod = std::max(4.0f, 5.0f * uiScale);
+                    const float quiet = mod * 4;                      // QR quiet zone
+                    const float size = qrN * mod + quiet * 2;
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    ImVec2 p0 = ImGui::GetCursorScreenPos();
+                    dl->AddRectFilled(p0, ImVec2(p0.x + size, p0.y + size), IM_COL32_WHITE);
+                    for (int y = 0; y < qrN; ++y)
+                        for (int x = 0; x < qrN; ++x)
+                            if (qrGrid[(size_t)y * qrN + x]) {
+                                ImVec2 a(p0.x + quiet + x * mod, p0.y + quiet + y * mod);
+                                dl->AddRectFilled(a, ImVec2(a.x + mod, a.y + mod), IM_COL32_BLACK);
+                            }
+                    ImGui::Dummy(ImVec2(size, size));
+                    ImGui::Text("URL: %s", curUrl.c_str());
+                    ImGui::Text("PIN: %s", remote.pin().c_str());
+                } else {
+                    ImGui::TextUnformatted("Web remote is not running.");
+                }
+                if (ImGui::Button("Close", ImVec2(100, 0))) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
             }
 
             // ---- welcome / empty state ------------------------------------------

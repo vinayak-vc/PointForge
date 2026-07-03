@@ -22,7 +22,8 @@
       "WebFetch(domain:www.cg.tuwien.ac.at)",
       "WebFetch(domain:issues.unrealengine.com)",
       "WebFetch(domain:web.archive.org)",
-      "WebFetch(domain:dq8iqaixvew1d.cloudfront.net)"
+      "WebFetch(domain:dq8iqaixvew1d.cloudfront.net)",
+      "Bash(git checkout *)"
     ]
   }
 }

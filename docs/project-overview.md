@@ -1,15 +1,10 @@
-# PointForge Project Overview
+# Project Overview
 
-PointForge is an out-of-core octree point cloud converter and streaming viewer. It is designed to handle extremely large point cloud datasets (e.g. LiDAR data with billions of points) that cannot fit entirely in memory.
+**PointForge** (ViitorXPCViewer) is a Windows‑only point‑cloud viewer that supports:
+- Local point‑cloud loading (LAZ, LAS, E57, etc.)
+- Real‑time remote control via a web UI (React) running on an embedded Civetweb server.
+- Two streaming modes for the viewport:
+  1. **JPEG fallback** – low‑bandwidth, uses TurboJPEG.
+  2. **WebRTC H.264** – low‑latency, high‑quality, powered by Media Foundation and libdatachannel.
 
-## Architecture Highlights
-- **Converter (`pfconvert`)**: Uses a three-phase strategy (Count, Chunk, Index) to build out-of-core spatial hierarchies (Octrees) from input `.las`, `.laz`, and `.e57` files. This ensures that memory consumption is strictly bounded by the chunk grid depth rather than the raw data size.
-- **Viewer (`pfview`)**: Also known as **ViitorX PointCloud Viewer**, a fast hardware-accelerated viewer built using SDL2, OpenGL 3.3, and Dear ImGui. It streams the spatial hierarchy out-of-core, keeping a strict limit on GPU budget and CPU memory, to smoothly display massive environments.
-
-## Core Features
-- Dynamic Level-of-Detail (LOD) streaming based on pixel-size budget
-- Custom visualizations including True Color, Elevation gradients (Turbo map), and Solid Color rendering
-- Advanced clipping planes, stereo (SBS) mode, and camera features
-- Fast C++ core running efficiently across multiple threads for both rendering and conversion
-- Viewport-centric **docked UI shell** (menu bar, toolbar, dockable Properties/Jobs/Console/Performance panels, status bar) — conversion runs as background jobs, monitored via a status-bar pill and Jobs panel rather than blocking the viewer
-- Stereoscopic SBS mode hides all UI chrome (no menu/toolbar/HUD reaching either eye) for clean stereoscope viewing
+The recent work added full WebRTC support on the C++ side and a UI toggle to select the stream engine. The next milestone is to embed the web assets directly into the executable for a single‑binary distribution.
