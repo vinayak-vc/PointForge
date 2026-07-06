@@ -13,6 +13,11 @@
   docks replace the old single scrolling settings panel; conversion runs as a
   background job queue; F1 searchable shortcuts + Ctrl+P command palette;
   stereoscopic SBS now hides all UI chrome.
+- **Web Remote** — embedded civetweb HTTP+WS server + React app (embedded in the
+  exe) for phone control over LAN: PIN pairing, multi-touch gestures, 30 Hz move
+  protocol, settings mirror. Viewport streaming via JPEG (turbojpeg over WS) or
+  WebRTC H.264 (libdatachannel + Media Foundation, hardware NVENC/QuickSync
+  encode with software fallback, quality VBR) — runtime-switchable.
 
 ## Short-term Goals
 - **On-disk cache management**: auto-purge old `PointForgeCache_*` converted dirs.

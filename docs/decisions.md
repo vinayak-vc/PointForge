@@ -19,9 +19,14 @@ This document records major design decisions.
 - **Decision**: The executable is built as a WIN32 subsystem application (on Windows) rather than a Console App.
 - **Reason**: This prevents a persistent and ugly DOS prompt terminal window from opening alongside the ViitorX Viewer application.
 
-## Settings Persistence
-- **Decision**: Viewer settings are serialized to a local `pfview_config.txt` file manually rather than relying on a complex JSON parser.
-- **Reason**: Avoids heavy dependencies, keeping the repository light and builds fast.
+## Settings Persistence (User AppData)
+- **Decision**: Viewer settings (`pfview_config.txt`) are serialized into the user's `AppData` directory via `SDL_GetPrefPath("ViitorX", "ViitorXPC")`, rather than alongside the executable.
+- **Reason**: Standard desktop application behavior. Keeping it in `AppData` ensures the executable can be deployed to a read-only directory (e.g., `Program Files`) without triggering UAC virtualization or permission-denied errors when users modify UI settings.
+
+## Application Branding and Visuals
+- **Decision**: The project is officially branded as `ViitorXPC` (executable `ViitorXPCViewer.exe`). A Windows Resource Script (`app.rc`) embeds a transparent Windows icon (`vx.ico`) for native File Explorer/Taskbar integration.
+- **Decision**: The background watermark logo in Stereoscopic SBS mode renders twice with a negative parallax shift (15px convergence).
+- **Reason**: A 2D overlay across the whole screen breaks stereoscopic fusion. Rendering it twice natively in the SBS buffer with negative parallax makes the logo fuse correctly and "pop out" of the 3D depth field towards the user.
 
 ## Point Picking (synchronous on-click disk read)
 - **Decision**: `OctreeStore::pickPoint()` casts the ray against resident node cubes and reads the payloads of intersected nodes off `octree.bin` synchronously at click time (reusing the streaming decode path `readNodeInto`), rather than keeping every point's coordinates resident in CPU RAM.
@@ -67,3 +72,39 @@ This document records major design decisions.
 - **GpuVertex 16 -> 20 bytes**: added `intensity` (uint16) + `classification` (uint8) so the viewer can colour by them on the GPU (new attribs loc 2/3, shader modes 3/4). Accepted per-point GPU cost for the feature.
 - **Orbit vs free-look**: LMB-drag = turntable orbit around a pivot (discoverable default); RMB-drag keeps free-fly look; pivot updates on double-click/zoom via depth readback; measure mode reclaims LMB.
 - **Convert cancel is cooperative**: `IndexOptions::cancel` (atomic) is polled at Phase C chunk boundaries; aborting returns false and leaves partial output. Phase A/B not yet cancellable.
+
+## Unity Plugin: Thin C API Over OctreeStore (branch `library/unity`)
+- **Decision**: Unity integration is a separate SHARED target (`pfunity`) that
+  compiles only `OctreeStore.cpp + Log.cpp` plus a new flat C API
+  (`src/library/unity/PointForgeC.{h,cpp}`). It does NOT link pfcore.
+- **Reason**: Unity consumes already-converted octrees, so the importer stack
+  (laszip/E57/indexer) is dead weight and would drag extra DLLs across the
+  plugin boundary. OctreeStore has no SDL/GL/ImGui dependencies, so the
+  streaming path is reusable as-is — the DLL ends up with KERNEL32-only
+  imports when built with the static triplet.
+- **Consequence**: LOD/visibility decisions stay native (the pfview
+  frustum+SSE traversal was ported into the API layer), Unity only mirrors
+  GPU residency back (`PF_ReleaseLoadedNode`/`PF_UnloadNode`). Keep
+  `PointForgeC.h` in sync with `PointForgeNative.cs` in the Unity repo
+  (`C:\Unity\unityvc-base-project\Assets\Games\Pointcloud-unity`).
+  POD-only boundary; API version via `PF_GetVersion` (currently 1).
+
+## Convert Integration (DLL instead of Process)
+- **Decision**: Replaced System.Diagnostics.Process invocation of pfconvert.exe with a native DLL library (PointForgeConvert.dll) in the Unity integration.
+- **Reason**: System.Diagnostics.Process is not supported and usually stripped in IL2CPP builds. Providing a DLL ensures cross-platform and IL2CPP compatibility within Unity, keeping the conversion logic directly within the Unity process space.
+- **Consequence**: Added a new C-API pfconvert_api.cpp and a pfconvert_dll CMake target that exposes PF_ConvertDataset and PF_Convert_SetLogCallback. Logs are sent via a callback to C#, which avoids freezing the editor and correctly feeds the Unity UI console.
+
+## WebRTC Answer Must Mirror the Browser's Offer (mid + payload type)
+- **Decision**: When the browser's `webrtc_offer` arrives, the server parses it with `rtc::Description`, extracts the video m-line's **mid** and the browser's **H264 payload type** (preferring `packetization-mode=1`) plus its fmtp, and builds the local send track from those — never hardcoded values.
+- **Reason**: libdatachannel matches local tracks to remote m-lines strictly by mid (`populateLocalDescription` → `mTracks.find(remoteMedia->mid())`). The original hardcoded mid `"video"`/PT 96 never matched Chrome's offer (mid `"0"`, dynamic PT), so the answer marked the video line removed (port 0) and no media could ever flow — black screen on every browser.
+- **Consequence**: If the offer carries no H264 codec at all, the server logs an error and stays on JPEG instead of negotiating a dead connection. Client-side companions to this fix: `useWebSocket` forwards the server's `webrtc_candidate` trickle-ICE messages (previously dropped — only `webrtc_ice` was handled), `useWebRTC` queues remote candidates until `setRemoteDescription` resolves, and the `onWebRTC` handler is wired through a ref (a `let` placeholder captured a stale no-op in the options object, silently discarding the answer).
+
+## WebRTC Encoder: Hardware-First, Quality VBR, Never-Crash Fallback
+- **Decision**: The encode thread selects a hardware H.264 MFT (`MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE` — NVENC/QuickSync/VCE) before falling back to the software `CLSID_CMSH264EncoderMFT`. Rate control is quality-based VBR (`eAVEncCommonRateControlMode_Quality`, quality 78) with a 12 Mbps `MF_MT_AVG_BITRATE` hint (up from a hardcoded 2 Mbps CBR).
+- **Reason**: Point-cloud frames are dense fields of high-contrast dots — worst-case content for H.264 inter prediction, so 2 Mbps CBR smeared badly versus the JPEG stream's effective 12–18 Mbps. The software encoder also burned CPU (plus CPU RGB→NV12) competing with the renderer; hardware encode moves that to the GPU.
+- **Consequence**: Hardware codec MFTs are async by spec, so the encode loop gained the `METransformNeedInput`/`METransformHaveOutput` event model — pumped strictly non-blocking (`MF_EVENT_FLAG_NO_WAIT`) with a bounded 150 ms input-credit wait that drops the frame rather than stalling. Any hardware failure (enum, activate, configure, runtime ProcessInput/Output) releases the encoder and permanently falls back to software for the session via a sticky `mfHwFailed` flag — the stream degrades, the app never crashes or hangs. Verified live: NVENC selected on the dev machine, browser decoded 1280×734, survived repeated JPEG↔WebRTC toggles and reconnects with zero errors.
+
+## Web Remote Premium UI Redesign
+- **Decision**: Overhaul the React UI into a premium, enterprise-grade interface.
+- **Reason**: The initial UI looked like a developer settings page. A professional tool used by engineering firms requires a high-end, polished feel comparable to industry standards (e.g. Unreal Engine, Figma).
+- **Consequence**: Implemented a desktop-style application shell (Toolbar -> Viewport/Inspector -> StatusBar). Completely decoupled from Tailwind/complex build pipelines by using a handcrafted CSS design system in `index.css` with CSS custom properties (`--bg #0D0F12`, `--accent #4DA3FF`). Used `lucide-react` for iconography. Retained all existing gesture logic and WebSocket protocol contracts unchanged.

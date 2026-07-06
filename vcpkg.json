@@ -8,6 +8,13 @@
     "glm",
     "laszip",
     "libe57format",
-    "zstd"
+    "zstd",
+    "civetweb",
+    "nlohmann-json",
+    "libjpeg-turbo",
+    {
+      "name": "libdatachannel",
+      "features": ["srtp"]
+    }
   ]
 }

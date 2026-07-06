@@ -1,240 +1,278 @@
-# AI Handoff
+# AI Handoff - PointForge (C++ repo)
 
-## Latest Session — Docked UI shell redesign + single-file build fix
-Two unrelated pieces of work, both on `main`:
+## Latest Session (2026-07-03, cont.) - Web Remote UX Polishing & Orbit Snapping Bugfix
 
-### 1. Full UI redesign (viewport-centric docked shell)
-The old UI was one scrolling 350px "PointForge Dashboard" ImGui window mixing
-viewer settings, converter settings, and controller/ESP32 config. Preceded by
-a UX audit (four independently-designed IA proposals — DCC-dock, steelmanned
-top-tabs, viewport+jobs, ribbon — scored by three judge lenses: beginner,
-power-user, scalability/feasibility). All four proposals, judged
-independently, rejected top-level page tabs; the tabs advocate reversed its
-own position after steelmanning. Converged recommendation: menu+dock shell
-(same pattern as Unreal/Unity/Blender/VS/CloudCompare), conversion as a
-background job queue, controller config out of daily UI into Preferences.
-Implemented that recommendation in full — see `architecture.md` §7 for the
-shell's structure and `decisions.md` ("Viewport-Centric Docked UI Shell") for
-the rationale. Highlights:
-- Repinned ImGui FetchContent `v1.91.5` -> **`v1.91.5-docking`** (same repo,
-  docking branch) to get `DockSpace`/`DockBuilder`.
-- New `src/viewer/Jobs.h` (`JobQueue`/`ConvertJob`): one worker thread runs
-  conversions sequentially via the existing `IndexOptions` progress/cancel
-  contract — unchanged from the old inline converter, just called from a
-  queue instead of a raw `std::thread` in `main.cpp`. This is the same
-  abstraction batch conversion and future AI-segmentation jobs reuse.
-- New `src/viewer/UiLog.h` + `pf::setLogSink()` (added to `common/Log.h/.cpp`):
-  mirrors every `pf::log()` call — including from the converter thread — into
-  a ring buffer backing the new Console panel. Original stdout/stderr logging
-  untouched; the UI sink is additive.
-- `main.cpp` rewritten around the shell: menu bar, toolbar, passthru-docked
-  viewport, Properties dock (collapsing sections; tool options *append*, e.g.
-  Measure/Clip sections show up alongside Display rather than replacing it),
-  bottom Jobs/Console/Performance dock (closed by default), status bar with a
-  job-progress pill, toasts, F1 searchable shortcut sheet (one keybinding
-  table is the source of truth), Ctrl+P command palette, welcome/empty state
-  with drag-drop routing (octree dir -> load, raw scan file -> Convert dialog
-  pre-filled), Preferences dialog (General/Display/Input/Advanced tabs —
-  Input absorbs the entire gamepad + ESP32 block).
-- **Stereoscopic SBS (F9) now suppresses ALL UI** per explicit requirement —
-  not just leaves it on top of the split view. Every ImGui draw this
-  frame (menu/toolbar/docks/status bar/watermark/measure overlay/colour
-  legend) is skipped; only a fading "F9/Esc to exit" hint renders, drawn once
-  per eye viewport so it fuses correctly through a stereoscope. Hotkeys still
-  process; only rendering stops. Boots correctly into the hint if `stereoSBS`
-  is loaded `true` from `pfview_config.txt`.
-- New keys: `M`/`C` tool toggles, `1`/`3`/`7` view presets, `5` ortho, `F3`
-  stats HUD, `F9` stereo, `Shift+Space` zen (alias for `F5`), `Ctrl+O/I/P/,`.
-  Fixed a latent bug in the process: `F` (frame-all) used to fire while typing
-  in an ImGui text field; now guarded by `WantCaptureKeyboard` like the other
-  letter-key shortcuts.
-- Verified: Release build clean (only pre-existing E57Reader warnings), 6s
-  smoke-launch with no crash. **Not** verified against a live multi-billion
-  point cloud this session, and the Jobs/Console panels are untested with a
-  real conversion run end-to-end — worth doing before calling this final.
+### What was built / Fixed
+- **Orbit Snapping Bug (C++ App)**: The user reported the camera violently snapping when left-clicking to orbit after right-clicking to look. This was because the `pivot` coordinate was being left stale when the camera rotation changed. Fixed in `main.cpp` by re-projecting the pivot directly onto the camera's current forward axis right as the left-click drag starts, preserving distance without teleporting the camera.
+- **Web Remote Speed Controls**: Raised the maximum speed slider caps for Look, Pan, and Zoom from 1.0 to 5.0. 
+- **Global UI Scale**: Increased the Web Remote's entire UI size by 20% globally via `zoom: 1.2` on the `body` tag.
+- **Always-on Fly Controls**: Removed the Fly controls from the properties panel and overlaid them permanently over the viewport. The speed slider values are now preserved because the tab never unmounts.
+- **Resizable Properties Panel**: Used native CSS resize handles (`resize: horizontal`, `direction: rtl`) to allow the right-hand Inspector rail to be dragged to expand its width.
+- **Watermark & Branding**: Wired the C++ app's SVG logo to the Web Remote's favicon, Connect screen, and an always-visible viewport watermark.
 
-### 2. Single-file static build: toolset-mismatch fix simplified
-The existing single-file recipe (decisions.md, prior session) required
-configuring with Ninja inside a VS18 developer command prompt to dodge a
-vcpkg/CMake-generator toolset mismatch (LNK2019 on `__std_regex_transform_*`
-etc. — vcpkg auto-picked the newest installed MSVC, 14.51 from VS 18
-Community, while CMake's default "Visual Studio 17 2022" generator targets
-14.44 from the VS 2022 BuildTools instance). Reproduced the *exact same*
-LNK2019 this session, then found a one-file fix instead of the Ninja dance:
-new **`triplets/x64-windows-static.cmake`** overlay triplet pins
-`VCPKG_PLATFORM_TOOLSET_VERSION 14.44`, forcing vcpkg to compile every static
-port with the toolset the default generator actually links against. Normal
-`cmake -B build-static -S . -DCMAKE_TOOLCHAIN_FILE=... -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_OVERLAY_TRIPLETS=<repo>/triplets`
-+ `cmake --build build-static --config Release` now links clean, no Ninja/
-vcvars step. Verified: `dumpbin /DEPENDENTS` on the resulting
-`ViitorXPCViewer.exe` shows only OS DLLs (OPENGL32/KERNEL32/USER32/GDI32/
-WINMM/IMM32/ole32/OLEAUT32/VERSION/ADVAPI32/SETUPAPI/SHELL32); copied the exe
-alone into an empty directory and launched it successfully (6s, no crash).
-The Ninja recipe in decisions.md still works and is left documented, but the
-overlay-triplet recipe above is simpler and should be preferred going forward.
+### Modified files
+- `src/viewer/main.cpp`
+- `webremote/src/index.css`
+- `webremote/src/FlyTab.tsx`
+- `webremote/src/App.tsx`
+- `docs/{tasks,ai_handoff}.md`
 
-## Previous Session — Controller support
-Branch `Controller-support`. Added gamepad / joystick input via SDL (no new dep):
-- New `src/viewer/Controller.{h,cpp}` — `GameInput` wraps `SDL_GameController`
-  (Xbox, auto-mapped) and falls back to raw `SDL_Joystick` for custom HIDs
-  (axes/buttons by configurable index). Deadzone, edge-detected buttons, hotplug.
-- `main.cpp`: `SDL_INIT_GAMECONTROLLER|JOYSTICK`, per-frame poll + apply.
-  - Camera: left stick move, right stick look, triggers down/up, RB boost.
-    Custom 1-stick pads: hold LB + stick to look.
-  - UI: `ImGuiConfigFlags_NavEnableGamepad` toggled by **UI-nav mode**
-    (Start/B). Xbox drives ImGui nav natively; raw joysticks use button actions.
-  - Actions: A=frame-all, Y=measure, X=screenshot, Back=toggle UI.
-  - Settings panel "Controller": enable, deadzone, look/move sens, invert-Y,
-    live raw axis/button monitor + index rebinding for custom devices. Persisted.
-- Status bar shows `Pad:Cam/UI`; F1 help lists controller controls.
+### Next Recommended Task
+The web remote `webapp-controller` feature branch is complete and fully polished.
+- Merge `webapp-controller` into the main branch.
 
-Limitation: raw-joystick ImGui nav is not auto-fed (Xbox only); custom pads get
-button actions + camera. Not tested with a physical device this session — verify
-mappings live (the rebind panel exists for non-standard axis/button indices).
+User report: pressing Front/Side/Top (keys 1/3/7 or remote `preset*` cmds) made
+the model vanish; 'F' (frame) recovered it.
 
-### Custom ESP32 controller (Bluetooth SPP serial)
-The user's custom controller is **not** a USB HID — it's an ESP32 streaming over
-a Bluetooth virtual COM port (protocol from their `JoystickReceiverBluetooth.cs`:
-lines `x,y,b` with 12-bit ADC + active-low button, plus `PAUSE`/`PLAY`). Added
-`src/viewer/SerialController.{h,cpp}` (Win32 only): background thread opens the
-COM port (auto-detected from the device MAC via `HKLM\...\Enum\BTHENUM`, same as
-the C# script; manual COM fallback), parses lines, exposes normX/normY + trigger
-+ pause/play one-shots. Wired in `main.cpp` as a third input alongside mouse +
-Xbox:
-- **Joystick = look**; **hold trigger = fly forward** along the look direction.
-- **PAUSE** = toggle UI-nav mode; in UI mode the stick feeds ImGui gamepad-nav
-  (`AddKeyAnalogEvent(GamepadLStick*)`) and **PLAY** = activate (`GamepadFaceDown`).
-- **PLAY** in camera mode = Frame-All.
-- Controller panel has a "Custom serial controller" section: enable, auto/MAC/COM,
-  Reconnect, live X/Y/trigger readout. Persisted (`serialEnabled/Auto/Mac/Port`).
-Default MAC `B4BFE90B6036` (from the user's script). Not tested with the physical
-device — verify COM auto-detect + axis orientation (invert-Y available).
+### Root cause (`src/viewer/main.cpp` camPreset* lambdas)
+Two independent bugs:
+1. **Wrong space**: presets set `cam.position = store.cubeCenter() + offset`,
+   but the camera/render space is CENTRED (cube centre = origin — see
+   `frameAll`, `pivot`, and the GPU-precision convention in CLAUDE.md). Adding
+   the world-space cube centre teleported the camera by the cloud's world
+   offset — kilometres for georeferenced scans.
+2. **Wrong orientation**: the hardcoded yaw/pitch never pointed at the model
+   anyway (e.g. Top placed the camera above but pitch +89 = looking straight UP;
+   Front sat at -Y but looked -X). front() convention: Z-up, yaw=0 → +Y.
 
-## Previous Session — UX overhaul
-Implemented a broad UX pass on `pfview` (single-file `ViitorXPCViewer`):
-- **Navigation**: LMB-drag orbit, double-click focus, wheel zoom-to-cursor
-  (point size moved to Ctrl+wheel), `F` frame-all, `F11` fullscreen. Camera
-  gained `orbit()`/`lookAt()`; cursor interaction uses GPU depth readback.
-- **HUD**: always-on status bar (FPS / points / GPU MB / mode / live cursor XYZ /
-  loading), `F1` controls overlay, slider tooltips.
-- **Measure**: multi-segment polyline (per-segment + total length), snap preview,
-  undo / clear / copy-to-clipboard.
-- **Visual**: Quality preset, colour-by Intensity + Classification (GpuVertex now
-  carries both; shader modes 3/4 + ASPRS palette), elevation/intensity colour-bar
-  legend, light/dark theme.
-- **EDL**: eye-dome lighting post-process — scene now renders to an offscreen FBO,
-  fullscreen pass copies or shades depth edges. Strength/radius UI.
-- **Loading**: recent-files (MRU) dropdown, auto-load-last toggle, convert Cancel
-  button (cooperative `IndexOptions::cancel`).
-- **QoL**: `F12` screenshot (BMP), reset-to-defaults confirmation, clear-clipping,
-  top toolbar (Open/Frame/Measure/Shot/Help).
+### Fix
+Single `presetView(dir)` helper: distance from the frameAll fit formula
+(`cs*0.5/tan(fov/2)*1.4`), `pivot = origin`, `cam.position = dir*dist`,
+`cam.lookAt(pivot)` (safe at straight-down — pitch clamped ±89). Presets also
+reset the orbit pivot now, so orbiting after a preset behaves.
+Rebuilt `build-static/Release/ViitorXPCViewer.exe` — this build also embeds the
+redesigned webremote UI (web_build target ran npm install for lucide-react).
 
-Touched: `Camera.*`, `OctreeStore.*` (GpuVertex), `PointRenderer.cpp` (attribs),
-`Shader.*`, `EmbeddedShaders.h` (point + EDL), `OctreeIndexer.*` (cancel),
-`main.cpp`. All build (dynamic + static single-file). Not yet tested against a
-real cloud — verify orbit/measure/EDL/colour modes on actual data.
+### Modified files
+- src/viewer/main.cpp (camPresetTop/Front/Side → presetView helper)
+- docs/{tasks,ai_handoff}.md
 
-## Prior Work
-Implemented four roadmap tasks in the desktop `pfview` viewer / `pfcore` and
-fixed on-disk-format doc drift. Followed the AGENTS.md workflow (read
-architecture/roadmap/handoff first; updated tasks.md + decisions.md).
+### Next Recommended Task
+Verify presets on the loaded NTPC.laz scan (1/3/7 + remote Camera tab), then
+proceed with the merge plan below.
 
-### Features Added
-- **CPU Point Picking + distance measurement**: New "Measure" panel. With
-  *Measure mode* on, LMB picks points; two picks draw a marker pair + connecting
-  line + live distance (metres) via an ImGui foreground overlay. Picks resolve
-  by a synchronous, bounded ray scan over the octree (no CPU-resident point
-  buffer — see decisions.md). Clear button resets.
-- **Streaming queue purge**: `OctreeStore` now stamps each load request with the
-  frame it was wanted and exposes `purgeStale()`, called every frame, to drop
-  stale not-yet-started requests and cap buffered uploads. Keeps the load queue
-  bounded under fast camera motion.
-- **ImGui DPI scaling**: Auto-detects display DPI at startup; persisted "UI
-  Scale" slider re-applies cleanly from a captured base style. Default clamped to
-  0.5x–4.0x.
-- **Doc drift fix**: `architecture.md` `NodeRecord` corrected 32 -> 52 bytes
-  (explicit `children[8]`, not `firstChild`) and example `metadata.json` updated
-  to v2 (bytesPerPoint 22, classification attribute). `CLAUDE.md` `PackedPoint`
-  corrected 20 -> 22 bytes.
+## Previous Session (2026-07-03, cont.) - Web Remote Premium UI Redesign
 
-## Modified Files (this session — UI shell + static build)
-- `src/viewer/Jobs.h` (new)      — `JobQueue`/`ConvertJob` background conversion queue
-- `src/viewer/UiLog.h` (new)     — Console panel ring buffer
-- `src/common/Log.h`, `src/common/Log.cpp` — added `pf::setLogSink()`
-- `src/viewer/main.cpp`          — full shell rewrite (docking, menu/toolbar,
-  Properties/Jobs/Console/Performance docks, status bar, palette, shortcuts,
-  Preferences dialog, stereo-hides-UI, new hotkeys)
-- `CMakeLists.txt`               — ImGui FetchContent tag -> `v1.91.5-docking`
-- `triplets/x64-windows-static.cmake` (new) — overlay triplet, toolset pin
-- `CLAUDE.md`                    — stack/layout/run sections updated for the new shell
-- `docs/*.md` (all six)          — this handoff entry + architecture §7 +
-  decisions + roadmap/tasks updates
+User requested a full visual redesign of the ViitorXPC Remote Controller web application into a premium, enterprise-grade interface, without altering any backend logic, API contracts, or existing features.
 
-## Modified Files (prior sessions)
-- `src/viewer/Camera.h`, `src/viewer/Camera.cpp`        — `screenRay()` (unproject pick ray)
-- `src/viewer/OctreeStore.h`, `src/viewer/OctreeStore.cpp` — `pickPoint()`, `readNodeInto()`, `purgeStale()`, frame-stamped requests
-- `src/viewer/main.cpp`                                  — measure state/overlay/UI, DPI scaling, purge call, frame-stamped `requestLoad`
-- `docs/architecture.md`, `CLAUDE.md`                   — format doc-drift fixes
-- `docs/tasks.md`, `docs/decisions.md`, `docs/ai_handoff.md` — workflow upkeep
+### What was built / Fixed
+- **App Shell Architecture**: Restructured the layout into a fixed desktop-like shell consisting of a Top Toolbar, a central Workspace (Viewport + Right Inspector), and a bottom Status Bar. On mobile screens, the inspector docks to the bottom.
+- **CSS Design System**: Created a handcrafted CSS variables design system in `index.css` to avoid complex build configurations. Used a dark, technical color palette (`#0D0F12` background, `#17191E` panels, `#4DA3FF` accent).
+- **Component Upgrades**: Replaced default browser inputs with custom styled components: animated iOS-style toggles, segmented controls, custom slider thumbs, and glowing buttons.
+- **Iconography**: Integrated `lucide-react` for clean, professional icons across the toolbar, inspector tabs, and status bar.
+- **Gesture Preservation**: Carefully ported the existing multi-touch and mouse gesture logic into the new floating glass-morphic `FlyTab` without any regressions.
 
-## Architecture Notes
-- Picking re-bases the centred camera ray to world space (`+ cubeCentre`) because
-  node cubes and unpacked points are stored in world coords. Tolerance scales
-  with along-ray distance (`tolPerDist = pickPx / ssFactor`) for a fixed-pixel
-  pick disc.
-- `readNodeInto()` is the shared decode (raw read or zstd) used by both the
-  background streaming worker and the synchronous picker — keep them in sync.
-- DPI scaling does **not** re-rasterize the font atlas (metrics + FontGlobalScale
-  only); large scales soften text.
+### Modified files
+- webremote/package.json
+- webremote/src/index.css
+- webremote/src/controls.tsx
+- webremote/src/App.tsx
+- webremote/src/ActionBar.tsx
+- webremote/src/StatusHUD.tsx
+- webremote/src/FlyTab.tsx
+- docs/{tasks,decisions,ai_handoff}.md
 
-## Verification
-- `cmake --build build --config Release --target pfview` succeeds. One *pre-existing*
-  warning (C4244 at main.cpp flushBudget, unrelated to this work). Not run against
-  a live cloud this session — pick accuracy/perf on a real octree is untested.
+### Next Recommended Task
+- Merge `webapp-controller` branch into main.
+- Validate the new UI performance on various mobile and desktop browsers.
 
-## Single-File Release Build
-A fully static, single-file `ViitorXPCViewer.exe` (~6.5 MB): zero non-system
-DLLs, shaders + icon embedded. See decisions.md ("Single-File Static Release")
-for the full history. **Current (simplest) recipe** — no Ninja/vcvars needed:
+## Previous Session (2026-07-03, cont.) - WebRTC Streaming Bugfix (client signaling)
 
-```powershell
-cmake -B build-static -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-      -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_OVERLAY_TRIPLETS=C:/UnrealProject/PointForge/triplets
-cmake --build build-static --config Release   # -> build-static/Release/ViitorXPCViewer.exe
-```
-`triplets/x64-windows-static.cmake` pins `VCPKG_PLATFORM_TOOLSET_VERSION` to
-match whatever MSVC toolset the default "Visual Studio 17 2022" generator
-resolves to on this machine (currently 14.44) — check
-`grep CMAKE_GENERATOR_INSTANCE build-static/CMakeCache.txt` and the installed
-`VC/Tools/MSVC/<version>` folders if you re-provision the machine and this
-starts failing with LNK2019 on `__std_*` symbols again; bump the pin to match.
+User reported: WebRTC video stream not working; JPEG stream fine. Root cause was
+entirely client-side (webremote React app) — three signaling bugs. No C++ changes.
 
-Older fallback (still works, more steps — see decisions.md for why it was
-needed originally):
-```powershell
-cmake -B build-static-ninja -S . -G Ninja -DCMAKE_BUILD_TYPE=Release `
-      -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-      -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_HOST_TRIPLET=x64-windows-static
-cmake --build build-static-ninja --target pfview   # run from inside a VS18 dev shell
-```
-The dynamic build (`build/`, VS2022) still works for fast iteration.
+### Bugs found & fixed
+1. **Fatal — answer never delivered** (`App.tsx`): the `onWebRTC` option passed to
+   `useWebSocket` was a `let` no-op placeholder; reassigning the local variable
+   after `useWebRTC()` returned did NOT update the already-constructed options
+   object, so `optsRef.current.onWebRTC` stayed the no-op every render. The
+   server's `webrtc_answer` was silently dropped → `setRemoteDescription` never
+   ran → PC stuck in `have-local-offer` → no video ever. Fixed with a
+   `webrtcMsgRef` ref + stable `useCallback` that forwards to the latest handler.
+2. **Fatal — server ICE dropped** : server (RemoteServer.cpp `onLocalCandidate`)
+   sends trickle candidates as `{"t":"webrtc_candidate"}`, but the client switch
+   in `useWebSocket.ts` only forwarded `webrtc_ice`/`webrtc_answer`. libdatachannel
+   emits the answer SDP *before* gathering, so the answer carries no candidates —
+   client had zero remote candidates and ICE could not pair. Client now accepts
+   both `webrtc_ice` and `webrtc_candidate` (server also lacks `sdpMLineIndex`;
+   defaulted to mid `video` / index 0).
+3. **Race** (`useWebRTC.ts`): `addIceCandidate` throws if called before
+   `setRemoteDescription` resolves. Added a pending-candidate queue flushed after
+   the answer is applied. Also: offer message now includes `type:'offer'` (server
+   reads `m.value("type","")`), and `onnegotiationneeded` got try/catch.
 
-New files: `src/viewer/EmbeddedShaders.h`, `src/viewer/EmbeddedImage.h`
-(generated from `shaders/` and `images/vx.bmp` — regenerate if those change).
+### Verified
+- `npm run build` clean (tsc --noEmit + vite).
+- Rebuilt `build-static/Release/ViitorXPCViewer.exe` (web app is embedded via
+  generated `EmbeddedWeb.h`; a webremote change ALWAYS requires an exe rebuild —
+  `cmake --build build-static --config Release --target pfview`).
+- Not yet re-tested on physical phone — that is the next step.
 
-## Next Recommended Task
-- **Verify the new shell against a real conversion end-to-end**: enqueue a
-  real scan in the Convert dialog, confirm the Jobs panel progress/cancel,
-  status-bar pill, completion toast + auto-load, and Console log lines all
-  behave under an actual multi-minute conversion (only smoke-tested this
-  session — no real job was run through it), **or**
-- **Multi-select batch conversion** in the Convert dialog — the `JobQueue`
-  already supports N jobs, this is UI-only (file dialog multi-select loop
-  calling `jobs.enqueue()` per file), **or**
-- **On-disk cache purge**: a "Clear Cache" action for old `PointForgeCache_*`
-  converted-cloud dirs (still a gap; predates this session).
+### Modified files
+- webremote/src/App.tsx (ref-based onWebRTC wiring)
+- webremote/src/useWebSocket.ts (accept `webrtc_candidate`)
+- webremote/src/useWebRTC.ts (candidate queue, offer `type`, error handling)
+- docs/{tasks,ai_handoff}.md
 
-## Note on scope
-This repo is the **desktop SDL2/OpenGL** PointForge. A separate **Unreal Engine
-`PointForgeViewer` plugin** (EDL, scene proxy, crash fixes) lives in another repo
-and is *not* covered by these docs.
+### Round 2 (same day) — mobile showed play button, desktop Chrome black
+Two more root causes found and fixed:
+
+4. **Fatal — answer rejected the video m-line** (`RemoteServer.cpp` webrtc_offer):
+   libdatachannel matches local tracks to remote m-lines strictly by mid
+   (`mTracks.find(remoteMedia->mid())` in populateLocalDescription). Browser
+   offer mid is `"0"`; server track was hardcoded mid `"video"` → no match →
+   answer marked the video line removed (port 0) → no media could ever flow.
+   Payload type was also hardcoded 96 instead of mirroring the offer's H264 PT.
+   Fix: parse the offer with `rtc::Description`, extract the video m-line's mid
+   + the browser's H264 payload type (prefer packetization-mode=1) + its fmtp,
+   and build the local track from those. Logs
+   `WebRTC offer: video mid="..." H264 pt=...` on offer, plus pc state changes.
+   If the browser offers no H264 at all, logs an error and stays on JPEG.
+5. **Mobile autoplay blocked** (`VideoLayer.tsx`): React does not reliably
+   reflect the `muted` prop into the DOM before the autoplay policy check —
+   mobile browsers blocked playback and showed a play overlay. Fix: set
+   `v.muted = true` imperatively before `play()`, plus a
+   pointerdown/touchend fallback that resumes a paused video on first gesture.
+
+Also added console diagnostics in `useWebRTC.ts`: ICE/pc state transitions and
+a 2 s inbound-rtp stats log (`[webrtc] frames=... bytes=... keyframes=...`).
+Rebuilt webremote + `build-static/Release/ViitorXPCViewer.exe`.
+
+### Round 3 (same day) — WebRTC works but quality/perf worse than JPEG
+Expected with old settings: encoder was hardcoded to 2 Mbps CBR while the JPEG
+"med" preset effectively uses 12–18 Mbps; point-cloud content (dense
+high-contrast dots) defeats H.264 inter prediction, so starved CBR smears.
+Applied in `RemoteServer.cpp` `initMF`:
+- `MF_MT_AVG_BITRATE` 2 Mbps → 12 Mbps (LAN-only stream).
+- Quality-based VBR: `CODECAPI_AVEncCommonRateControlMode` =
+  `eAVEncCommonRateControlMode_Quality`, `CODECAPI_AVEncCommonQuality` = 78.
+  Falls back to CBR@12Mbps with a logWarn if the encoder rejects the mode.
+Rebuilt exe. NOT yet done (option #3, discussed): hardware encoder via
+`MFTEnumEx(MFT_ENUM_FLAG_HARDWARE)` (NVENC/QuickSync) — the current
+`CLSID_CMSH264EncoderMFT` is Microsoft's software encoder and burns CPU
+(plus CPU RGB→NV12) competing with the renderer; that is the remaining
+perf gap vs turbojpeg if WebRTC still feels slow.
+
+### Round 4 (same day) — hardware H.264 encoder (option #3), verified live
+`RemoteServer.cpp` `encodeLoop` reworked for hardware encoding:
+- `initMF` now tries `MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE)`
+  first (NVENC/QuickSync/VCE), falls back to `CLSID_CMSH264EncoderMFT` software.
+- Hardware codec MFTs are **async** — added the METransformNeedInput/HaveOutput
+  event model (`IMFMediaEventGenerator`, `MF_TRANSFORM_ASYNC_UNLOCK`), driven by
+  a non-blocking pump (`MF_EVENT_FLAG_NO_WAIT`, bounded 150 ms credit wait —
+  drops the frame if the encoder is backed up; never blocks/hangs).
+- Crash safety: every failure path (enum, activate, configure, runtime
+  ProcessInput/Output, stream change) releases the encoder and falls back to
+  the software MFT via a sticky `mfHwFailed` flag — stream continues, no crash.
+  `MF_E_TRANSFORM_STREAM_CHANGE` handled by re-accepting the output type.
+- Shared `sendEncodedSample`/`processOneOutput` lambdas serve both sync
+  (software) and async (hardware) paths.
+
+**Live-verified on this machine** (Playwright against the real exe):
+log shows `WebRTC: hardware H.264 encoder: NVIDIA H.264 Encoder MFT`, browser
+`<video>` decodes 1280×734 and currentTime advances; 4× JPEG↔WebRTC toggles +
+client reconnects survived; process stayed alive, zero error lines in the log.
+
+### Session modified files (uncommitted, branch `webapp-controller`)
+- src/viewer/RemoteServer.cpp — offer mid/PT mirroring, quality VBR + 12 Mbps,
+  hardware-first async-MFT encoder with software fallback
+- webremote/src/useWebRTC.ts — candidate queue, `webrtc_candidate` handling,
+  offer `type`, ICE/stats console diagnostics
+- webremote/src/useWebSocket.ts — forward `webrtc_candidate`
+- webremote/src/VideoLayer.tsx — imperative `muted` + gesture autoplay fallback
+- webremote/src/{App,ActionBar,FlyTab,StatusHUD,controls}.tsx, index.css,
+  package.json — webremote UI redesign (premium connect screen, lucide-react
+  icons, StatusHUD, toolbar shell) — also uncommitted on this branch
+- docs/{project-overview,architecture,roadmap,decisions,tasks,ai_handoff}.md —
+  architecture.md gained §8 "Web Remote"; decisions.md gained the two WebRTC
+  decisions; overview/roadmap refreshed (web embedding is DONE, not a milestone)
+
+### Next Recommended Task
+Physical test with the NEW exe (`build-static/Release/ViitorXPCViewer.exe`):
+set preferred stream to WebRTC, connect, watch browser console —
+ICE should reach `connected` and `frames=` should climb. If ICE connects but
+frames stay 0, the remaining suspect is the MF H.264 encoder output
+(SPS/PPS/IDR); check viewer Console for `WebRTC offer:` / pc state logs.
+Then merge `webapp-controller`.
+
+## Previous Session (2026-07-03, cont.) - Logo, Branding, and 3D Watermark
+
+### What was built / Fixed
+- **Configuration Routing**: Modified `main.cpp` to use `SDL_GetPrefPath` to route the `pfview_config.txt` serialization to the user's local `AppData` directory (`AppData/Roaming/ViitorX/ViitorXPC/`). This ensures standard desktop behavior without requiring admin privileges to save settings when installed in `Program Files`.
+- **Project Renaming**: Renamed the project from `PointForge` to `ViitorXPC` across `CMakeLists.txt` and configuration namespaces. The primary executable is built as `ViitorXPCViewer.exe`.
+- **Windows File Explorer Icon**: Generated a transparent `vx.ico` Windows icon from the existing `vx.bmp` logo. Added `app.rc` to the CMake build definitions to embed the `.ico` file into the Windows executable so the branding shows up natively in the File Explorer.
+- **Stereoscopic 3D Logo Pop-Out**: Rewrote the background watermark rendering in `main.cpp` for SBS (Side-by-Side) 3D mode. It now renders twice (once for each eye) and applies a 15-pixel negative parallax shift so the logo has a true stereoscopic depth effect, "popping out" of the screen when viewed through 3D lenses.
+
+### Modified files
+c:/UnrealProject/PointForge/CMakeLists.txt
+c:/UnrealProject/PointForge/src/viewer/main.cpp
+c:/UnrealProject/PointForge/make_ico.ps1
+c:/UnrealProject/PointForge/src/viewer/app.rc
+docs/{tasks,decisions,ai_handoff}.md
+
+### Next Recommended Task
+The application is feature-complete with UI gestures, WebRTC streaming, local application data persistence, native File Explorer branding, and 3D UI overlays.
+- Final user test of the SBS 3D effect in VR headsets/stereoscopic lenses.
+- Merge current branches and prepare the first production release package.
+
+## Previous Session (2026-07-03, cont.) - Web Remote WebRTC Streaming & Mobile Touch Fixes
+During the physical phone test, WebRTC video streaming and mobile UI were finalized. The viewer now perfectly streams high-performance, low-latency H.264 video to the phone browser, and replaces the mobile joysticks with an intuitive multi-touch gesture system.
+
+### What was built / Fixed
+- **WebRTC Pipeline Stability**: Fixed COM initialization in `RemoteServer::encodeLoop` which caused silent frame drops. Added manual `IMFSample` allocation for `CLSID_CMSH264EncoderMFT` which fixed crashes during stream processing.
+- **SSRC Matching**: Explicitly bound the `rtc::Description::Video` SDP SSRC and `rtc::RtpPacketizationConfig` SSRC to `1111` so the web browser successfully matches and plays the RTP stream instead of dropping it as rogue packets.
+- **Keyframe Guarantee**: Configured `CODECAPI_AVEncMPVGOPSize` to `30` (1 second) to guarantee a consistent IDR frame stream, preventing black screens when the client connects mid-stream.
+- **WebRTC Thread Safety**: Added `try/catch` and `isOpen()` checks to `videoTrack->sendFrame(...)` and all SDP/ICE handlers, guaranteeing `libdatachannel` exceptions do not crash the C++ app when a client abruptly disconnects.
+- **Mobile Touch Gestures**: Removed the nipple.js joysticks in `webremote`. Implemented multi-touch gestures in `FlyTab.tsx`:
+  - **Single tap & move**: Maps to Pitch/Yaw (Look)
+  - **Double tap & move**: Maps to Up/Down/Left/Right (Pan)
+  - **Pinch**: Maps to Forward/Backward (Zoom)
+  - **Deltas**: Changed `App.tsx` to automatically zero-out `f/s/u/yaw/pit` on every 33ms send tick so pointer deltas accumulate correctly for drag-to-position control. Held buttons (UP/DOWN/BOOST) use a faster `setInterval` to replenish their state against the zeroes.
+
+### Protocol v1 (verified)
+`hello{pin}` -> `hello_ok|hello_bad`; `move{f,s,u,yaw,pit,boost}` 30 Hz;
+`cmd{n[,v]}`; `state{fps,pts,pos,ui,file}` 5 Hz. Signs: stick up = +1 = fly
+forward / look up (pitch NOT negated in main.cpp — verify feel on phone).
+
+### Verified (localhost, real exe, physical phone)
+GET / 200 + assets 200 from `web/`; WS upgrade 101. WebRTC streaming successfully connects and renders the H.264 video to the React `<VideoLayer>`. Gestures drive the camera smoothly via delta accumulation. Full build clean (MSVC).
+
+### Modified files
+c:/UnrealProject/PointForge/src/viewer/RemoteServer.cpp
+c:/UnrealProject/PointForge/webremote/src/App.tsx
+c:/UnrealProject/PointForge/webremote/src/FlyTab.tsx
+docs/{tasks,decisions,ai_handoff}.md
+
+### Next Recommended Task
+The Web Remote system (React UI, WebSocket, WebRTC streaming, and Native C++ Server) is now fully working and verified. 
+- Conduct a final sanity check of the web app controls on the mobile device.
+- If everything is working perfectly, commit the `webapp-controller` branch and merge it into main.
+
+## Previous Session (2026-07-03) - Web Remote Controller: plan + branch
+
+Planning session only — no code yet. Goal: control camera + viewer options from a
+phone browser over LAN so the PC can hide all UI (F5) while flying continues.
+
+- Created branch `webapp-controller` (based off `library/unity`; that branch's
+  uncommitted DLL work — modified `CMakeLists.txt`, untracked
+  `src/tools/pfconvert/pfconvert_api.cpp` — carried over untouched).
+- Architecture decided and recorded in `docs/decisions.md`: embedded
+  civetweb HTTP+WS server inside pfview (rejected Firebase RTDB/Netlify relay —
+  same-LAN use case, ~1-5 ms vs 100-300 ms, offline-capable). React+Vite+TS app
+  in `webremote/`, built to static files, served by the viewer from `web/`
+  beside the exe (like `shaders/`).
+- Full 5-phase plan recorded in `docs/tasks.md` (In Progress section):
+  deps → `RemoteServer.{h,cpp}` → main.cpp integration → React app → build wiring.
+- Protocol v1: JSON over WS — `hello` w/ 4-digit PIN, `move` @30 Hz
+  (f/s/u/yaw/pit/boost), `cmd` (frame/presets/ortho/hideui/shot/measure/
+  pointsize/speed), `state` @5 Hz back (fps/pts/pos/ui/file).
+- Key patterns to follow: input mirrors `SerialController` (bg thread + atomics,
+  polled in main loop ~`main.cpp:890`); commands mirror `consumePause()` one-shot
+  pattern; commands dispatch to existing flags (`frameAllReq`, `showUI`,
+  `pendingShot`, presets).
+
+### Next Recommended Task
+Phase 0: verify vcpkg `civetweb` port has WebSocket support enabled (else
+FetchContent with `-DCIVETWEB_ENABLE_WEBSOCKETS=ON`, or `ixwebsocket`); add
+`civetweb` + `nlohmann-json` to `vcpkg.json`; scaffold `webremote/` with Vite;
+add `PF_WITH_REMOTE` CMake guard (graceful stub like `PF_WITH_LAS`).

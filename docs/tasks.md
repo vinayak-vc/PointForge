@@ -6,6 +6,10 @@
 - `[x]` Implement multiple Coloring Modes (True Color, Elevation, Solid)
 - `[x]` Add dynamic clipping planes
 - `[x]` Add Ortho / Perspective toggle and Camera Presets
+- `[x]` Camera preset fix: Front/Side/Top used world-space cubeCenter in the
+        centred camera space (model lost by the cloud's georeferenced offset)
+        and yaw/pitch that never faced the model; now `presetView(dir)` =
+        frameAll-fit distance + `lookAt(origin)` + orbit-pivot reset
 - `[x]` Modify application name to "ViitorX PointCloud Viewer" and insert watermark
 - `[x]` Build Viewer as a standard WIN32 executable to hide the console terminal
 - `[x]` Add system SFX / Beeps on load completion
@@ -14,15 +18,35 @@
 - `[x]` CPU Point Picking + distance measurement (synchronous on-click disk read; no CPU-resident buffer)
 - `[x]` Cache purge of stale streaming requests (frame-stamped queue + ready cap)
 - `[x]` ImGui DPI scaling (auto-detect + persisted UI Scale slider)
-- `[x]` Doc drift fix: `NodeRecord` 32->52 bytes, `PackedPoint` 20->22 bytes
-- `[x]` Single-file static release `ViitorXPCViewer.exe` (embedded shaders+icon)
+- [x] Doc drift fix: `NodeRecord` 32->52 bytes, `PackedPoint` 20->22 bytes
+- [x] Single-file static release `ViitorXPCViewer.exe` (embedded shaders+icon)
+- [x] Route configuration (`pfview_config.txt`) persistence to user's AppData directory via SDL_GetPrefPath
+- [x] Windows File Explorer integration (embed `vx.ico` via `app.rc` Resource Script)
+- [x] Render watermark correctly in Stereoscopic SBS mode with a 3D negative parallax pop-out effect
 - `[x]` Navigation UX: orbit (LMB), double-click focus, wheel zoom-to-cursor, frame-all
+- `[x]` Orbit snapping fix: Left-Click orbit after Right-Click look or WASD move
+        no longer snaps violently to the old stale pivot; the pivot is dynamically
+        projected onto the current forward axis.
 - `[x]` Always-on status bar + F1 help overlay + slider tooltips
 - `[x]` Multi-segment polyline measure (per-segment + total, snap, undo/clear/copy)
 - `[x]` Quality preset + color-by Intensity + Classification + colour-bar legend + theme toggle
 - `[x]` Eye-Dome Lighting (EDL) post-process (FBO + fullscreen pass)
 - `[x]` Recent files (MRU) + auto-load last + convert Cancel button
 - `[x]` Screenshot (F12, BMP), reset confirmation, clear-clipping, top toolbar
+- `[x]` Screenshot upgrade: PNG (vendored stb_image_write) saved to
+        `<Pictures>\ViitorXPC\shot_<timestamp>.png` (never beside a
+        Program-Files exe), copied to the Windows clipboard as a DIB, toast +
+        Console log; last capture kept in RemoteServer and served at
+        `/shot.png?pin=<PIN>` (PIN-gated) with a `shot_ready` WS notify
+- `[x]` Camera bookmarks: named poses (centred-space position + yaw/pitch +
+        ortho), persisted per-cloud in AppData `bookmarks.txt` (TSV); UI in
+        Properties > Camera (goto/delete/add-with-name); names broadcast in
+        cfg, remote cmds `bookmark_add`/`bookmark_goto`/`bookmark_del`
+- `[x]` Multi-select batch conversion: Convert dialog Browse uses
+        `openFileDialogMulti` (FOS_ALLOWMULTISELECT); N>1 shows a scrollable
+        remove-list + total size, output dir becomes the parent (each file →
+        `<out>\<stem>_octree`), one JobQueue job per file, load-when-done
+        forced off for batches
 - `[x]` Controller support: Xbox gamepad (SDL_GameController) + raw joystick fallback
         (camera, actions, ImGui UI-nav mode, deadzone/sens config, live rebind panel)
 - `[x]` Custom ESP32 Bluetooth-SPP controller (Win32 serial reader, MAC auto-detect):
@@ -49,16 +73,82 @@
         no Ninja/vcvars dev-shell step needed; re-verified zero non-system DLL
         imports and a clean launch isolated in an empty directory
 
+- `[x]` Unity native plugin (branch `library/unity`): `pfunity` DLL target +
+        flat C API (`src/library/unity/PointForgeC.{h,cpp}`) — streaming reader
+        only, pfcore untouched; smoke-tested against a real 12.4M-pt octree
+
 ## In Progress
-- (none)
+- `[x]` Web remote controller (branch `webapp-controller`) — phone browser drives
+        camera + viewer options over LAN; embedded civetweb HTTP+WS server in
+        pfview serves a React control page from `web/` beside the exe.
+        Plan phases:
+        - `[x]` Phase 0: deps — vcpkg civetweb port ships WS enabled
+                (`CIVETWEB_ENABLE_WEBSOCKETS=ON` in portfile); civetweb 1.16 +
+                nlohmann-json 3.12 added to vcpkg.json; qrcodegen vendored
+                (`src/viewer/qrcodegen.{hpp,cpp}`, MIT); `PF_WITH_REMOTE` guard
+        - `[x]` Phase 1: `src/viewer/RemoteServer.{h,cpp}` — pimpl keeps
+                civetweb/json out of headers; atomics input, mutex cmd queue,
+                5 Hz state broadcast (200 ms throttle), PIN handshake (3 tries),
+                500 ms move-staleness → axes read zero; stub build when deps absent
+        - `[x]` Phase 2: main.cpp — remote axes applied after serial block, cmds
+                → existing flags, Preferences > Input "Web remote" section,
+                "Connect phone" QR modal (qrcodegen → ImDrawList), settings
+                persisted (remoteEnabled/remotePort)
+        - `[x]` Phase 3: React app `webremote/` (Vite5+React18+TS strict) — dual
+                joystick, up/down/boost holds, action bar, HUD, PIN screen,
+                33 ms move loop w/ trailing zero frame, backoff reconnect, wake
+                lock; `vite build` clean, dist 152 KB
+        - `[x]` Phase 4a: CMake post-build copy `webremote/dist` → `web/`;
+                localhost smoke test passed: GET / 200, WS 101 upgrade,
+                hello_bad/hello_ok, state @5 Hz, hideui flips `ui` in state,
+                disconnect handler zeroes axes
+        - `[x]` Phase 4b: physical-phone end-to-end test (same WiFi): QR scan,
+                PIN, fly with both sticks (verify pitch/yaw sign feel), all
+                commands, phone-sleep disconnect safety, `hideui` clean-screen
+                flight; Windows Firewall private-network allow on first run
+        - `[x]` Phase 5: viewport JPEG streaming — libjpeg-turbo (vcpkg) encode
+                thread in RemoteServer, backbuffer blit→downscale→readback
+                post-EDL/pre-UI in main.cpp, binary WS frames on same socket;
+                client opts in `{"t":"stream","on":1,"w","fps","q"}`; verified
+                FF D8 JPEG frames end-to-end (WebRTC evaluated, rejected for
+                v1: libwebrtc/GStreamer too heavy; libdatachannel+MF = phase 2)
+        - `[x]` Phase 6 (C++ side): FULL viewer control — protocol v2 `set.<key>`
+                for every Properties control (display/camera/stereo/clip/UI
+                toggles) + cmds (reset_view, fullscreen, measure_undo/clear,
+                clip_tool/reset, loadrecent) + `{"t":"cfg"}` snapshot broadcast
+                (1 Hz + instant echo, incl. measure pts, recent files, bounds);
+                debounced settings save; verified cfg keys + set echo live
+        - `[x]` Phase 7 (WebRTC & Mobile UI): Integrated libdatachannel + Microsoft 
+                Media Foundation for low-latency H.264 WebRTC streaming to the 
+                browser. Replaced visual joysticks with multi-touch gestures 
+                (single-tap look, double-tap pan, pinch zoom).
+        - `[x]` Phase 7 fix (client signaling): WebRTC answer/ICE never reached
+                the RTCPeerConnection (stale no-op `onWebRTC` captured in the
+                useWebSocket options object), server trickle-ICE arrived as
+                `webrtc_candidate` but client only handled `webrtc_ice`, and
+                remote candidates could race setRemoteDescription. Fixed in
+                webremote (ref-based handler wiring, accept both ICE message
+                names, pending-candidate queue, offer now carries `type`).
+        - `[x]` Phase 7 fix (server answer): libdatachannel matches tracks by
+                mid — hardcoded mid "video"/PT 96 never matched the browser
+                offer (mid "0", browser's own H264 PT), so the answer rejected
+                the video m-line. Server now mirrors the offer's mid + H264
+                payload type + fmtp. Mobile autoplay fixed (imperative muted +
+                gesture fallback); webrtc console diagnostics added.
+        - `[x]` Phase 8: Premium UI Redesign — Completely overhauled the React frontend
+                to an enterprise-grade UI using CSS custom variables, Lucide icons,
+                and a clean desktop-like app shell (Toolbar, Workspace, Status Bar).
+                Replaced native inputs with styled sliders, segmented controls, and
+                iOS-style toggles.
 
 ## To Do
+- `[ ]` Orthographic screen-space-error variant in the C API (Unity scene
+        cameras can be ortho; streaming currently pauses in ortho views)
 - `[ ]` Improved caching: auto-purge old converted-cloud cache dirs on disk
 - `[ ]` UI font re-rasterization at scale (current DPI path scales metrics + FontGlobalScale only)
 - `[ ]` Linearised-depth EDL (current uses raw depth diff; tune for ortho)
 - `[ ]` Convert cancel for Phase A/B (currently aborts at Phase C chunk boundaries)
 - `[ ]` VR/OpenXR initialization support
-- `[ ]` Multi-select batch conversion in the Convert dialog (queue already supports N jobs)
 - `[ ]` Workspace layout presets (Window menu: save/restore named DockBuilder layouts)
 - `[ ]` Recent-files pin/unpin + cached point-count/size metadata
 - `[ ]` Scene panel (multi-cloud) — deferred until multi-cloud rendering exists

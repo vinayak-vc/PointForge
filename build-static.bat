@@ -28,7 +28,7 @@ if not exist "%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" (
 echo [build-static.bat] Using vcpkg at %VCPKG_ROOT%
 echo [build-static.bat] Configuring build-static\ (this recompiles static deps the first time - slow) ...
 cmake -B build-static -S . -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" ^
-      -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_OVERLAY_TRIPLETS="%~dp0triplets"
+       -DVCPKG_TARGET_TRIPLET=x64-windows-static -DVCPKG_OVERLAY_TRIPLETS="%~dp0triplets"
 if errorlevel 1 (
     echo [build-static.bat] CMake configure failed.
     exit /b 1

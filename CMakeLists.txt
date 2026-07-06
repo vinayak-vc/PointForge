@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PointForge VERSION 0.1.0 LANGUAGES CXX)
+project(ViitorXPC VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
+
+option(PF_EMBED_WEB "Embed web UI assets into the executable" ON)
+option(PF_REMOTE_WEBRTC "Enable WebRTC streaming support" ON)
+option(PF_REMOTE_STREAM "Enable JPEG streaming fallback" ON)
 
 if(MSVC)
     add_compile_options(/W3 /permissive- /MP)
@@ -37,6 +41,19 @@ find_package(GLEW REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
+find_package(civetweb CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(libjpeg-turbo CONFIG REQUIRED)
+
+if(PF_REMOTE_WEBRTC)
+    find_package(LibDataChannel CONFIG QUIET)
+    if(LibDataChannel_FOUND)
+        set(PF_WEBRTC_LIB LibDataChannel::LibDataChannel)
+    else()
+        message(WARNING "PF_REMOTE_WEBRTC enabled but LibDataChannel not found; disabling.")
+        set(PF_REMOTE_WEBRTC OFF)
+    endif()
+endif()
 
 # Static triplets export SDL2::SDL2-static rather than SDL2::SDL2. Pick whatever
 # this triplet provides so the same CMakeLists serves both build modes.
@@ -105,30 +122,60 @@ endif()
 # --- Zstd (payload compression) ---
 # Prefer the CMake config target (zstd::libzstd) so debug/release libs are chosen
 # per-config automatically; fall back to a release-hinted find_library.
+# PF_ZSTD_LIB/PF_ZSTD_INC are kept separate from PF_OPTIONAL_* because the Unity
+# plugin (pfunity) needs zstd alone, without laszip/E57.
+set(PF_ZSTD_LIB "")
+set(PF_ZSTD_INC "")
 find_package(zstd CONFIG QUIET)
 if(TARGET zstd::libzstd)
-    list(APPEND PF_OPTIONAL_LIBS zstd::libzstd)
-    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+    set(PF_ZSTD_LIB zstd::libzstd)
     message(STATUS "Zstd: target zstd::libzstd")
 elseif(TARGET zstd::libzstd_static)
-    list(APPEND PF_OPTIONAL_LIBS zstd::libzstd_static)
-    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+    set(PF_ZSTD_LIB zstd::libzstd_static)
     message(STATUS "Zstd: target zstd::libzstd_static")
 else()
     find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
     find_library(ZSTD_LIB NAMES zstd libzstd HINTS "${_PF_REL_LIB}")
     if(ZSTD_INCLUDE_DIR AND ZSTD_LIB)
-        list(APPEND PF_OPTIONAL_INCS ${ZSTD_INCLUDE_DIR})
-        list(APPEND PF_OPTIONAL_LIBS ${ZSTD_LIB})
-        list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+        set(PF_ZSTD_LIB ${ZSTD_LIB})
+        set(PF_ZSTD_INC ${ZSTD_INCLUDE_DIR})
         message(STATUS "Zstd: ${ZSTD_LIB}")
     else()
         message(WARNING "Zstd not found -> Node compression disabled")
     endif()
 endif()
+if(PF_ZSTD_LIB)
+    list(APPEND PF_OPTIONAL_INCS ${PF_ZSTD_INC})
+    list(APPEND PF_OPTIONAL_LIBS ${PF_ZSTD_LIB})
+    list(APPEND PF_OPTIONAL_DEFS PF_WITH_ZSTD)
+endif()
 
 message(STATUS "PointForge optional format libs: ${PF_OPTIONAL_LIBS}")
 message(STATUS "PointForge format defines:       ${PF_OPTIONAL_DEFS}")
+
+# ---------------------------------------------------------------------------
+# Web UI embedding
+# ---------------------------------------------------------------------------
+if(PF_EMBED_WEB)
+    add_custom_target(web_build ALL
+        COMMAND ${CMAKE_COMMAND} -E echo "Installing npm packages..."
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}/webremote npm.cmd install
+        COMMAND ${CMAKE_COMMAND} -E echo "Building web UI..."
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}/webremote npm.cmd run build
+        BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/webremote/dist
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/generated/EmbeddedWeb.h
+        DEPENDS web_build
+        COMMAND ${CMAKE_COMMAND} -DDIST_DIR=${CMAKE_CURRENT_SOURCE_DIR}/webremote/dist -DOUTPUT_HEADER=${CMAKE_BINARY_DIR}/generated/EmbeddedWeb.h -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_web.cmake
+        COMMENT "Generating EmbeddedWeb.h from webremote/dist"
+        VERBATIM
+    )
+    add_custom_target(embed_web_header ALL
+        DEPENDS ${CMAKE_BINARY_DIR}/generated/EmbeddedWeb.h
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Dear ImGui — compiled from source (pinned). The vcpkg imgui port dropped its
@@ -180,6 +227,32 @@ target_link_libraries(pfcore PUBLIC glm::glm ${PF_OPTIONAL_LIBS} ole32)
 target_compile_definitions(pfcore PUBLIC ${PF_OPTIONAL_DEFS})
 
 # ---------------------------------------------------------------------------
+# pfunity — native plugin DLL for the Unity integration (branch library/unity).
+# Streaming reader only: OctreeStore + Log + the flat C API. Deliberately does
+# NOT link pfcore, so no laszip/E57/SDL/GL/ImGui dependencies leak into Unity.
+# Build with the x64-windows-static triplet for a single self-contained DLL
+# (static CRT + static zstd).
+# ---------------------------------------------------------------------------
+option(PF_BUILD_UNITY_PLUGIN "Build the PointForgeUnity native plugin DLL" ON)
+if(PF_BUILD_UNITY_PLUGIN)
+    add_library(pfunity SHARED
+        src/library/unity/PointForgeC.cpp
+        src/viewer/OctreeStore.cpp
+        src/common/Log.cpp
+    )
+    target_include_directories(pfunity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(pfunity PRIVATE glm::glm Threads::Threads)
+    if(PF_ZSTD_LIB)
+        target_link_libraries(pfunity PRIVATE ${PF_ZSTD_LIB})
+        target_compile_definitions(pfunity PRIVATE PF_WITH_ZSTD)
+        if(PF_ZSTD_INC)
+            target_include_directories(pfunity PRIVATE ${PF_ZSTD_INC})
+        endif()
+    endif()
+    set_target_properties(pfunity PROPERTIES OUTPUT_NAME "PointForgeUnity" PREFIX "")
+endif()
+
+# ---------------------------------------------------------------------------
 # pfconvert — the importer CLI
 # ---------------------------------------------------------------------------
 add_executable(pfconvert src/tools/pfconvert/main.cpp)
@@ -196,6 +269,9 @@ add_executable(pfview WIN32
     src/viewer/PointRenderer.cpp
     src/viewer/Controller.cpp
     src/viewer/SerialController.cpp
+    src/viewer/RemoteServer.cpp
+    src/viewer/qrcodegen.cpp
+    src/viewer/app.rc
 )
 target_link_libraries(pfview PRIVATE
     pfcore
@@ -205,7 +281,29 @@ target_link_libraries(pfview PRIVATE
     imgui_local
     glm::glm
     Threads::Threads
+    civetweb::civetweb
+    nlohmann_json::nlohmann_json
+    $<IF:$<TARGET_EXISTS:libjpeg-turbo::turbojpeg>,libjpeg-turbo::turbojpeg,libjpeg-turbo::turbojpeg-static>
 )
+if(WIN32)
+    target_link_libraries(pfview PRIVATE ws2_32 iphlpapi)
+endif()
+
+if(PF_EMBED_WEB)
+    add_dependencies(pfview embed_web_header)
+    target_include_directories(pfview PRIVATE ${CMAKE_BINARY_DIR}/generated)
+    target_compile_definitions(pfview PRIVATE PF_EMBED_WEB)
+endif()
+target_compile_definitions(pfview PRIVATE PF_WITH_REMOTE)
+if(PF_REMOTE_WEBRTC)
+    target_compile_definitions(pfview PRIVATE PF_REMOTE_WEBRTC)
+    if(PF_WEBRTC_LIB)
+        target_link_libraries(pfview PRIVATE ${PF_WEBRTC_LIB})
+    endif()
+endif()
+if(PF_REMOTE_STREAM)
+    target_compile_definitions(pfview PRIVATE PF_REMOTE_STREAM)
+endif()
 
 # Final release binary name.
 set_target_properties(pfview PROPERTIES OUTPUT_NAME "ViitorXPCViewer")
