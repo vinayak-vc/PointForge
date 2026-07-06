@@ -38,6 +38,15 @@ landed the legend/dropdown/build-version work below).
 - tools/stamp_exe_name.cmake (new)
 - docs/{decisions,ai_handoff}.md
 
+### Follow-up (same branch) — version shown in Web Remote UI + tab title
+- New additive cfg key `version` (`RemoteConfig::appVersion` = `PF_VERSION_STRING`,
+  `{"version":...}` in `publishConfig`) — client `Cfg.version`.
+- `StatusHUD.tsx` now takes a `cfg` prop and shows a `v1.0.4`-style chip next
+  to the connection status.
+- `App.tsx` sets `document.title` to `"ViitorXPC - v1.0.4"` once `cfg.version`
+  arrives (falls back to the static `ViitorXPC` from `index.html` until then).
+- Verified: build stamped/renamed to `ViitorXPCViewer_v104.exe` clean.
+
 ### Next Recommended Task
 - User separately flagged (not yet actioned this session): the web remote
   opened in a **desktop** browser has no mouse/keyboard camera control

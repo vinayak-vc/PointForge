@@ -55,6 +55,8 @@ export type Cfg = {
   cubeSize: number;
   /** World Z of the octree cube bottom; zmax = zmin + cubeSize (legend labels). */
   zmin: number;
+  /** PF_VERSION_STRING, e.g. "1.0.4" — shown in the status bar and browser tab title. */
+  version: string;
   streamAvailable: boolean;
   webrtcAvailable: boolean;
   preferredStream: number;

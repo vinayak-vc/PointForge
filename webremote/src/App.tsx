@@ -182,6 +182,11 @@ export default function App() {
 
   useEffect(() => { sendRef.current = send; }, [send]);
 
+  // Browser tab title mirrors the connected viewer's build version.
+  useEffect(() => {
+    document.title = cfg?.version ? `ViitorXPC - v${cfg.version}` : 'ViitorXPC';
+  }, [cfg?.version]);
+
   const moveRef = useRef<MoveValues>({ ...ZERO_MOVE });
 
   // 30 Hz move loop
@@ -297,7 +302,7 @@ export default function App() {
       </div>
 
       {/* ── Status Bar ── */}
-      <StatusHUD state={lastState} status={status} />
+      <StatusHUD cfg={cfg} state={lastState} status={status} />
     </div>
   );
 }

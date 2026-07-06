@@ -51,6 +51,7 @@ struct RemoteConfig {
     std::string loadedFile;
     uint64_t pointCount = 0; uint64_t nodeCount = 0; float cubeSize = 0;
     float zMin = 0;                  // world Z of the octree cube bottom (elevation legend labels)
+    std::string appVersion;          // PF_VERSION_STRING, e.g. "1.0.4" (status bar + browser tab title)
     // stream
     bool streamAvailable = false;
     bool webrtcAvailable = false;
