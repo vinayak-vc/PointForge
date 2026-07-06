@@ -44,58 +44,55 @@ export default function ActionBar({
         <span className="toolbar-brand-name">ViitorXPC</span>
       </div>
 
-      {/* View presets (duplicated in the Camera tab — hidden on phones) */}
+      {/* View presets — icon-only (duplicated w/ labels in the Camera tab) */}
       <div className="toolbar-group toolbar-group--dup">
-        <button className="toolbar-btn" onClick={cmd('frame')} title="Frame all points">
-          <Frame size={13} /> Frame
+        <button className="toolbar-btn toolbar-btn--icon" onClick={cmd('frame')} title="Frame all points" aria-label="Frame all points">
+          <Frame size={15} />
         </button>
-        <button className="toolbar-btn" onClick={cmd('preset7')} title="Top view">
-          <ChevronDown size={13} /> Top
+        <button className="toolbar-btn toolbar-btn--icon" onClick={cmd('preset7')} title="Top view" aria-label="Top view">
+          <ChevronDown size={15} />
         </button>
-        <button className="toolbar-btn" onClick={cmd('preset1')} title="Front view">
-          <Monitor size={13} /> Front
+        <button className="toolbar-btn toolbar-btn--icon" onClick={cmd('preset1')} title="Front view" aria-label="Front view">
+          <Monitor size={15} />
         </button>
-        <button className="toolbar-btn" onClick={cmd('preset3')} title="Side view">
-          <LayoutGrid size={13} /> Side
+        <button className="toolbar-btn toolbar-btn--icon" onClick={cmd('preset3')} title="Side view" aria-label="Side view">
+          <LayoutGrid size={15} />
         </button>
       </div>
 
       <div className="toolbar-divider toolbar-group--dup" />
 
-      {/* View toggles (duplicated in the Camera tab — hidden on phones) */}
+      {/* View toggles + capture — one clubbed group, icon-only */}
       <div className="toolbar-group toolbar-group--dup">
         <button
-          className={`toolbar-btn${cfg?.ortho ? ' active' : ''}`}
+          className={`toolbar-btn toolbar-btn--icon${cfg?.ortho ? ' active' : ''}`}
           onClick={() => { if (cfg) setValue('ortho', !cfg.ortho); }}
           title="Toggle orthographic"
+          aria-label="Toggle orthographic"
         >
-          <ZoomIn size={13} /> Ortho
+          <ZoomIn size={15} />
         </button>
         <button
-          className={`toolbar-btn${cfg && !cfg.ui ? ' active' : ''}`}
+          className={`toolbar-btn toolbar-btn--icon${cfg && !cfg.ui ? ' active' : ''}`}
           onClick={() => { if (cfg) setValue('ui', !cfg.ui); }}
           title="Hide/show PC UI"
+          aria-label="Hide/show PC UI"
         >
-          <Monitor size={13} /> UI
+          <Monitor size={15} />
         </button>
         <button
-          className={`toolbar-btn${cfg?.stereo ? ' active' : ''}`}
+          className={`toolbar-btn toolbar-btn--icon${cfg?.stereo ? ' active' : ''}`}
           onClick={() => { if (cfg) setValue('stereo', !cfg.stereo); }}
           title="Toggle stereo 3D"
+          aria-label="Toggle stereo 3D"
         >
-          <Maximize2 size={13} /> 3D
+          <Maximize2 size={15} />
         </button>
-      </div>
-
-      <div className="toolbar-divider toolbar-group--dup" />
-
-      {/* Capture */}
-      <div className="toolbar-group">
-        <button className="toolbar-btn" onClick={onShot} title="Take screenshot on the PC and download it here">
-          <Camera size={13} /> Shot
+        <button className="toolbar-btn toolbar-btn--icon" onClick={onShot} title="Take screenshot on the PC and download it here" aria-label="Take screenshot">
+          <Camera size={15} />
         </button>
-        <button className="toolbar-btn" onClick={cmd('fullscreen')} title="Toggle fullscreen on PC">
-          <Maximize2 size={13} /> Full
+        <button className="toolbar-btn toolbar-btn--icon" onClick={cmd('fullscreen')} title="Toggle fullscreen on PC" aria-label="Toggle fullscreen">
+          <Maximize2 size={15} />
         </button>
       </div>
 
@@ -117,12 +114,12 @@ export default function ActionBar({
                 {VQ_OPTIONS.map(([q, label]) => (
                   <button
                     key={q}
-                    className={`toolbar-btn${videoQuality === q ? ' active' : ''}`}
+                    className={`toolbar-btn toolbar-btn--compact${videoQuality === q ? ' active' : ''}`}
                     aria-pressed={videoQuality === q}
                     title={`Stream quality: ${label}`}
                     onClick={() => onVideoQuality(q)}
                   >
-                    {label}
+                    {label[0]}
                   </button>
                 ))}
               </div>

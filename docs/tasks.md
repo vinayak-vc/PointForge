@@ -82,6 +82,13 @@
         Win32 FILEVERSION/ProductVersion (`app.rc`, `1 VERSIONINFO` — NOT
         `VS_VERSION_INFO`, which is undefined without `<winver.h>` and silently
         drops the whole resource)
+- `[x]` Build output filename embeds the version: `ViitorXPCViewer.exe` ->
+        `ViitorXPCViewer_v<MAJOR><MINOR><PATCH>.exe` via a `POST_BUILD` step
+        (`tools/stamp_exe_name.cmake`) that renames the freshly-linked exe and
+        removes any stale `_v*` copy from a previous build
+- `[x]` Web Remote toolbar consolidated to icon-only buttons
+        (`.toolbar-btn--icon`/`--compact`) so the full control set fits
+        without horizontal scroll; dropped the scroll/fade-mask CSS
 - `[x]` Elevation/intensity colour legend UI fixes (C++ viewer + React webremote):
         legend now dock-aware (anchors left of "Properties" only when it truly
         abuts the window's right edge — not for left-docked/floating panels),

@@ -20,6 +20,11 @@
   encode with software fallback, quality VBR) — runtime-switchable.
 
 ## Short-term Goals
+- **Web Remote desktop input**: opening the remote in a desktop browser
+  currently has no camera control — `FlyTab.tsx` only wires touch events.
+  Needs mouse-drag look + wheel zoom + WASD/keyboard fly, plus a flex-overflow
+  audit of `.app-shell`/`.workspace` so the status bar can't be clipped
+  off-screen at desktop window sizes.
 - **On-disk cache management**: auto-purge old `PointForgeCache_*` converted dirs.
 - **Color-by attribute polish**: editable elevation/intensity ranges + ramps.
 - **Convert cancel coverage**: extend cooperative cancel to Phase A/B.

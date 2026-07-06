@@ -111,10 +111,8 @@ body {
   flex-shrink: 0;
   gap: 2px;
   z-index: 200;
-  overflow-x: auto;
-  scrollbar-width: none;
+  overflow-x: hidden;
 }
-.toolbar::-webkit-scrollbar { display: none; }
 
 .toolbar-brand {
   display: flex;
@@ -181,6 +179,23 @@ body {
   color: var(--accent);
 }
 .toolbar-btn:active { transform: scale(0.96); }
+
+/* Icon-only variant — presets/toggles/capture (labels live in the Camera
+   tab already); square footprint so a full toolbar of them stays compact
+   enough to fit without horizontal scrolling. */
+.toolbar-btn--icon {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+.toolbar-btn--icon svg { width: 15px; height: 15px; }
+
+/* Compact variant — single-letter stream-quality buttons */
+.toolbar-btn--compact {
+  width: 24px;
+  padding: 0;
+  justify-content: center;
+}
 
 .toolbar-spacer { flex: 1; }
 
@@ -1209,12 +1224,7 @@ button.collapse-btn {
   .fly-speed-panel { min-width: 170px; }
   .hold-btn { width: 64px; height: 46px; }
 
-  .toolbar {
-    height: 42px;
-    /* Fade cue on the right edge: more controls scroll into view. */
-    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-  }
+  .toolbar { height: 42px; }
   .toolbar-brand-name { display: none; }
   /* Presets/toggles duplicated in the Camera tab and the speed slider
      (Camera tab + gesture panel) are dropped so the toolbar fits a phone. */

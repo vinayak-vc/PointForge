@@ -1,6 +1,54 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06) - Legend UI Fixes + Auto-Versioned Builds
+## Latest Session (2026-07-06, cont.) - Toolbar Consolidation + Versioned Exe Filename
+
+Branch `minor-fixes` (cut from `main` after the previous session's PR #3 merge
+landed the legend/dropdown/build-version work below).
+
+### What was built / Fixed
+- **Web Remote toolbar de-scrolled**: the top toolbar (Frame/Top/Front/Side +
+  Ortho/UI/3D + Shot/Full + Stream) previously needed horizontal scroll to see
+  every control. Consolidated the view-toggle and capture buttons into one
+  icon-only group (`.toolbar-btn--icon`, 30px square, tooltip via `title`/
+  `aria-label` — labels already live in the Camera tab) and shrunk the
+  stream-quality buttons to single-letter `.toolbar-btn--compact` (24px). Set
+  `.toolbar { overflow-x: hidden }` (was `auto` + a fade-mask cue) since
+  everything now fits without scrolling; dropped the now-unused mobile fade
+  mask CSS.
+- **Build filename now embeds the version**: `ViitorXPCViewer.exe` ->
+  `ViitorXPCViewer_v<MAJOR><MINOR><PATCH>.exe` (e.g. `_v103` for 1.0.3) via a
+  new `POST_BUILD` step (`tools/stamp_exe_name.cmake`) that parses the
+  generated `Version.h` and renames the freshly-linked exe, deleting any stale
+  `_v*` copy from a previous build first. Verified live: build stamped
+  `ViitorXPCViewer_v103.exe`, no leftover unversioned or older-versioned exe.
+  See decisions.md for why this is safe to run unconditionally every build
+  (Version.h's changing content forces main.cpp to always recompile/relink).
+
+### Verified
+- `npm run build` clean.
+- `cmake --build build-static --config Release --target pfview` clean;
+  confirmed `ViitorXPCViewer_v103.exe` on disk, no stray unversioned exe.
+- NOT yet visually re-verified in a live desktop browser against the running
+  toolbar (no icon-crowding/tooltip check at narrow desktop widths).
+
+### Modified files
+- webremote/src/ActionBar.tsx (icon-only toolbar buttons, clubbed groups)
+- webremote/src/index.css (`.toolbar-btn--icon`/`--compact`, drop scroll+mask)
+- CMakeLists.txt (POST_BUILD exe-rename step)
+- tools/stamp_exe_name.cmake (new)
+- docs/{decisions,ai_handoff}.md
+
+### Next Recommended Task
+- User separately flagged (not yet actioned this session): the web remote
+  opened in a **desktop** browser has no mouse/keyboard camera control
+  (`FlyTab.tsx` only wires touch events) and the bottom status bar can be
+  clipped off-screen on desktop window sizes — needs a flex-overflow audit
+  (`.app-shell`/`.workspace` chain) plus desktop mouse-drag-look + wheel-zoom +
+  WASD-fly input alongside the existing touch gestures. Scoped but not started.
+- Then resume: merge `minor-fixes` into `main` once the above is done, or
+  merge now if the user wants this batch shipped separately.
+
+## Previous Session (2026-07-06) - Legend UI Fixes + Auto-Versioned Builds
 
 UI-only pass (no functional/protocol changes) requested by the user, plus an
 auto-incrementing build version number.
