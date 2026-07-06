@@ -1,6 +1,54 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Measure Lines Not in Stream + Desktop Controls Didn't Match PC
+## Latest Session (2026-07-06, cont.) - Look-Speed Slider Had No Effect (Server-Side Clamp Bug)
+
+User reported the web app's Look sensitivity slider did nothing regardless
+of value. Root cause was NOT in the slider or the client's scaling math —
+both were already correct.
+
+### Root cause
+`RemoteServer.cpp`'s `move` message parser ran `yaw`/`pit` through the same
+`ax()` clamp as `f`/`s`/`u` — `[-1, 1]`. That clamp is correct for `f/s/u`,
+which are genuine joystick-style axes (a held stick's deflection, bounded by
+design). But `yaw`/`pit` are a **raw per-tick rotation delta**
+(`dx * lookSpeed` computed client-side in `FlyTab.tsx`), not a bounded axis —
+almost any real mouse-drag or touch-swipe pixel delta, once multiplied by
+*any* `lookSpeed` value from 0.1 to 5.0, already exceeds 1. The clamp
+silently saturated it to the same ±1 either way, so the slider had zero
+observable effect on rotation speed — the value it was supposed to control
+never survived past the server's parser.
+
+### Fix
+Split the move-message parsing: `f`/`s`/`u` keep the `[-1,1]` clamp
+(`ax()`); `yaw`/`pit` get a new `rot()` helper that only rejects non-finite
+values (NaN/Infinity) and clamps to a generous `±5000` sanity bound —
+functionally unclamped for any real input, just guarding against garbage
+from a malformed/malicious client. This is server-side only; no client
+changes were needed since the client's scaling was already correct — it's
+purely a case of the server discarding what the client sent.
+
+### Verified
+- `cmake --build ... pfview` clean (`v1.0.13`); embed hash unchanged (no web
+  UI change this round, as expected — this is a pure C++ fix).
+- NOT yet tested live: haven't confirmed the Look slider now actually changes
+  perceived rotation speed against a running exe.
+
+### Modified files
+- src/viewer/RemoteServer.cpp (`rot()` helper, `#include <cmath>`)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Live-verify: connect the web app, drag to look at Look sensitivity 0.5
+  then 5.0, confirm the rotation rate visibly changes for the same drag
+  speed. Also worth double-checking the Zoom slider isn't hit by the same
+  clamp-on-a-delta pattern (`f` IS run through `ax()` currently, and zoom
+  writes into `moveRef.current.f` the same way `orbit`'s yaw/pit did — if
+  zoom's `f` value also regularly exceeds 1 before clamping, the Zoom slider
+  could have an identical bug, just not yet reported).
+- Still open: the `.app-shell`/`.workspace` flex-overflow audit for the
+  in-app status bar clipping.
+
+## Previous Session (2026-07-06, cont.) - Measure Lines Not in Stream + Desktop Controls Didn't Match PC
 
 Two user-reported follow-ups, both real bugs.
 

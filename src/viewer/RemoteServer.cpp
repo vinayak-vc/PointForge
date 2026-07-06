@@ -1,5 +1,6 @@
 #include "RemoteServer.h"
 #include "common/Log.h"
+#include <cmath>
 
 #ifdef PF_WITH_REMOTE
 
@@ -751,12 +752,24 @@ struct RemoteServerImpl {
         lk.unlock();
 
         if (t == "move") {
+            // f/s/u are joystick-style axes (held-stick deflection, resent every
+            // tick) — genuinely bounded to [-1,1] by design.
             auto ax = [&](const char* k) {
                 float v = m.value(k, 0.0f);
                 return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
             };
+            // yaw/pit are a raw per-tick rotation delta (dx/dy * the client's own
+            // Look-sensitivity slider), NOT a bounded axis — clamping them to
+            // [-1,1] like f/s/u silently discarded that slider entirely, since
+            // almost any real mouse/touch drag already exceeds 1 before scaling.
+            // Only guard against non-finite/garbage input, not normal speed.
+            auto rot = [&](const char* k) {
+                float v = m.value(k, 0.0f);
+                if (!std::isfinite(v)) return 0.0f;
+                return v < -5000.0f ? -5000.0f : (v > 5000.0f ? 5000.0f : v);
+            };
             f = ax("f"); s = ax("s"); u = ax("u");
-            yaw = ax("yaw"); pit = ax("pit");
+            yaw = rot("yaw"); pit = rot("pit");
             boost = m.value("boost", 0) != 0;
             orbit = m.value("orbit", 0) != 0;
             lastMoveMs = nowMs();
