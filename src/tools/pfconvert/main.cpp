@@ -21,6 +21,7 @@ static void usage() {
         "  --flush <points>      chunker memory budget in points (default 16M)\n"
         "  --keep-chunks         keep intermediate chunk files (debug)\n"
         "  --compress            zstd-compress each node payload in octree.bin\n"
+        "  --threads <n>         indexer worker threads; 0 = auto (default 0)\n"
         "  --verbose             debug logging\n\n"
         "Supported inputs: .las .laz .e57 .ply .pts .xyz .txt .csv\n");
 }
@@ -46,6 +47,7 @@ int main(int argc, char** argv) {
         else if (a == "--flush")        opts.flushBudget = std::strtoull(next("--flush"), nullptr, 10);
         else if (a == "--keep-chunks")  opts.keepChunks = true;
         else if (a == "--compress")     opts.compress = true;
+        else if (a == "--threads")      opts.threads = std::atoi(next("--threads"));
         else if (a == "--verbose")      setLogLevel(LogLevel::Debug);
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { logError("unknown argument: " + a); usage(); return 1; }

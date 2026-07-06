@@ -2388,6 +2388,10 @@ int main(int argc, char** argv) {
                             customOpts.flushBudget = (uint64_t)std::max(1, flushM) * 1000000ull; convPreset = 3;
                         }
                         helpMarker("Chunker memory budget in points; buffers flush to disk when exceeded. Higher = faster, more RAM (~20 bytes/point).");
+                        ImGui::SetNextItemWidth(120.0f * S);
+                        if (ImGui::DragInt("Indexer threads", &customOpts.threads, 1, 0, 64,
+                                           customOpts.threads == 0 ? "auto" : "%d")) convPreset = 3;
+                        helpMarker("Worker threads for the subtree-build phase. 0 = one per CPU core. More threads = faster conversion, more RAM (a few chunks in flight at once).");
 
                         ImGui::SeparatorText("Output");
                         if (ImGui::Checkbox("Compress nodes (zstd)", &customOpts.compress)) convPreset = 3;

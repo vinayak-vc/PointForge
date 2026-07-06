@@ -5,10 +5,15 @@
 #include "common/PointFormat.h"
 #include "common/Log.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <condition_variable>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
@@ -33,11 +38,63 @@ struct LocalNode {
     int                            level = 0;
 };
 
-// Spatial-hash key for the subsample grid (21 bits per axis).
+// Spatial-hash key for the subsample grid (21 bits per axis). Bit 63 is never
+// set (3 * 21 = 63 bits), so FlatCellSet can use all-ones as its empty marker.
 inline uint64_t cellKey(int cx, int cy, int cz) {
     auto m = [](int v) -> uint64_t { return (uint64_t)(v & 0x1FFFFF); };
     return (m(cx) << 42) | (m(cy) << 21) | m(cz);
 }
+
+// Open-addressing hash set for cell keys. std::unordered_set allocates a heap
+// node per insert — with Phase C running on N threads those mallocs all
+// serialize on the process heap lock and erase the parallel speedup. One flat
+// allocation + linear probing keeps the subsample inner loop allocation-free.
+class FlatCellSet {
+public:
+    explicit FlatCellSet(size_t expected) {
+        size_t cap = 16;
+        while (cap < expected * 2) cap <<= 1;
+        slots_.assign(cap, kEmpty);
+        mask_ = cap - 1;
+        growAt_ = cap - cap / 4; // 0.75 load factor
+    }
+    // Returns true if the key was newly inserted.
+    bool insert(uint64_t key) {
+        if (count_ >= growAt_) grow();
+        size_t i = mix(key) & mask_;
+        while (slots_[i] != kEmpty) {
+            if (slots_[i] == key) return false;
+            i = (i + 1) & mask_;
+        }
+        slots_[i] = key;
+        ++count_;
+        return true;
+    }
+
+private:
+    static constexpr uint64_t kEmpty = ~0ull; // unreachable: cellKey uses 63 bits
+    static size_t mix(uint64_t k) {           // splitmix64 finalizer
+        k ^= k >> 33; k *= 0xff51afd7ed558ccdull;
+        k ^= k >> 33; k *= 0xc4ceb9fe1a85ec53ull;
+        k ^= k >> 33;
+        return (size_t)k;
+    }
+    void grow() {
+        std::vector<uint64_t> old = std::move(slots_);
+        size_t cap = (mask_ + 1) << 1;
+        slots_.assign(cap, kEmpty);
+        mask_ = cap - 1;
+        growAt_ = cap - cap / 4;
+        for (uint64_t k : old) {
+            if (k == kEmpty) continue;
+            size_t i = mix(k) & mask_;
+            while (slots_[i] != kEmpty) i = (i + 1) & mask_;
+            slots_[i] = k;
+        }
+    }
+    std::vector<uint64_t> slots_;
+    size_t mask_ = 0, count_ = 0, growAt_ = 0;
+};
 
 // Grid-subsample a set of points within a cube. Points that occupy a fresh grid
 // cell are retained in `retained`; the rest are partitioned into the 8 child
@@ -47,8 +104,7 @@ void subsample(std::vector<PackedPoint>&& pts,
                const double cubeMin[3], double cubeSize, double spacing,
                std::vector<PackedPoint>& retained,
                std::vector<PackedPoint> childPts[8]) {
-    std::unordered_set<uint64_t> occupied;
-    occupied.reserve(pts.size() / 2 + 16);
+    FlatCellSet occupied(pts.size() / 2 + 16);
     const double cx = cubeMin[0] + cubeSize * 0.5;
     const double cy = cubeMin[1] + cubeSize * 0.5;
     const double cz = cubeMin[2] + cubeSize * 0.5;
@@ -58,7 +114,7 @@ void subsample(std::vector<PackedPoint>&& pts,
         int gx = (int)std::floor((w.x - cubeMin[0]) / spacing);
         int gy = (int)std::floor((w.y - cubeMin[1]) / spacing);
         int gz = (int)std::floor((w.z - cubeMin[2]) / spacing);
-        if (occupied.insert(cellKey(gx, gy, gz)).second) {
+        if (occupied.insert(cellKey(gx, gy, gz))) {
             retained.push_back(pp);
         } else {
             int o = 0;
@@ -98,59 +154,69 @@ std::unique_ptr<LocalNode> buildSubtree(std::vector<PackedPoint>&& pts,
     return node;
 }
 
-// Serialize a chunk subtree depth-first (children before parent) into octree.bin,
-// appending NodeRecords to `hierarchy`. Returns the global index of `node`.
-uint32_t serialize(const LocalNode* node, FILE* payload, uint64_t& offset,
-                   std::vector<NodeRecord>& hierarchy, bool compress) {
+// Compress-or-copy one node's points onto the end of an in-memory payload
+// blob, filling rec.byteOffset (blob-relative) and rec.byteSize.
+void appendPayloadToBlob(const std::vector<PackedPoint>& pts, bool compress,
+                         std::vector<uint8_t>& blob, NodeRecord& rec) {
+    const uint32_t count = (uint32_t)pts.size();
+    const size_t rawBytes = count * sizeof(PackedPoint);
+    rec.pointCount = count;
+    rec.byteOffset = blob.size();
+    if (count == 0) { rec.byteSize = 0; return; }
+#ifdef PF_WITH_ZSTD
+    if (compress) {
+        size_t bound = ZSTD_compressBound(rawBytes);
+        std::vector<uint8_t> cbuf(bound);
+        size_t cSize = ZSTD_compress(cbuf.data(), bound, pts.data(), rawBytes, 3);
+        if (!ZSTD_isError(cSize) && cSize < rawBytes) {
+            blob.insert(blob.end(), cbuf.data(), cbuf.data() + cSize);
+            rec.byteSize = (uint32_t)cSize;
+            return;
+        }
+        // Compression didn't help — fall through to raw
+    }
+#endif
+    (void)compress; // suppress warning when PF_WITH_ZSTD is not defined
+    const uint8_t* raw = reinterpret_cast<const uint8_t*>(pts.data());
+    blob.insert(blob.end(), raw, raw + rawBytes);
+    rec.byteSize = (uint32_t)rawBytes;
+}
+
+// Serialize a chunk subtree depth-first (children before parent) into an
+// in-memory blob + chunk-LOCAL records (children indices and byteOffsets are
+// relative to this chunk; the coordinator rebases them when splicing into the
+// global hierarchy/file). Pure function — safe to run on worker threads.
+uint32_t serializeLocal(const LocalNode* node, std::vector<uint8_t>& blob,
+                        std::vector<NodeRecord>& records, bool compress) {
     NodeRecord rec{};
     rec.level = (uint8_t)node->level;
     rec.childMask = 0;
     for (int o = 0; o < 8; ++o) {
         if (node->child[o]) {
-            rec.children[o] = serialize(node->child[o].get(), payload, offset, hierarchy, compress);
+            rec.children[o] = serializeLocal(node->child[o].get(), blob, records, compress);
             rec.childMask |= (uint8_t)(1u << o);
         } else {
             rec.children[o] = kNoChild;
         }
     }
-    const uint32_t count = (uint32_t)node->retained.size();
-    const size_t rawBytes = count * sizeof(PackedPoint);
-    rec.pointCount = count;
-    rec.byteOffset = offset;
-
-    if (count > 0) {
-#ifdef PF_WITH_ZSTD
-        if (compress) {
-            size_t bound = ZSTD_compressBound(rawBytes);
-            std::vector<uint8_t> cbuf(bound);
-            size_t cSize = ZSTD_compress(cbuf.data(), bound,
-                                         node->retained.data(), rawBytes, 3);
-            if (!ZSTD_isError(cSize) && cSize < rawBytes) {
-                std::fwrite(cbuf.data(), 1, cSize, payload);
-                rec.byteSize = (uint32_t)cSize;
-                offset += cSize;
-            } else {
-                // Compression didn't help — write raw
-                std::fwrite(node->retained.data(), sizeof(PackedPoint), count, payload);
-                rec.byteSize = (uint32_t)rawBytes;
-                offset += rawBytes;
-            }
-        } else
-#endif
-        {
-            (void)compress; // suppress warning when PF_WITH_ZSTD is not defined
-            std::fwrite(node->retained.data(), sizeof(PackedPoint), count, payload);
-            rec.byteSize = (uint32_t)rawBytes;
-            offset += rawBytes;
-        }
-    } else {
-        rec.byteSize = 0;
-    }
-
-    uint32_t idx = (uint32_t)hierarchy.size();
-    hierarchy.push_back(rec);
+    appendPayloadToBlob(node->retained, compress, blob, rec);
+    uint32_t idx = (uint32_t)records.size();
+    records.push_back(rec);
     return idx;
 }
+
+// Everything Phase C produces for one chunk, built entirely off the shared
+// state so N chunks can build concurrently. The coordinator thread splices
+// results into hierarchy/octree.bin IN CHUNK ORDER, which keeps the output
+// byte-identical to a sequential build (verified by pftest).
+struct ChunkResult {
+    uint32_t                 chunkIndex = 0;
+    std::vector<NodeRecord>  records;       // chunk-local indices/offsets
+    std::vector<uint8_t>     blob;          // payload bytes for this subtree
+    std::vector<PackedPoint> coarseSamples; // chunk root's retained set
+    uint32_t                 localRootIdx = 0;
+    bool                     empty = true;  // chunk file was empty/unreadable
+};
 
 // Coarse build over the level-L sample. Above stopLevel it creates ordinary
 // internal nodes; at stopLevel it links children to pre-built chunk roots.
@@ -294,15 +360,33 @@ bool buildOctree(const std::string& inputPath,
     std::unordered_map<uint32_t, uint32_t> chunkRoots;
     std::vector<PackedPoint> coarse; // union of chunk-root samples
 
-    size_t done = 0;
-    for (const auto& ch : cs.chunks) {
-        if (opts.cancel && opts.cancel->load()) {
-            logWarn("buildOctree: cancelled by user");
-            return false;
-        }
-        std::vector<PackedPoint> pts = loadChunk(ch.path);
-        if (pts.empty()) continue;
+    // Phase C runs on a worker pool: chunks are spatially independent, so each
+    // worker builds a full ChunkResult (subtree + serialized blob) with zero
+    // shared state. This single coordinator thread is the ONLY writer to
+    // hierarchy/octree.bin/chunkRoots/coarse — it drains results strictly in
+    // chunk order, so the output is byte-identical to a sequential build.
+    const size_t total = cs.chunks.size();
+    unsigned hw = std::thread::hardware_concurrency();
+    size_t nThreads = opts.threads > 0 ? (size_t)opts.threads
+                                       : (size_t)std::max(1u, hw ? hw : 4u);
+    nThreads = std::min({nThreads, total ? total : (size_t)1, (size_t)64});
+    // Bound RAM: at most this many built-but-unspliced results alive at once
+    // (in-order draining means a slow early chunk can park later results here).
+    const size_t inFlightCap = nThreads + 2;
 
+    std::mutex mx;
+    std::condition_variable cvProduce, cvConsume;
+    std::map<size_t, ChunkResult> readyResults; // seq index -> result
+    size_t nextToBuild = 0;
+    size_t nextToConsume = 0;
+    bool   aborted = false;
+
+    auto buildOne = [&](size_t seq) -> ChunkResult {
+        const auto& ch = cs.chunks[seq];
+        ChunkResult res;
+        res.chunkIndex = ch.index;
+        std::vector<PackedPoint> pts = loadChunk(ch.path);
+        if (pts.empty()) return res; // stays empty
         double cMin[3] = {
             cs.cubeMin.x + ch.gx * cellSizeL,
             cs.cubeMin.y + ch.gy * cellSizeL,
@@ -310,22 +394,113 @@ bool buildOctree(const std::string& inputPath,
         };
         auto subtree = buildSubtree(std::move(pts), cs.quant, cMin, cellSizeL,
                                     L, spacingAtL, opts, minSpacing);
-        // collect the chunk-root sample for the coarse build
-        coarse.insert(coarse.end(), subtree->retained.begin(), subtree->retained.end());
+        res.coarseSamples = subtree->retained; // copy: subtree serializes below
+        res.localRootIdx = serializeLocal(subtree.get(), res.blob, res.records,
+                                          opts.compress);
+        res.empty = false;
+        return res;
+    };
 
-        uint32_t rootIdx = serialize(subtree.get(), payload, offset, hierarchy, opts.compress);
-        chunkRoots[ch.index] = rootIdx;
+    auto workerFn = [&]() {
+        for (;;) {
+            size_t seq;
+            {
+                std::unique_lock<std::mutex> lk(mx);
+                cvProduce.wait(lk, [&] {
+                    return aborted || nextToBuild >= total ||
+                           nextToBuild - nextToConsume < inFlightCap;
+                });
+                if (aborted || nextToBuild >= total) return;
+                seq = nextToBuild++;
+            }
+            if (opts.cancel && opts.cancel->load()) {
+                std::lock_guard<std::mutex> lk(mx);
+                aborted = true;
+                cvProduce.notify_all();
+                cvConsume.notify_all();
+                return;
+            }
+            ChunkResult res = buildOne(seq);
+            {
+                std::lock_guard<std::mutex> lk(mx);
+                readyResults.emplace(seq, std::move(res));
+                cvConsume.notify_all();
+            }
+        }
+    };
 
-        if ((++done % 64) == 0 || done == cs.chunks.size()) {
+    std::vector<std::thread> workers;
+    workers.reserve(nThreads);
+    for (size_t i = 0; i < nThreads; ++i) workers.emplace_back(workerFn);
+    if (total > 0)
+        logInfo("buildOctree: phase C on " + std::to_string(nThreads) + " thread(s), " +
+                std::to_string(total) + " chunks");
+    const auto phaseCStart = std::chrono::steady_clock::now();
+
+    size_t done = 0;
+    while (nextToConsume < total) {
+        ChunkResult res;
+        {
+            std::unique_lock<std::mutex> lk(mx);
+            cvConsume.wait(lk, [&] {
+                return aborted || readyResults.count(nextToConsume) != 0;
+            });
+            if (aborted) break;
+            auto it = readyResults.find(nextToConsume);
+            res = std::move(it->second);
+            readyResults.erase(it);
+            ++nextToConsume;
+            cvProduce.notify_all(); // an in-flight slot freed up
+        }
+        if (opts.cancel && opts.cancel->load()) {
+            std::lock_guard<std::mutex> lk(mx);
+            aborted = true;
+            cvProduce.notify_all();
+            cvConsume.notify_all();
+            break;
+        }
+
+        ++done;
+        if (!res.empty) {
+            // Rebase chunk-local records into the global hierarchy + file.
+            const uint32_t base = (uint32_t)hierarchy.size();
+            for (NodeRecord& rec : res.records) {
+                for (int o = 0; o < 8; ++o)
+                    if (rec.children[o] != kNoChild) rec.children[o] += base;
+                rec.byteOffset += offset;
+            }
+            if (!res.blob.empty())
+                std::fwrite(res.blob.data(), 1, res.blob.size(), payload);
+            offset += res.blob.size();
+            hierarchy.insert(hierarchy.end(), res.records.begin(), res.records.end());
+            chunkRoots[res.chunkIndex] = base + res.localRootIdx;
+            coarse.insert(coarse.end(), res.coarseSamples.begin(), res.coarseSamples.end());
+        }
+
+        if ((done % 64) == 0 || done == total) {
             std::string msg = "buildOctree: indexed " + std::to_string(done) + "/" +
-                              std::to_string(cs.chunks.size()) + " chunks";
+                              std::to_string(total) + " chunks";
             logInfo(msg);
             if (opts.progressCb) {
-                float pct = cs.chunks.empty() ? 1.0f : (float)done / cs.chunks.size();
+                float pct = total == 0 ? 1.0f : (float)done / total;
                 // Subtree building maps from 0.5 to 1.0
                 opts.progressCb(0.5f + pct * 0.5f, msg);
             }
         }
+    }
+
+    for (auto& w : workers) w.join();
+    if (aborted) {
+        std::fclose(payload);
+        logWarn("buildOctree: cancelled by user");
+        return false;
+    }
+    if (total > 0) {
+        double secs = std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - phaseCStart).count();
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "buildOctree: phase C took %.2fs", secs);
+        logInfo(buf);
     }
 
     // ---- phase C2: coarse tree -------------------------------------------
