@@ -1,6 +1,73 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Web Remote Connect Screen: Premium Redesign
+## Latest Session (2026-07-06, cont.) - Connect Screen: Centered Pair + Orientation Layout
+
+Follow-up fixes to the premium connect-screen redesign (same branch,
+`minor-fixes`), driven by a screenshot showing the branding panel and auth
+card stretched to opposite edges of the screen instead of together as a pair.
+
+### What was fixed
+- **Centered pair, not edge-stretched**: `.connect-layout` was a `grid`
+  with `minmax(320px,34%) 1fr` columns spanning the full viewport width —
+  correct proportions, wrong idea (branding pinned far left, card far right).
+  Changed to a `flex` row sized to its own content, centered as one unit via
+  `.connect-screen`'s own `align-items/justify-content: center` — verified
+  393px margins on both sides at 1600px wide (i.e. genuinely centered, not
+  just proportional).
+- **Logo/title misalignment root cause**: `.brand-logo-pulse` (the glow ring)
+  is `position:absolute; inset:-14px`, so its left edge sits 14px outside
+  `.brand-logo`'s own box — the icon visually sat left of the title text
+  below it. Fixed with `margin-left:14px` on `.brand-logo` so the ring's
+  *outer* edge — not the icon image — shares the title's left edge. Also
+  widened the logo-to-title gap (`margin: 14px 0 24px 14px`).
+- **Landscape/portrait now keyed on `orientation`, not `max-width`**: a wide
+  tablet held in landscape now correctly keeps the side-by-side pair (used
+  to force-stack under 1024px regardless of orientation); any portrait
+  viewport (phone or tablet) stacks branding above the card, centered.
+- **Page-level padding**: `.connect-screen` itself now does the
+  centering + `padding: clamp(20px,5vh,56px) clamp(16px,4vw,48px)`, so
+  nothing (logo, card, keypad, status row) can ever touch the viewport edge
+  — verified 29px top/bottom padding and a 28px branding-to-card gap with
+  zero overlap at 375×812 (mobile portrait).
+- **Found and fixed a real regression while debugging**: `body { zoom: 1.2 }`
+  — flagged in an earlier UX audit as a real bug and supposedly removed —
+  was still present. `git log -p` showed it was only ever added once and
+  never actually removed: my earlier fix must have been silently reverted
+  when PR #3's `webapp-controller` -> `main` merge landed an older copy of
+  `index.css`. Removed again; also re-applied a second casualty of that same
+  merge, the `100dvh` fallback on `html,body,#root` (mobile browser-chrome
+  viewport tracking). Spot-checked several other survivors of that fix batch
+  (safe-area insets, coarse-pointer sizing, `.toolbar-group--dup`,
+  `--text-3` contrast, `.seg` grid) — those did survive the merge intact.
+
+### Verified
+- `npm run build` clean.
+- Geometry-checked (not screenshot — `preview_screenshot` was rendering a
+  tiny mis-scaled thumbnail in this session, contradicted by
+  `getBoundingClientRect` showing correct full-size layout; treated as a
+  tool artifact, not a real bug) via `preview_eval`: 1600×900 desktop shows
+  393px/393px side margins (centered), 72px inter-panel gap, logo-ring left
+  edge flush with title left edge, 32px logo-to-title gap; 375×812 mobile
+  shows 29px top/bottom padding, 28px vertical gap, zero overlap, and
+  `scrollWidth === clientWidth` (no horizontal scroll).
+- Exe rebuild was in progress at handoff time — confirm it completed and the
+  version bumped before further changes.
+
+### Modified files
+- webremote/src/index.css (Connect Screen layout section)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe in a real browser (not just the no-backend dev
+  preview) and eyeball the connect screen once with actual PIN
+  entry/connect/pin_bad states.
+- Then resume the two items still open from earlier this session: desktop
+  browser mouse/keyboard camera control, and a flex-overflow audit of
+  `.app-shell`/`.workspace` so the in-app status bar can't be clipped at
+  desktop window sizes (unrelated to the connect screen — that's the
+  post-authentication app shell).
+
+## Previous Session (2026-07-06, cont.) - Web Remote Connect Screen: Premium Redesign
 
 Branch `minor-fixes`. Full visual/UX redesign of the PIN-entry ("connect")
 screen only — no business logic, WS protocol, or auth flow changes. `submitPin`,

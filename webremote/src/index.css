@@ -63,7 +63,7 @@
    ================================================================ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html, body, #root { height: 100%; overflow: hidden; }
+html, body, #root { height: 100%; height: 100dvh; overflow: hidden; }
 
 body {
   font-family: var(--font);
@@ -79,7 +79,6 @@ body {
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
-  zoom: 1.2;
 }
 
 /* ================================================================
@@ -964,7 +963,13 @@ button.collapse-btn {
 .connect-screen {
   position: relative;
   height: 100%;
-  overflow: hidden; /* everything below is sized to always fit — no scroll */
+  overflow-y: auto; /* safety net if a very short/zoomed viewport can't fit content */
+  /* Page-level breathing room — nothing (logo, card, keypad) ever touches
+     the top/bottom edge, on any size or orientation. */
+  padding: clamp(20px, 5vh, 56px) clamp(16px, 4vw, 48px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background:
     radial-gradient(ellipse 60% 50% at 22% 40%, rgba(77,163,255,0.08) 0%, transparent 65%),
     radial-gradient(ellipse 70% 60% at 100% 100%, rgba(77,163,255,0.04) 0%, transparent 60%),
@@ -990,24 +995,30 @@ button.collapse-btn {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* Desktop landscape: ~30/70 branding vs. auth split. */
+/* Landscape: branding + auth card sit side by side, centered together as one
+   group in the middle of the screen (not stretched edge-to-edge). Portrait
+   (see the orientation media query below) stacks them instead. */
 .connect-layout {
   position: relative;
-  height: 100%;
-  display: grid;
-  grid-template-columns: minmax(320px, 34%) 1fr;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(32px, 6vw, 72px);
+  max-width: 100%;
 }
 
-/* ---- Branding pane (left on desktop, compact header when stacked) ---- */
+/* ---- Branding pane (left of the card in landscape, header above it in
+   portrait) — sized to its content, not stretched. ---- */
 .branding-panel {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
-  gap: 14px;
-  padding: 48px clamp(28px, 6vw, 72px);
-  background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, transparent 40%);
-  border-right: 1px solid var(--border);
+  gap: 8px;
+  flex-shrink: 0;
+  width: 320px;
+  max-width: 100%;
 }
 .branding-facts {
   display: flex;
@@ -1038,12 +1049,18 @@ button.collapse-btn {
   letter-spacing: 0.03em;
 }
 
-/* Breathing glow ring behind the logo mark. */
+/* Breathing glow ring behind the logo mark. The ring is an absolutely
+   positioned pseudo-box inset -14px on every side (see .brand-logo-pulse),
+   so without compensation its LEFT edge sits 14px further out than
+   .brand-logo's own box — visually misaligning the icon from the text below
+   it. margin-left here pulls the whole logo+ring unit back in so the ring's
+   outer edge, not the image, defines the shared left edge with the title. */
 .brand-logo {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
+  margin: 14px 0 24px 14px;
 }
 .brand-logo-img { width: 60%; height: 60%; object-fit: contain; position: relative; z-index: 1; }
 .brand-logo-pulse {
@@ -1068,8 +1085,7 @@ button.collapse-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 32px;
-  overflow-y: auto;
+  min-width: 0;
 }
 
 .glass-card {
@@ -1395,25 +1411,24 @@ button.collapse-btn {
   .inspector { width: 256px; min-width: 256px; }
 }
 
-/* Connect screen — tablet portrait & mobile: stack branding above the card
-   instead of the desktop 30/70 split, and trim the descriptive branding
-   rows so the header stays compact. */
-@media (max-width: 1024px) {
+/* Connect screen — portrait orientation (phone or tablet held upright):
+   stack branding above the card instead of the landscape side-by-side pair,
+   and trim the descriptive branding rows so the stack stays compact. Keyed
+   on orientation (not width) per spec: landscape always stays side-by-side,
+   portrait always stacks, regardless of exact device size. */
+@media (orientation: portrait) {
   .connect-layout {
-    display: flex;
     flex-direction: column;
-    overflow-y: auto;
+    gap: 28px;
   }
   .branding-panel {
     align-items: center;
     text-align: center;
-    padding: 32px 24px 8px;
-    border-right: none;
-    flex-shrink: 0;
+    width: auto;
   }
+  .brand-logo { margin-left: 0; } /* centred, not left-aligned to text */
   .branding-facts { display: none; }
-  .connect-auth-pane { padding: 16px 20px 32px; }
-  .auth-card { max-width: 480px; padding: 28px; }
+  .auth-card { width: 100%; max-width: 480px; padding: 28px; }
 }
 
 @media (max-width: 640px), (max-height: 560px) {
