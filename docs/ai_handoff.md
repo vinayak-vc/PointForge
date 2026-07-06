@@ -1,6 +1,66 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Toolbar Consolidation + Versioned Exe Filename
+## Latest Session (2026-07-06, cont.) - Web Remote Connect Screen: Premium Redesign
+
+Branch `minor-fixes`. Full visual/UX redesign of the PIN-entry ("connect")
+screen only — no business logic, WS protocol, or auth flow changes. `submitPin`,
+`loadStoredPin`, and the pin-state/auto-submit-at-4-digits contract are byte-
+for-byte the same; only how the pin is edited/displayed changed.
+
+### What was built
+New reusable components (`webremote/src/`):
+- `AnimatedLogo.tsx` — logo with a breathing glow ring (CSS-only, respects
+  `prefers-reduced-motion`).
+- `PinInput.tsx` — 4 individual digit boxes replacing the single text field:
+  auto-advance focus, backspace-to-previous, arrow-key nav, full paste
+  support, per-box `aria-label`. Still just edits the same `pin: string`.
+- `NumberPad.tsx` — same 12-key layout, larger touch targets, subtle
+  press/ripple feedback (pure CSS `::after` radial flash + scale, no JS).
+- `StatusIndicator.tsx` — unifies the old separate error/status/hint
+  paragraphs into one dot+title+detail readout per `WsStatus`, with an
+  animated expanding ring while connecting/reconnecting. Copy avoids
+  overclaiming security — "PIN-protected local link", not "Encrypted"
+  (the transport is plain WS on LAN, not TLS).
+- `BrandingPanel.tsx` — left pane on desktop / compact header when stacked:
+  animated logo, title, subtitle, three descriptive fact rows (hidden below
+  1024px so the stacked layout stays compact).
+- `PrimaryButton.tsx` — Connect button with a loading-spinner state.
+- `GlassCard.tsx` — reusable frosted card wrapper for the auth card.
+
+`ConnectScreen` (in `App.tsx`) now composes these: desktop grid
+`minmax(320px,34%) 1fr` (branding / auth, matching the requested ~30/70
+split), collapsing to a single stacked column below 1024px. Background
+upgraded to a layered dark gradient + radial vignette + inline-SVG noise
+texture (no network asset) instead of flat near-black.
+
+### Verified
+- `npm run build` (tsc --noEmit + vite) clean.
+- Checked live via the Vite dev preview (no backend, so `status` sits at
+  `connecting`/`pin` — sufficient to verify layout): desktop 1600×900 grid
+  computed `453px / 880px` columns (~34/66); mobile 375×812 and tablet
+  768×1024 both collapse to a stacked flex column with **zero horizontal
+  overflow** (`scrollWidth === clientWidth` at both sizes); no console errors.
+- NOT yet checked against the real embedded exe in a browser (rebuild was
+  in progress at handoff time — do that first before further changes).
+
+### Modified/added files
+- webremote/src/{AnimatedLogo,PinInput,NumberPad,StatusIndicator,BrandingPanel,PrimaryButton,GlassCard}.tsx (new)
+- webremote/src/App.tsx (ConnectScreen rewritten to compose the above)
+- webremote/src/index.css (Connect Screen section fully replaced; removed
+  now-dead `.reconnect-spinner`/`.pin-input`/`.keypad-btn`/etc. rules)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe in a real browser and visually confirm: PIN box
+  auto-advance/backspace/paste, keypad press feedback, status-indicator
+  color transitions across pin -> pin_bad -> connecting -> connected, and the
+  branding-panel logo pulse — none of this was checked against a live WS
+  connection this session (dev preview had no backend).
+- Then resume the pre-existing next task from earlier this session: desktop
+  browser mouse/keyboard camera control + status-bar clipping audit
+  (`FlyTab.tsx`/`.app-shell` flex chain) — still not started.
+
+## Previous Session (2026-07-06, cont.) - Toolbar Consolidation + Versioned Exe Filename
 
 Branch `minor-fixes` (cut from `main` after the previous session's PR #3 merge
 landed the legend/dropdown/build-version work below).
