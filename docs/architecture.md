@@ -220,6 +220,23 @@ failure (sticky `mfHwFailed` flag — the stream degrades, never crashes).
 Rate control: quality-based VBR (quality 78) with a 12 Mbps average-bitrate
 hint; GOP 30 for a 1 s keyframe cadence so clients joining mid-stream recover.
 
+**Input**: `webremote/src/FlyTab.tsx` drives the 30 Hz `move` message from two
+parallel paths — the original multi-touch gestures (1-finger look, 2-finger
+pinch zoom/pan) and a `matchMedia('(pointer: fine)')`-gated desktop path
+(mouse-drag look, right-drag pan, wheel zoom, WASD/Space/Ctrl/Shift keyboard
+fly). Both write into the same `moveRef`/`heldState` the 30 Hz loop reads —
+neither path knows the other exists.
+
+**Remote measurement picking**: while the server's Measure tool is active,
+tapping the video sends a `measure_pick` cmd carrying the tap's normalized
+(0..1) position *within the video content* (`VideoLayer.getNaturalSize()`
+inverts the `object-fit:contain` letterboxing client-side). The server maps
+that straight onto window pixel coordinates (`nx*winW`, `ny*winH`) and feeds
+the same `pendingPick` → `cam.screenRay` → `store.pickPoint` path a local LMB
+click already uses — no separate remote ray-casting implementation, and the
+video stream is guaranteed to share the local window's aspect ratio (it's a
+downscaled copy of the same rendered frame), so the mapping is exact.
+
 ## 9. Extension points (deliberate TODOs)
 
 * **LAZ via PDAL**: `laszip_api` covers LAS/LAZ directly; swap to PDAL if you need
