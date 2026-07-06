@@ -79,7 +79,6 @@ body {
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
-  zoom: 1.2;
 }
 
 /* ================================================================
@@ -111,10 +110,8 @@ body {
   flex-shrink: 0;
   gap: 2px;
   z-index: 200;
-  overflow-x: auto;
-  scrollbar-width: none;
+  overflow-x: hidden;
 }
-.toolbar::-webkit-scrollbar { display: none; }
 
 .toolbar-brand {
   display: flex;
@@ -181,6 +178,23 @@ body {
   color: var(--accent);
 }
 .toolbar-btn:active { transform: scale(0.96); }
+
+/* Icon-only variant — presets/toggles/capture (labels live in the Camera
+   tab already); square footprint so a full toolbar of them stays compact
+   enough to fit without horizontal scrolling. */
+.toolbar-btn--icon {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+.toolbar-btn--icon svg { width: 15px; height: 15px; }
+
+/* Compact variant — single-letter stream-quality buttons */
+.toolbar-btn--compact {
+  width: 24px;
+  padding: 0;
+  justify-content: center;
+}
 
 .toolbar-spacer { flex: 1; }
 
@@ -943,162 +957,325 @@ button.collapse-btn {
 }
 
 /* ================================================================
-   Connect Screen
+   Connect Screen — industrial-control splash, two-pane on desktop
    ================================================================ */
 
 .connect-screen {
+  position: relative;
+  height: 100%;
+  overflow-y: auto; /* safety net if a very short/zoomed viewport can't fit content */
+  /* Page-level breathing room — nothing (logo, card, keypad) ever touches
+     the top/bottom edge, on any size or orientation. */
+  padding: clamp(20px, 5vh, 56px) clamp(16px, 4vw, 48px);
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  justify-content: safe center; /* short phones: scroll instead of clipping both ends */
-  gap: 28px;
-  height: 100%;
-  padding: 32px;
-  overflow-y: auto;
-  background: var(--bg);
-  background-image:
-    radial-gradient(ellipse 80% 40% at 50% 0%, rgba(77,163,255,0.07) 0%, transparent 70%);
+  background:
+    radial-gradient(ellipse 60% 50% at 22% 40%, rgba(77,163,255,0.08) 0%, transparent 65%),
+    radial-gradient(ellipse 70% 60% at 100% 100%, rgba(77,163,255,0.04) 0%, transparent 60%),
+    linear-gradient(180deg, #0A0C0F 0%, var(--bg) 45%, #0B0D10 100%);
 }
 
-.connect-logo-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 14px;
+/* Faint edge vignette + noise so the near-black background reads as
+   material, not a flat fill. Noise is a tiny inline SVG turbulence filter —
+   no network asset, negligible cost. */
+.connect-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 140% 100% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
 }
-.connect-icon-ring {
-  width: 64px;
-  height: 64px;
-  border-radius: 20px;
-  background: var(--accent-dim);
-  border: 1px solid var(--border-accent);
+.connect-vignette::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.035;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Landscape: branding + auth card sit side by side, centered together as one
+   group in the middle of the screen (not stretched edge-to-edge). Portrait
+   (see the orientation media query below) stacks them instead. */
+.connect-layout {
+  position: relative;
   display: flex;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--accent-glow);
+  gap: clamp(32px, 6vw, 72px);
+  max-width: 100%;
 }
-.connect-icon-ring svg { width: 30px; height: 30px; color: var(--accent); }
+
+/* ---- Branding pane (left of the card in landscape, header above it in
+   portrait) — sized to its content, not stretched. ---- */
+.branding-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 8px;
+  flex-shrink: 0;
+  width: 320px;
+  max-width: 100%;
+}
+.branding-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  margin-top: 18px;
+}
+.branding-fact {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  letter-spacing: 0.01em;
+}
+.branding-fact svg { color: var(--accent); flex-shrink: 0; }
 
 .app-title {
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 700;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text);
 }
 .app-subtitle {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
 }
 
-.connect-card {
-  width: 100%;
-  max-width: 380px;
-  background: var(--panel);
+/* Breathing glow ring behind the logo mark. The ring is an absolutely
+   positioned pseudo-box inset -14px on every side (see .brand-logo-pulse),
+   so without compensation its LEFT edge sits 14px further out than
+   .brand-logo's own box — visually misaligning the icon from the text below
+   it. margin-left here pulls the whole logo+ring unit back in so the ring's
+   outer edge, not the image, defines the shared left edge with the title. */
+.brand-logo {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 14px 0 24px 14px;
+}
+.brand-logo-img { width: 60%; height: 60%; object-fit: contain; position: relative; z-index: 1; }
+.brand-logo-pulse {
+  position: absolute;
+  inset: -14px;
+  border-radius: 24px;
+  background: var(--accent-dim);
+  border: 1px solid var(--border-accent);
+  box-shadow: var(--accent-glow);
+  animation: brand-pulse 3.2s ease-in-out infinite;
+}
+@keyframes brand-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50%      { transform: scale(1.06); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-logo-pulse { animation: none; }
+}
+
+/* ---- Auth pane ---- */
+.connect-auth-pane {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.glass-card {
+  background: linear-gradient(180deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.015) 100%), var(--panel);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-xl);
-  padding: 28px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 520px;
+  padding: 40px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  box-shadow: var(--shadow-lg);
+  gap: 22px;
+  animation: card-in 420ms ease-out;
 }
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-card { animation: none; }
+}
+
+.auth-card form { display: flex; flex-direction: column; gap: 18px; }
+
 .connect-card-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.14em;
   color: var(--text-3);
 }
 
-.pin-form {
+/* ---- PIN boxes ---- */
+.pin-boxes {
   display: flex;
-  gap: 10px;
-  align-items: stretch;
+  gap: 12px;
+  justify-content: center;
 }
-.pin-input {
-  flex: 1;
-  min-width: 0;
-  height: 54px;
-  font-size: 28px;
+.pin-box {
+  width: 100%;
+  max-width: 76px;
+  aspect-ratio: 1 / 1;
   text-align: center;
-  letter-spacing: 10px;
+  font-size: 30px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font);
   color: var(--text);
   background: rgba(0,0,0,0.35);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
   outline: none;
-  user-select: text;
-  -webkit-user-select: text;
-  font-family: var(--font);
-  transition: border-color var(--t-base), box-shadow var(--t-base);
+  transition: border-color var(--t-base), box-shadow var(--t-base), transform var(--t-fast);
 }
-.pin-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
-.pin-input::placeholder { letter-spacing: 4px; font-size: 14px; color: var(--text-3); }
+.pin-box:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim), var(--accent-glow);
+  transform: translateY(-1px);
+}
+.pin-box:disabled { opacity: 0.5; }
+.pin-boxes--error .pin-box {
+  border-color: var(--danger);
+  animation: pin-shake 320ms ease-in-out;
+}
+@keyframes pin-shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-4px); }
+  75%      { transform: translateX(4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pin-box, .pin-boxes--error .pin-box { animation: none; transition: none; }
+}
 
-.pin-connect {
+/* ---- Primary button ---- */
+.primary-btn {
   height: 54px;
-  padding: 0 22px;
   border: none;
   border-radius: var(--r-md);
   background: var(--accent);
   color: #04101f;
   font-family: var(--font);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   cursor: pointer;
-  transition: all var(--t-base);
+  transition: background var(--t-base), box-shadow var(--t-base), transform var(--t-fast);
   touch-action: manipulation;
   letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.pin-connect:hover { background: #6ab4ff; }
-.pin-connect:disabled { background: var(--panel-hover); color: var(--text-3); cursor: not-allowed; }
+.primary-btn:hover:not(:disabled) { background: #6ab4ff; box-shadow: var(--accent-glow); }
+.primary-btn:active:not(:disabled) { transform: scale(0.98); }
+.primary-btn:disabled { background: var(--panel-hover); color: var(--text-3); cursor: not-allowed; }
+.primary-btn-spinner {
+  width: 18px; height: 18px;
+  border: 2px solid rgba(4,16,31,0.35);
+  border-top-color: #04101f;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
-.pin-keypad {
+/* ---- Number pad ---- */
+.number-pad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
-  margin-top: 10px;
 }
-.keypad-btn {
-  height: 54px;
-  background: rgba(255,255,255,0.05);
+.number-pad-btn {
+  position: relative;
+  height: 58px;
+  background: rgba(255,255,255,0.04);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
   color: var(--text);
   font-size: 20px;
   font-weight: 500;
   cursor: pointer;
-  transition: background var(--t-fast);
+  transition: background var(--t-fast), transform var(--t-fast), box-shadow var(--t-fast);
   touch-action: manipulation;
   font-family: var(--font);
+  overflow: hidden;
 }
-.keypad-btn:active {
-  background: rgba(255,255,255,0.15);
+.number-pad-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, rgba(255,255,255,0.16), transparent 65%);
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+.number-pad-btn:hover { background: rgba(255,255,255,0.07); }
+.number-pad-btn:active {
   transform: scale(0.96);
+  box-shadow: inset 0 0 0 1px var(--border-accent);
 }
+.number-pad-btn:active::after { opacity: 1; }
+.number-pad-btn--fn { color: var(--text-2); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
+.number-pad-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.pin-error { color: var(--danger); font-size: 13px; text-align: center; }
-.pin-status {
+/* ---- Status indicator ---- */
+.status-indicator {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--warning);
-  font-size: 13px;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  transition: border-color var(--t-slow), background var(--t-slow);
 }
-.pin-hint { color: var(--text-3); font-size: 12px; text-align: center; }
-.reconnect-spinner {
-  width: 12px; height: 12px;
-  border: 2px solid var(--warning);
-  border-top-color: transparent;
+.status-indicator-dot {
+  position: relative;
+  width: 10px; height: 10px;
   border-radius: 50%;
-  animation: spin 0.9s linear infinite;
   flex-shrink: 0;
+  background: var(--text-3);
+  transition: background var(--t-slow), box-shadow var(--t-slow);
 }
+.status-indicator--idle    .status-indicator-dot { background: var(--text-3); }
+.status-indicator--accent  .status-indicator-dot { background: var(--accent);  box-shadow: 0 0 8px rgba(77,163,255,0.6); }
+.status-indicator--success .status-indicator-dot { background: var(--success); box-shadow: 0 0 8px rgba(115,224,169,0.6); }
+.status-indicator--warning .status-indicator-dot { background: var(--warning); box-shadow: 0 0 8px rgba(255,200,87,0.6); }
+.status-indicator--danger  .status-indicator-dot { background: var(--danger);  box-shadow: 0 0 8px rgba(255,107,107,0.6); }
+.status-indicator-ring {
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  color: inherit;
+  animation: status-ring 1.4s ease-out infinite;
+}
+.status-indicator--accent .status-indicator-ring { color: var(--accent); }
+.status-indicator--danger .status-indicator-ring { color: var(--danger); }
+@keyframes status-ring {
+  0%   { transform: scale(0.6); opacity: 0.8; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-indicator-ring { animation: none; display: none; }
+}
+.status-indicator-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.status-indicator-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.status-indicator-detail { font-size: 11.5px; color: var(--text-3); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ================================================================
@@ -1209,12 +1386,7 @@ button.collapse-btn {
   .fly-speed-panel { min-width: 170px; }
   .hold-btn { width: 64px; height: 46px; }
 
-  .toolbar {
-    height: 42px;
-    /* Fade cue on the right edge: more controls scroll into view. */
-    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-  }
+  .toolbar { height: 42px; }
   .toolbar-brand-name { display: none; }
   /* Presets/toggles duplicated in the Camera tab and the speed slider
      (Camera tab + gesture panel) are dropped so the toolbar fits a phone. */
@@ -1237,4 +1409,30 @@ button.collapse-btn {
 /* Tablet landscape — keep side-by-side but narrower inspector */
 @media (min-width: 721px) and (max-width: 1024px) {
   .inspector { width: 256px; min-width: 256px; }
+}
+
+/* Connect screen — portrait orientation (phone or tablet held upright):
+   stack branding above the card instead of the landscape side-by-side pair,
+   and trim the descriptive branding rows so the stack stays compact. Keyed
+   on orientation (not width) per spec: landscape always stays side-by-side,
+   portrait always stacks, regardless of exact device size. */
+@media (orientation: portrait) {
+  .connect-layout {
+    flex-direction: column;
+    gap: 28px;
+  }
+  .branding-panel {
+    align-items: center;
+    text-align: center;
+    width: auto;
+  }
+  .brand-logo { margin-left: 0; } /* centred, not left-aligned to text */
+  .branding-facts { display: none; }
+  .auth-card { width: 100%; max-width: 480px; padding: 28px; }
+}
+
+@media (max-width: 640px), (max-height: 560px) {
+  .auth-card { padding: 22px; gap: 18px; }
+  .pin-box { font-size: 24px; }
+  .number-pad-btn { height: 52px; }
 }

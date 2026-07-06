@@ -1,3 +1,4 @@
+import type { Cfg } from './cfg';
 import type { StateMsg, WsStatus } from './useWebSocket';
 import { Activity, Cpu, MapPin, FileText } from 'lucide-react';
 
@@ -5,6 +6,7 @@ import { Activity, Cpu, MapPin, FileText } from 'lucide-react';
 // Previously a floating overlay; now a fixed-height bar with chip layout.
 
 export interface StatusHUDProps {
+  cfg: Cfg | null;
   state: StateMsg | null;
   status: WsStatus;
 }
@@ -29,7 +31,7 @@ function statusLabel(status: WsStatus): string {
   return 'Connecting…';
 }
 
-export default function StatusHUD({ state, status }: StatusHUDProps) {
+export default function StatusHUD({ cfg, state, status }: StatusHUDProps) {
   return (
     <div className="status-bar">
       {/* Connection */}
@@ -37,6 +39,13 @@ export default function StatusHUD({ state, status }: StatusHUDProps) {
         <span className={`conn-dot ${dotClass(status)}`} />
         <span className="status-chip-val">{statusLabel(status)}</span>
       </div>
+
+      {/* Build version */}
+      {cfg?.version && (
+        <div className="status-chip">
+          <span className="status-chip-val">v{cfg.version}</span>
+        </div>
+      )}
 
       {state ? (
         <>

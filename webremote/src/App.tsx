@@ -17,13 +17,23 @@ import VideoLayer, { VideoLayerHandle } from './VideoLayer';
 import { VIDEO_PRESETS, VideoQuality } from './stream';
 import { useWebRTC } from './useWebRTC';
 import StatusHUD from './StatusHUD';
+import BrandingPanel from './BrandingPanel';
+import GlassCard from './GlassCard';
+import PinInput from './PinInput';
+import NumberPad from './NumberPad';
+import StatusIndicator from './StatusIndicator';
+import PrimaryButton from './PrimaryButton';
 
 export type Tab = 'fly' | 'display' | 'camera' | 'tools';
 
 const round3 = (v: number) => Math.round(v * 1000) / 1000;
 
 // ---------------------------------------------------------------------------
-// Premium Connect Screen
+// Premium Connect Screen — a two-pane (branding / auth) industrial-control
+// splash on desktop, stacking to a single column on tablet/mobile. Auth
+// logic (pin state, auto-submit-at-4-digits, submitPin) is unchanged from
+// the previous single-<input> version — only the input/keypad presentation
+// moved into PinInput/NumberPad.
 // ---------------------------------------------------------------------------
 interface ConnectScreenProps {
   status: WsStatus;
@@ -32,86 +42,57 @@ interface ConnectScreenProps {
 
 function ConnectScreen({ status, submitPin }: ConnectScreenProps) {
   const [pin, setPin] = useState(loadStoredPin());
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const pinReady = /^\d{4}$/.test(pin);
   const canSubmit = pinReady && (status === 'pin' || status === 'pin_bad');
+  const connecting = status === 'connecting';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (canSubmit) submitPin(pin);
   };
 
-  const handleKeypad = (num: string) => {
-    if (num === 'C') {
-      setPin('');
-      return;
+  const setPinAndMaybeSubmit = (next: string) => {
+    setPin(next);
+    if (next.length === 4 && (status === 'pin' || status === 'pin_bad')) {
+      submitPin(next);
     }
-    if (num === 'DEL') {
-      setPin((prev) => prev.slice(0, -1));
-      return;
-    }
-    setPin((prev) => {
-      const next = (prev + num).slice(0, 4);
-      if (next.length === 4 && (status === 'pin' || status === 'pin_bad')) {
-        submitPin(next);
-      }
-      return next;
-    });
+  };
+
+  const handleKeypad = (key: string) => {
+    if (key === 'C') { setPin(''); return; }
+    if (key === 'DEL') { setPin((prev) => prev.slice(0, -1)); return; }
+    setPinAndMaybeSubmit((pin + key).slice(0, 4));
   };
 
   return (
     <div className="connect-screen">
-      <div className="connect-logo-wrap">
-        <div className="connect-icon-ring">
-          <img src="/logo.svg" alt="Logo" style={{ width: 40, height: 40 }} />
+      <div className="connect-vignette" aria-hidden="true" />
+      <div className="connect-layout">
+        <BrandingPanel status={status} />
+
+        <div className="connect-auth-pane">
+          <GlassCard className="auth-card">
+            <p className="connect-card-label">Authentication</p>
+
+            <form onSubmit={handleSubmit}>
+              <PinInput
+                value={pin}
+                onChange={setPinAndMaybeSubmit}
+                error={status === 'pin_bad'}
+                disabled={connecting}
+                autoFocus
+              />
+              <PrimaryButton disabled={!canSubmit} loading={connecting}>
+                Connect
+              </PrimaryButton>
+            </form>
+
+            <NumberPad onPress={handleKeypad} disabled={connecting} />
+
+            <StatusIndicator status={status} />
+          </GlassCard>
         </div>
-        <h1 className="app-title">ViitorXPC</h1>
-        <p className="app-subtitle">LiDAR Remote Controller</p>
-      </div>
-
-      <div className="connect-card">
-        <p className="connect-card-label">Authentication</p>
-        <form className="pin-form" onSubmit={handleSubmit}>
-          <input
-            ref={inputRef}
-            className="pin-input"
-            type="text"
-            inputMode="numeric"
-            pattern="\d*"
-            maxLength={4}
-            autoComplete="one-time-code"
-            placeholder="PIN"
-            value={pin}
-            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
-          />
-          <button className="pin-connect" type="submit" disabled={!canSubmit}>
-            Connect
-          </button>
-        </form>
-
-        <div className="pin-keypad">
-          {['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'DEL'].map((k) => (
-            <button
-              key={k}
-              type="button"
-              className="keypad-btn"
-              aria-label={k === 'C' ? 'Clear' : k === 'DEL' ? 'Delete digit' : k}
-              onClick={() => handleKeypad(k)}
-            >
-              {k}
-            </button>
-          ))}
-        </div>
-
-        {status === 'pin_bad' && <p className="pin-error">Wrong PIN — check the viewer and try again.</p>}
-        {status === 'connecting' && <p className="pin-status">Connecting…</p>}
-        {status === 'disconnected' && (
-          <p className="pin-status">
-            <span className="reconnect-spinner" /> Disconnected — reconnecting…
-          </p>
-        )}
-        {status === 'pin' && <p className="pin-hint">Enter the 4-digit PIN shown in ViitorXPC Viewer.</p>}
       </div>
     </div>
   );
@@ -181,6 +162,11 @@ export default function App() {
   webrtcMsgRef.current = webrtcHandleMessage;
 
   useEffect(() => { sendRef.current = send; }, [send]);
+
+  // Browser tab title mirrors the connected viewer's build version.
+  useEffect(() => {
+    document.title = cfg?.version ? `ViitorXPC - v${cfg.version}` : 'ViitorXPC';
+  }, [cfg?.version]);
 
   const moveRef = useRef<MoveValues>({ ...ZERO_MOVE });
 
@@ -297,7 +283,7 @@ export default function App() {
       </div>
 
       {/* ── Status Bar ── */}
-      <StatusHUD state={lastState} status={status} />
+      <StatusHUD cfg={cfg} state={lastState} status={status} />
     </div>
   );
 }

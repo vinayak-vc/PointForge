@@ -1295,6 +1295,7 @@ int main(int argc, char** argv) {
                 rc.streamAvailable = RemoteServer::streamAvailable();
                 rc.webrtcAvailable = RemoteServer::webrtcAvailable();
                 rc.preferredStream = remotePreferredStream;
+                rc.appVersion = PF_VERSION_STRING;
                 for (const auto& b : allBookmarks[loadedDir]) rc.bookmarks.push_back(b.name);
                 remote.publishConfig(rc);
             }

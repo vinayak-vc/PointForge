@@ -1,6 +1,190 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06) - Legend UI Fixes + Auto-Versioned Builds
+## Latest Session (2026-07-06, cont.) - Connect Screen: Centered Pair + Orientation Layout
+
+Follow-up fixes to the premium connect-screen redesign (same branch,
+`minor-fixes`), driven by a screenshot showing the branding panel and auth
+card stretched to opposite edges of the screen instead of together as a pair.
+
+### What was fixed
+- **Centered pair, not edge-stretched**: `.connect-layout` was a `grid`
+  with `minmax(320px,34%) 1fr` columns spanning the full viewport width —
+  correct proportions, wrong idea (branding pinned far left, card far right).
+  Changed to a `flex` row sized to its own content, centered as one unit via
+  `.connect-screen`'s own `align-items/justify-content: center` — verified
+  393px margins on both sides at 1600px wide (i.e. genuinely centered, not
+  just proportional).
+- **Logo/title misalignment root cause**: `.brand-logo-pulse` (the glow ring)
+  is `position:absolute; inset:-14px`, so its left edge sits 14px outside
+  `.brand-logo`'s own box — the icon visually sat left of the title text
+  below it. Fixed with `margin-left:14px` on `.brand-logo` so the ring's
+  *outer* edge — not the icon image — shares the title's left edge. Also
+  widened the logo-to-title gap (`margin: 14px 0 24px 14px`).
+- **Landscape/portrait now keyed on `orientation`, not `max-width`**: a wide
+  tablet held in landscape now correctly keeps the side-by-side pair (used
+  to force-stack under 1024px regardless of orientation); any portrait
+  viewport (phone or tablet) stacks branding above the card, centered.
+- **Page-level padding**: `.connect-screen` itself now does the
+  centering + `padding: clamp(20px,5vh,56px) clamp(16px,4vw,48px)`, so
+  nothing (logo, card, keypad, status row) can ever touch the viewport edge
+  — verified 29px top/bottom padding and a 28px branding-to-card gap with
+  zero overlap at 375×812 (mobile portrait).
+- **Found and fixed a real regression while debugging**: `body { zoom: 1.2 }`
+  — flagged in an earlier UX audit as a real bug and supposedly removed —
+  was still present. `git log -p` showed it was only ever added once and
+  never actually removed: my earlier fix must have been silently reverted
+  when PR #3's `webapp-controller` -> `main` merge landed an older copy of
+  `index.css`. Removed again; also re-applied a second casualty of that same
+  merge, the `100dvh` fallback on `html,body,#root` (mobile browser-chrome
+  viewport tracking). Spot-checked several other survivors of that fix batch
+  (safe-area insets, coarse-pointer sizing, `.toolbar-group--dup`,
+  `--text-3` contrast, `.seg` grid) — those did survive the merge intact.
+
+### Verified
+- `npm run build` clean.
+- Geometry-checked (not screenshot — `preview_screenshot` was rendering a
+  tiny mis-scaled thumbnail in this session, contradicted by
+  `getBoundingClientRect` showing correct full-size layout; treated as a
+  tool artifact, not a real bug) via `preview_eval`: 1600×900 desktop shows
+  393px/393px side margins (centered), 72px inter-panel gap, logo-ring left
+  edge flush with title left edge, 32px logo-to-title gap; 375×812 mobile
+  shows 29px top/bottom padding, 28px vertical gap, zero overlap, and
+  `scrollWidth === clientWidth` (no horizontal scroll).
+- Exe rebuild was in progress at handoff time — confirm it completed and the
+  version bumped before further changes.
+
+### Modified files
+- webremote/src/index.css (Connect Screen layout section)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe in a real browser (not just the no-backend dev
+  preview) and eyeball the connect screen once with actual PIN
+  entry/connect/pin_bad states.
+- Then resume the two items still open from earlier this session: desktop
+  browser mouse/keyboard camera control, and a flex-overflow audit of
+  `.app-shell`/`.workspace` so the in-app status bar can't be clipped at
+  desktop window sizes (unrelated to the connect screen — that's the
+  post-authentication app shell).
+
+## Previous Session (2026-07-06, cont.) - Web Remote Connect Screen: Premium Redesign
+
+Branch `minor-fixes`. Full visual/UX redesign of the PIN-entry ("connect")
+screen only — no business logic, WS protocol, or auth flow changes. `submitPin`,
+`loadStoredPin`, and the pin-state/auto-submit-at-4-digits contract are byte-
+for-byte the same; only how the pin is edited/displayed changed.
+
+### What was built
+New reusable components (`webremote/src/`):
+- `AnimatedLogo.tsx` — logo with a breathing glow ring (CSS-only, respects
+  `prefers-reduced-motion`).
+- `PinInput.tsx` — 4 individual digit boxes replacing the single text field:
+  auto-advance focus, backspace-to-previous, arrow-key nav, full paste
+  support, per-box `aria-label`. Still just edits the same `pin: string`.
+- `NumberPad.tsx` — same 12-key layout, larger touch targets, subtle
+  press/ripple feedback (pure CSS `::after` radial flash + scale, no JS).
+- `StatusIndicator.tsx` — unifies the old separate error/status/hint
+  paragraphs into one dot+title+detail readout per `WsStatus`, with an
+  animated expanding ring while connecting/reconnecting. Copy avoids
+  overclaiming security — "PIN-protected local link", not "Encrypted"
+  (the transport is plain WS on LAN, not TLS).
+- `BrandingPanel.tsx` — left pane on desktop / compact header when stacked:
+  animated logo, title, subtitle, three descriptive fact rows (hidden below
+  1024px so the stacked layout stays compact).
+- `PrimaryButton.tsx` — Connect button with a loading-spinner state.
+- `GlassCard.tsx` — reusable frosted card wrapper for the auth card.
+
+`ConnectScreen` (in `App.tsx`) now composes these: desktop grid
+`minmax(320px,34%) 1fr` (branding / auth, matching the requested ~30/70
+split), collapsing to a single stacked column below 1024px. Background
+upgraded to a layered dark gradient + radial vignette + inline-SVG noise
+texture (no network asset) instead of flat near-black.
+
+### Verified
+- `npm run build` (tsc --noEmit + vite) clean.
+- Checked live via the Vite dev preview (no backend, so `status` sits at
+  `connecting`/`pin` — sufficient to verify layout): desktop 1600×900 grid
+  computed `453px / 880px` columns (~34/66); mobile 375×812 and tablet
+  768×1024 both collapse to a stacked flex column with **zero horizontal
+  overflow** (`scrollWidth === clientWidth` at both sizes); no console errors.
+- NOT yet checked against the real embedded exe in a browser (rebuild was
+  in progress at handoff time — do that first before further changes).
+
+### Modified/added files
+- webremote/src/{AnimatedLogo,PinInput,NumberPad,StatusIndicator,BrandingPanel,PrimaryButton,GlassCard}.tsx (new)
+- webremote/src/App.tsx (ConnectScreen rewritten to compose the above)
+- webremote/src/index.css (Connect Screen section fully replaced; removed
+  now-dead `.reconnect-spinner`/`.pin-input`/`.keypad-btn`/etc. rules)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe in a real browser and visually confirm: PIN box
+  auto-advance/backspace/paste, keypad press feedback, status-indicator
+  color transitions across pin -> pin_bad -> connecting -> connected, and the
+  branding-panel logo pulse — none of this was checked against a live WS
+  connection this session (dev preview had no backend).
+- Then resume the pre-existing next task from earlier this session: desktop
+  browser mouse/keyboard camera control + status-bar clipping audit
+  (`FlyTab.tsx`/`.app-shell` flex chain) — still not started.
+
+## Previous Session (2026-07-06, cont.) - Toolbar Consolidation + Versioned Exe Filename
+
+Branch `minor-fixes` (cut from `main` after the previous session's PR #3 merge
+landed the legend/dropdown/build-version work below).
+
+### What was built / Fixed
+- **Web Remote toolbar de-scrolled**: the top toolbar (Frame/Top/Front/Side +
+  Ortho/UI/3D + Shot/Full + Stream) previously needed horizontal scroll to see
+  every control. Consolidated the view-toggle and capture buttons into one
+  icon-only group (`.toolbar-btn--icon`, 30px square, tooltip via `title`/
+  `aria-label` — labels already live in the Camera tab) and shrunk the
+  stream-quality buttons to single-letter `.toolbar-btn--compact` (24px). Set
+  `.toolbar { overflow-x: hidden }` (was `auto` + a fade-mask cue) since
+  everything now fits without scrolling; dropped the now-unused mobile fade
+  mask CSS.
+- **Build filename now embeds the version**: `ViitorXPCViewer.exe` ->
+  `ViitorXPCViewer_v<MAJOR><MINOR><PATCH>.exe` (e.g. `_v103` for 1.0.3) via a
+  new `POST_BUILD` step (`tools/stamp_exe_name.cmake`) that parses the
+  generated `Version.h` and renames the freshly-linked exe, deleting any stale
+  `_v*` copy from a previous build first. Verified live: build stamped
+  `ViitorXPCViewer_v103.exe`, no leftover unversioned or older-versioned exe.
+  See decisions.md for why this is safe to run unconditionally every build
+  (Version.h's changing content forces main.cpp to always recompile/relink).
+
+### Verified
+- `npm run build` clean.
+- `cmake --build build-static --config Release --target pfview` clean;
+  confirmed `ViitorXPCViewer_v103.exe` on disk, no stray unversioned exe.
+- NOT yet visually re-verified in a live desktop browser against the running
+  toolbar (no icon-crowding/tooltip check at narrow desktop widths).
+
+### Modified files
+- webremote/src/ActionBar.tsx (icon-only toolbar buttons, clubbed groups)
+- webremote/src/index.css (`.toolbar-btn--icon`/`--compact`, drop scroll+mask)
+- CMakeLists.txt (POST_BUILD exe-rename step)
+- tools/stamp_exe_name.cmake (new)
+- docs/{decisions,ai_handoff}.md
+
+### Follow-up (same branch) — version shown in Web Remote UI + tab title
+- New additive cfg key `version` (`RemoteConfig::appVersion` = `PF_VERSION_STRING`,
+  `{"version":...}` in `publishConfig`) — client `Cfg.version`.
+- `StatusHUD.tsx` now takes a `cfg` prop and shows a `v1.0.4`-style chip next
+  to the connection status.
+- `App.tsx` sets `document.title` to `"ViitorXPC - v1.0.4"` once `cfg.version`
+  arrives (falls back to the static `ViitorXPC` from `index.html` until then).
+- Verified: build stamped/renamed to `ViitorXPCViewer_v104.exe` clean.
+
+### Next Recommended Task
+- User separately flagged (not yet actioned this session): the web remote
+  opened in a **desktop** browser has no mouse/keyboard camera control
+  (`FlyTab.tsx` only wires touch events) and the bottom status bar can be
+  clipped off-screen on desktop window sizes — needs a flex-overflow audit
+  (`.app-shell`/`.workspace` chain) plus desktop mouse-drag-look + wheel-zoom +
+  WASD-fly input alongside the existing touch gestures. Scoped but not started.
+- Then resume: merge `minor-fixes` into `main` once the above is done, or
+  merge now if the user wants this batch shipped separately.
+
+## Previous Session (2026-07-06) - Legend UI Fixes + Auto-Versioned Builds
 
 UI-only pass (no functional/protocol changes) requested by the user, plus an
 auto-incrementing build version number.

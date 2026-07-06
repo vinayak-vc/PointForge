@@ -333,3 +333,15 @@ else()
                 ${CMAKE_CURRENT_SOURCE_DIR}/shaders
                 $<TARGET_FILE_DIR:pfview>/shaders)
 endif()
+
+# Stamp the build version into the output filename, e.g.
+# ViitorXPCViewer.exe -> ViitorXPCViewer_v102.exe for version 1.0.2. Safe to
+# run every build: main.cpp includes the generated Version.h, so pfview
+# always relinks (see tools/stamp_exe_name.cmake and decisions.md).
+add_custom_command(TARGET pfview POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DEXE_PATH=$<TARGET_FILE:pfview>
+            -DVERSION_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/src/viewer/Version.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/stamp_exe_name.cmake
+    VERBATIM
+)

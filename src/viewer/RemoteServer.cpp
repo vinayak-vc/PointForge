@@ -1041,6 +1041,7 @@ void RemoteServer::publishConfig(const RemoteConfig& c) {
         {"recent", c.recentDirs}, {"file", c.loadedFile},
         {"pts", c.pointCount}, {"nodes", c.nodeCount}, {"cubeSize", c.cubeSize},
         {"zmin", c.zMin},
+        {"version", c.appVersion},
         {"streamAvailable", c.streamAvailable},
         {"webrtcAvailable", c.webrtcAvailable},
         {"preferredStream", c.preferredStream},
