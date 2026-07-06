@@ -110,6 +110,10 @@ public:
     float yawRate()   const;
     float pitchRate() const;
     bool  boost()  const;
+    bool  orbit()  const;                    // true while the client's LMB-equivalent
+                                              // is held (desktop left-drag) — the
+                                              // caller should rotate around a pivot
+                                              // (Camera::orbit) instead of free-look
     bool  inputActive() const;               // fresh move data this instant
 
     std::vector<RemoteCmd> consumeCommands();

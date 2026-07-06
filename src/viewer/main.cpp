@@ -389,6 +389,22 @@ int main(int argc, char** argv) {
         return 3;
     }
     GLuint quadVao = 0; glGenVertexArrays(1, &quadVao); // empty VAO for fullscreen triangle
+
+    // Measurement polyline shader — drawn as real scene geometry (see
+    // renderPass below) so it's captured by the web-remote video stream.
+    Shader lineShader;
+    if (!lineShader.loadFromSource(kLineVertSrc, kLineFragSrc)) {
+        logError("Failed to compile embedded line shader");
+        return 3;
+    }
+    GLuint lineVao = 0, lineVbo = 0;
+    glGenVertexArrays(1, &lineVao);
+    glGenBuffers(1, &lineVbo);
+    glBindVertexArray(lineVao);
+    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+    glBindVertexArray(0);
     GLuint edlFbo = 0, edlColorTex = 0, edlDepthTex = 0;
     int fboW = 0, fboH = 0;
     auto ensureFbo = [&](int w, int h) {
@@ -523,6 +539,7 @@ int main(int argc, char** argv) {
     // ---- navigation (orbit / focus / zoom-to-cursor) ----------------------
     glm::vec3 pivot(0.0f);            // orbit pivot in centred space (cube centre = origin)
     bool orbitDrag = false;          // LMB held -> turntable orbit
+    bool remoteOrbitWasActive = false; // edge-detect the web remote's LMB-equivalent
     bool pendingFocus = false; int focusX = 0, focusY = 0;   // double-click to focus
     bool pendingZoom  = false; float zoomDelta = 0.0f; int zoomX = 0, zoomY = 0;
     bool frameAllReq  = false;       // 'F' / button -> fit whole cloud
@@ -1170,8 +1187,23 @@ int main(int argc, char** argv) {
                 cam.position += glm::vec3(0, 0, 1) * remote.up() * mv;
                 // Web joystick: up = +1 = look up (already matches addYawPitch).
                 float invY = padInvertY ? -1.0f : 1.0f;
-                cam.addYawPitch(remote.yawRate() * padLookSens * dt,
-                                remote.pitchRate() * invY * padLookSens * dt);
+                float dYaw = remote.yawRate() * padLookSens * dt;
+                float dPit = remote.pitchRate() * invY * padLookSens * dt;
+                if (remote.orbit()) {
+                    // Web remote's LMB-equivalent (desktop left-drag) -> same
+                    // turntable orbit as a local LMB drag: establish the pivot
+                    // once on the rising edge (drag start), exactly like
+                    // main.cpp's SDL_MOUSEBUTTONDOWN/SDL_BUTTON_LEFT handler.
+                    if (!remoteOrbitWasActive) {
+                        float dist = glm::length(cam.position - pivot);
+                        pivot = cam.position + cam.front() * dist;
+                    }
+                    cam.orbit(dYaw, dPit, pivot);
+                } else {
+                    // RMB-equivalent (desktop right-drag, or touch 1-finger) -> free-look.
+                    cam.addYawPitch(dYaw, dPit);
+                }
+                remoteOrbitWasActive = remote.orbit();
             }
             // Settings ("set.<key>") + one-shot commands. Every key mirrors a
             // Properties-panel control; clamps match the ImGui slider ranges.
@@ -1216,6 +1248,15 @@ int main(int argc, char** argv) {
                 else if (rc.name == "reset_view" && octreeLoaded) setupCamera();
                 else if (rc.name == "measure" && octreeLoaded)
                     toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                else if (rc.name == "measure_pick" && octreeLoaded && toolMode == TOOL_MEASURE && rc.hasVec) {
+                    // vec[0]/vec[1] are the tap's normalized (0..1) position within
+                    // the streamed video frame; since the stream is a downscaled
+                    // copy of this same window (same aspect), that maps directly
+                    // onto window pixel coords for the existing pick path below.
+                    pendingPick = true;
+                    pickX = (int)(std::clamp(rc.vec[0], 0.0f, 1.0f) * winW);
+                    pickY = (int)(std::clamp(rc.vec[1], 0.0f, 1.0f) * winH);
+                }
                 else if (rc.name == "clip_tool" && octreeLoaded)
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
@@ -1403,6 +1444,35 @@ int main(int argc, char** argv) {
                     }
                 };
                 visit(store.rootIndex());
+
+                // ---- measurement polyline (real geometry, not an ImGui overlay) --
+                // Drawn here (inside renderPass) so it's projected with this exact
+                // eye's `vp` — correct for both mono and stereo SBS — and baked
+                // into the same offscreen FBO the web-remote stream captures.
+                if (!measurePts.empty()) {
+                    std::vector<glm::vec3> verts;
+                    verts.reserve(measurePts.size());
+                    for (const auto& p : measurePts) verts.push_back(glm::vec3(p - center));
+                    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+                    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(glm::vec3), verts.data(), GL_DYNAMIC_DRAW);
+                    glBindVertexArray(lineVao);
+                    lineShader.use();
+                    lineShader.setMat4("uMVP", glm::value_ptr(vp));
+                    lineShader.setVec3("uColor", 1.0f, 0.86f, 0.16f); // matches the old ImGui marker/line hue
+                    glDisable(GL_DEPTH_TEST); // always-on-top, matching the previous ImGui overlay
+                    if (verts.size() >= 2) {
+                        glLineWidth(2.0f);
+                        glDrawArrays(GL_LINE_STRIP, 0, (GLsizei)verts.size());
+                    }
+                    // GL_PROGRAM_POINT_SIZE is already enabled globally (init, never
+                    // toggled off) for the point-cloud shader's gl_PointSize — do not
+                    // touch it here, or the *next* eye's point-cloud draw in SBS mode
+                    // would lose its point sizing.
+                    glDrawArrays(GL_POINTS, 0, (GLsizei)verts.size());
+                    glEnable(GL_DEPTH_TEST);
+                    glBindVertexArray(0);
+                }
+
                 cam.position = originalPos; // restore
             };
 
@@ -1584,21 +1654,22 @@ int main(int argc, char** argv) {
                 out.y = (1.0f - (ndc.y * 0.5f + 0.5f)) * (float)winH;
                 return true;
             };
+            // The polyline itself (lines + point markers) is now drawn as real
+            // GL geometry inside renderPass(), baked into the same offscreen
+            // FBO the 3D scene renders to — so it's visible both locally AND
+            // in the web-remote video stream (which captures that FBO before
+            // any ImGui drawing happens). Only the per-segment distance text
+            // stays ImGui-only here (PC-side convenience; no GL text renderer).
             ImDrawList* dl = ImGui::GetForegroundDrawList();
-            const ImU32 cMark = IM_COL32(255, 220, 40, 255);
-            const ImU32 cLine = IM_COL32(255, 220, 40, 200);
             const ImU32 cText = IM_COL32(255, 255, 255, 255);
             const ImU32 cSnap = IM_COL32(80, 200, 255, 255);
 
-            // Segments + per-segment length labels.
             ImVec2 prev;
             bool prevOk = false;
             for (size_t i = 0; i < measurePts.size(); ++i) {
                 ImVec2 s;
                 bool ok = project(measurePts[i], s);
-                if (ok) { dl->AddCircleFilled(s, 5.0f, cMark); dl->AddCircle(s, 8.0f, cMark, 0, 2.0f); }
                 if (ok && prevOk) {
-                    dl->AddLine(prev, s, cLine, 2.0f);
                     double d = glm::length(measurePts[i] - measurePts[i - 1]);
                     char db[48]; snprintf(db, sizeof(db), "%.3f m", d);
                     dl->AddText(ImVec2((prev.x + s.x) * 0.5f + 6, (prev.y + s.y) * 0.5f - 6), cText, db);

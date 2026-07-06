@@ -161,4 +161,25 @@ void main() {
 }
 )GLSL";
 
+// ---- Measurement polyline: flat-colour lines + point markers, drawn as real
+// scene geometry (into the same offscreen FBO the point cloud renders to) so
+// it's captured by the web-remote video stream, not just an ImGui overlay
+// only the PC's own screen would see.
+inline const char* kLineVertSrc = R"GLSL(#version 330 core
+layout(location = 0) in vec3 inPos;
+uniform mat4 uMVP;
+void main() {
+    gl_Position = uMVP * vec4(inPos, 1.0);
+    gl_PointSize = 8.0;
+}
+)GLSL";
+
+inline const char* kLineFragSrc = R"GLSL(#version 330 core
+out vec4 fragColor;
+uniform vec3 uColor;
+void main() {
+    fragColor = vec4(uColor, 1.0);
+}
+)GLSL";
+
 } // namespace pf

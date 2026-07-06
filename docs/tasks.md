@@ -89,6 +89,15 @@
 - `[x]` Web Remote toolbar consolidated to icon-only buttons
         (`.toolbar-btn--icon`/`--compact`) so the full control set fits
         without horizontal scroll; dropped the scroll/fade-mask CSS
+- `[x]` Web Remote desktop mouse+keyboard camera input (`FlyTab.tsx`):
+        left-drag look, right-drag pan, wheel zoom, WASD fly, Space/Ctrl
+        up/down, Shift boost — a desktop browser previously had no camera
+        input at all (touch-only)
+- `[x]` Web Remote remote tap-to-measure: tapping the video while Measure is
+        active sends normalized coords through a new `measure_pick` cmd;
+        server inverts the same screen-ray pick a local LMB click uses.
+        `VideoLayer` gains `getNaturalSize()` to correctly invert the video
+        layer's `object-fit:contain` letterboxing
 - `[x]` Elevation/intensity colour legend UI fixes (C++ viewer + React webremote):
         legend now dock-aware (anchors left of "Properties" only when it truly
         abuts the window's right edge — not for left-docked/floating panels),

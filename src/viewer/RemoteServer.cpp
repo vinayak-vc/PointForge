@@ -1,5 +1,6 @@
 #include "RemoteServer.h"
 #include "common/Log.h"
+#include <cmath>
 
 #ifdef PF_WITH_REMOTE
 
@@ -112,6 +113,7 @@ struct RemoteServerImpl {
     // ---- input state (server threads write, main loop reads) --------------
     std::atomic<float> f{0}, s{0}, u{0}, yaw{0}, pit{0};
     std::atomic<bool>  boost{false};
+    std::atomic<bool>  orbit{false};
     std::atomic<int64_t> lastMoveMs{0};
 
     std::mutex             cmdMx;
@@ -750,13 +752,26 @@ struct RemoteServerImpl {
         lk.unlock();
 
         if (t == "move") {
+            // f/s/u are joystick-style axes (held-stick deflection, resent every
+            // tick) — genuinely bounded to [-1,1] by design.
             auto ax = [&](const char* k) {
                 float v = m.value(k, 0.0f);
                 return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
             };
+            // yaw/pit are a raw per-tick rotation delta (dx/dy * the client's own
+            // Look-sensitivity slider), NOT a bounded axis — clamping them to
+            // [-1,1] like f/s/u silently discarded that slider entirely, since
+            // almost any real mouse/touch drag already exceeds 1 before scaling.
+            // Only guard against non-finite/garbage input, not normal speed.
+            auto rot = [&](const char* k) {
+                float v = m.value(k, 0.0f);
+                if (!std::isfinite(v)) return 0.0f;
+                return v < -5000.0f ? -5000.0f : (v > 5000.0f ? 5000.0f : v);
+            };
             f = ax("f"); s = ax("s"); u = ax("u");
-            yaw = ax("yaw"); pit = ax("pit");
+            yaw = rot("yaw"); pit = rot("pit");
             boost = m.value("boost", 0) != 0;
+            orbit = m.value("orbit", 0) != 0;
             lastMoveMs = nowMs();
         } else if (t == "cmd" || t == "set") {
             RemoteCmd c;
@@ -988,6 +1003,7 @@ float RemoteServer::up()        const { return inputActive() ? impl_->u.load()  
 float RemoteServer::yawRate()   const { return inputActive() ? impl_->yaw.load() : 0.0f; }
 float RemoteServer::pitchRate() const { return inputActive() ? impl_->pit.load() : 0.0f; }
 bool  RemoteServer::boost()     const { return inputActive() && impl_->boost.load(); }
+bool  RemoteServer::orbit()     const { return inputActive() && impl_->orbit.load(); }
 
 std::vector<RemoteCmd> RemoteServer::consumeCommands() {
     std::vector<RemoteCmd> out;
@@ -1143,6 +1159,7 @@ float RemoteServer::yawRate() const { return 0; }
 void RemoteServer::setForceDiskWeb(bool) {}
 float RemoteServer::pitchRate() const { return 0; }
 bool  RemoteServer::boost() const { return false; }
+bool  RemoteServer::orbit() const { return false; }
 bool  RemoteServer::inputActive() const { return false; }
 std::vector<RemoteCmd> RemoteServer::consumeCommands() { return {}; }
 void RemoteServer::publishState(float, uint64_t, const float*, bool, const std::string&) {}

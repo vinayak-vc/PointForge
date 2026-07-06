@@ -178,15 +178,18 @@ if(PF_EMBED_WEB)
         BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/webremote/dist
         VERBATIM
     )
-    add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/generated/EmbeddedWeb.h
+    # Deliberately an ALL custom_target (always executes), NOT an
+    # OUTPUT-based add_custom_command keyed on `DEPENDS web_build`: a target
+    # name isn't a file timestamp, so the VS generator was not reliably
+    # detecting staleness and could relink pfview with a STALE
+    # EmbeddedWeb.h even though webremote/dist itself had just been rebuilt
+    # (observed live: EmbeddedWeb.h's mtime stuck ~1hr behind several
+    # rebuilds). Same always-run pattern as web_build/version_header above.
+    add_custom_target(embed_web_header ALL
         DEPENDS web_build
         COMMAND ${CMAKE_COMMAND} -DDIST_DIR=${CMAKE_CURRENT_SOURCE_DIR}/webremote/dist -DOUTPUT_HEADER=${CMAKE_BINARY_DIR}/generated/EmbeddedWeb.h -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_web.cmake
         COMMENT "Generating EmbeddedWeb.h from webremote/dist"
         VERBATIM
-    )
-    add_custom_target(embed_web_header ALL
-        DEPENDS ${CMAKE_BINARY_DIR}/generated/EmbeddedWeb.h
     )
 endif()
 

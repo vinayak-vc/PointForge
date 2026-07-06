@@ -13,9 +13,10 @@ of points, larger than RAM):
   app** are embedded in the exe.
 
 **Web Remote**: a React app served by an embedded civetweb server lets a phone
-browser control the camera and viewer options over LAN (PIN pairing, multi-touch
-gestures, 30 Hz move protocol). Two viewport streaming engines, switchable at
-runtime via `preferredStream`:
+*or desktop* browser control the camera and viewer options over LAN (PIN
+pairing, multi-touch gestures **and** mouse-drag/WASD-keyboard input, 30 Hz
+move protocol, remote tap-to-measure). Two viewport streaming engines,
+switchable at runtime via `preferredStream`:
 
 1. **JPEG** – turbojpeg frames over WebSocket; robust, per-frame crisp.
 2. **WebRTC H.264** – low-latency; libdatachannel + Media Foundation with
@@ -25,5 +26,11 @@ runtime via `preferredStream`:
 A Unity integration (branch `library/unity`) exposes the streaming core and
 converter as flat C-API DLLs (`pfunity`, `pfconvert_dll`).
 
-Current milestone: final phone verification of the WebRTC path, then merge
-`webapp-controller` into `main` for the first production release package.
+Every build stamps a `MAJOR.MINOR.PATCH` version (status bar, exe file-version
+metadata, and the exe's own filename) so a tester can identify exactly which
+build they're running.
+
+Current milestone: `webapp-controller` merged into `main` (PR #3); active work
+continues on branch `minor-fixes` — a round of Web Remote polish (premium
+connect-screen redesign, desktop input, dropdown/legend UI fixes, remote
+measure) ahead of the first production release package.

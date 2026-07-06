@@ -18,13 +18,20 @@
   protocol, settings mirror. Viewport streaming via JPEG (turbojpeg over WS) or
   WebRTC H.264 (libdatachannel + Media Foundation, hardware NVENC/QuickSync
   encode with software fallback, quality VBR) — runtime-switchable.
+- **Web Remote premium redesign + desktop input** — enterprise-grade connect
+  screen (PIN boxes, animated logo, branding pane) and in-app UI (icon-only
+  toolbar, dropdown pickers, elevation/intensity legend overlay); desktop
+  mouse+keyboard camera control (drag look, right-drag pan, wheel zoom, WASD
+  fly) alongside the original touch gestures; remote tap-to-measure (place a
+  measurement point by tapping the video, not just at the PC).
+- **Auto-incrementing build version** — every build stamps a `v1.0.N` label
+  (status bar, exe file-version metadata, and the exe's own filename) so a
+  tester can identify exactly which build they're running.
 
 ## Short-term Goals
-- **Web Remote desktop input**: opening the remote in a desktop browser
-  currently has no camera control — `FlyTab.tsx` only wires touch events.
-  Needs mouse-drag look + wheel zoom + WASD/keyboard fly, plus a flex-overflow
-  audit of `.app-shell`/`.workspace` so the status bar can't be clipped
-  off-screen at desktop window sizes.
+- **Web Remote status-bar clipping**: a flex-overflow audit of
+  `.app-shell`/`.workspace` is still needed so the in-app status bar can't be
+  clipped off-screen at some desktop window sizes.
 - **On-disk cache management**: auto-purge old `PointForgeCache_*` converted dirs.
 - **Color-by attribute polish**: editable elevation/intensity ranges + ramps.
 - **Convert cancel coverage**: extend cooperative cancel to Phase A/B.

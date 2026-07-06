@@ -14,6 +14,10 @@ export interface VideoLayerProps {
 
 export interface VideoLayerHandle {
   pushFrame: (blob: Blob) => void;
+  /** Intrinsic frame size (not the rendered CSS box), needed to map a tap on
+   *  the letterboxed (object-fit:contain) layer back to video-content-
+   *  relative coordinates. Null until a frame has decoded/loaded metadata. */
+  getNaturalSize: () => { w: number; h: number } | null;
 }
 
 const VideoLayer = forwardRef<VideoLayerHandle, VideoLayerProps>(function VideoLayer(props, ref) {
@@ -31,6 +35,13 @@ const VideoLayer = forwardRef<VideoLayerHandle, VideoLayerProps>(function VideoL
         if (currentUrlRef.current) revokeQueueRef.current.push(currentUrlRef.current);
         currentUrlRef.current = url;
         img.src = url;
+      },
+      getNaturalSize: () => {
+        const v = videoRef.current;
+        if (v && v.videoWidth > 0) return { w: v.videoWidth, h: v.videoHeight };
+        const img = imgRef.current;
+        if (img && img.naturalWidth > 0) return { w: img.naturalWidth, h: img.naturalHeight };
+        return null;
       },
     }),
     [],

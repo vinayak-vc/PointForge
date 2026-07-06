@@ -1,6 +1,353 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Connect Screen: Centered Pair + Orientation Layout
+## Latest Session (2026-07-06, cont.) - Look-Speed Slider Had No Effect (Server-Side Clamp Bug)
+
+User reported the web app's Look sensitivity slider did nothing regardless
+of value. Root cause was NOT in the slider or the client's scaling math —
+both were already correct.
+
+### Root cause
+`RemoteServer.cpp`'s `move` message parser ran `yaw`/`pit` through the same
+`ax()` clamp as `f`/`s`/`u` — `[-1, 1]`. That clamp is correct for `f/s/u`,
+which are genuine joystick-style axes (a held stick's deflection, bounded by
+design). But `yaw`/`pit` are a **raw per-tick rotation delta**
+(`dx * lookSpeed` computed client-side in `FlyTab.tsx`), not a bounded axis —
+almost any real mouse-drag or touch-swipe pixel delta, once multiplied by
+*any* `lookSpeed` value from 0.1 to 5.0, already exceeds 1. The clamp
+silently saturated it to the same ±1 either way, so the slider had zero
+observable effect on rotation speed — the value it was supposed to control
+never survived past the server's parser.
+
+### Fix
+Split the move-message parsing: `f`/`s`/`u` keep the `[-1,1]` clamp
+(`ax()`); `yaw`/`pit` get a new `rot()` helper that only rejects non-finite
+values (NaN/Infinity) and clamps to a generous `±5000` sanity bound —
+functionally unclamped for any real input, just guarding against garbage
+from a malformed/malicious client. This is server-side only; no client
+changes were needed since the client's scaling was already correct — it's
+purely a case of the server discarding what the client sent.
+
+### Verified
+- `cmake --build ... pfview` clean (`v1.0.13`); embed hash unchanged (no web
+  UI change this round, as expected — this is a pure C++ fix).
+- NOT yet tested live: haven't confirmed the Look slider now actually changes
+  perceived rotation speed against a running exe.
+
+### Modified files
+- src/viewer/RemoteServer.cpp (`rot()` helper, `#include <cmath>`)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Live-verify: connect the web app, drag to look at Look sensitivity 0.5
+  then 5.0, confirm the rotation rate visibly changes for the same drag
+  speed. Also worth double-checking the Zoom slider isn't hit by the same
+  clamp-on-a-delta pattern (`f` IS run through `ax()` currently, and zoom
+  writes into `moveRef.current.f` the same way `orbit`'s yaw/pit did — if
+  zoom's `f` value also regularly exceeds 1 before clamping, the Zoom slider
+  could have an identical bug, just not yet reported).
+- Still open: the `.app-shell`/`.workspace` flex-overflow audit for the
+  in-app status bar clipping.
+
+## Previous Session (2026-07-06, cont.) - Measure Lines Not in Stream + Desktop Controls Didn't Match PC
+
+Two user-reported follow-ups, both real bugs.
+
+### Bug 1: "Measure lines are not appearing in Web App"
+Root cause: the web-remote video capture happens on the raw post-EDL
+backbuffer **before any ImGui drawing occurs** (`main.cpp` ~1533, comment:
+"Backbuffer now holds the post-EDL scene and no UI yet"). The measurement
+polyline was drawn entirely via `ImGui::GetForegroundDrawList()`, which only
+rasterizes later in the frame — so it never reached the captured frame,
+even though the numeric point list (via `cfg.measurePts`) was already
+correctly showing in the ToolsTab. Restructuring to a split ImGui
+render (draw-some/capture/draw-rest) was considered and rejected as too
+invasive/risky for what's needed.
+
+**Fix**: the polyline (lines + point markers) is now drawn as **real GL
+geometry**, baked into the same offscreen FBO the point cloud renders to —
+inside `renderPass()` itself, right after the octree traversal, so it uses
+that eye's exact `vp` matrix (correct for both mono and stereo SBS) and gets
+captured by the stream like any other scene content. New tiny shader pair
+(`kLineVertSrc`/`kLineFragSrc` in `EmbeddedShaders.h`, `Shader lineShader` +
+a small dynamic VBO in `main.cpp`) — position-only, flat colour, drawn with
+depth test disabled (matches the old ImGui overlay's always-on-top look).
+The ImGui overlay now draws **only** the per-segment distance text labels
+(no GL text renderer exists, so labels stay PC-only) — the old
+`AddCircleFilled`/`AddCircle`/`AddLine` calls were removed to avoid double-
+drawing the same geometry twice.
+
+**Caught while implementing**: `GL_PROGRAM_POINT_SIZE` is already enabled
+once globally at init for the point-cloud shader's `gl_PointSize`. My first
+draft toggled it off after drawing the measurement points, which would have
+broken the *second* eye's point-cloud rendering in stereo SBS mode (state
+leaks across the two `renderPass` calls in the same frame). Fixed by not
+touching that global state at all — the shader's own `gl_PointSize` write
+is all that's needed. Depth-test on/off is contained within the same block
+and safe.
+
+### Bug 2: "Windows controls not working... should be same as C++ app"
+Follow-up to last session's desktop input work — I had *invented* a mapping
+(left-drag=look, right-drag=pan) without checking the native app's actual
+scheme first. Checked `main.cpp`'s real `SDL_MOUSEBUTTONDOWN` handlers:
+**LMB = orbit** (rotates the camera *position* around a pivot,
+`Camera::orbit`), **RMB = free-look** (`Camera::addYawPitch`, no position
+change), wheel = zoom, **Q/E = down/up** (not Space/Ctrl), Shift = 5x boost.
+
+Free-look was already replicable remotely (the existing `yaw`/`pit` move
+fields feed `addYawPitch` either way) — but **orbit was not**: it needs a
+server-maintained pivot point re-established each drag-start, which no
+existing remote input carried.
+
+**Fix**:
+- New `orbit: 0|1` field on the `move` WS message (`RemoteServer`: new
+  `std::atomic<bool> orbit`, parsed alongside f/s/u/yaw/pit/boost, exposed
+  via `RemoteServer::orbit()`, PF_WITH_REMOTE-absent stub returns `false`).
+- `main.cpp`'s remote-input block now branches: `remote.orbit()` true ->
+  on the rising edge (drag start) recompute `pivot = cam.position +
+  cam.front()*dist` exactly like the local LMB handler, then call
+  `cam.orbit(dYaw, dPit, pivot)` every tick; otherwise (RMB-equivalent) the
+  unchanged `cam.addYawPitch(dYaw, dPit)` path. `Camera::orbit()` internally
+  calls `addYawPitch` with identical units, so no rescaling was needed.
+- `FlyTab.tsx`: **left-drag now sends `orbit:1`** while held (matches LMB);
+  **right-drag is free-look** (matches RMB, previously incorrectly mapped
+  to "pan" — dropped, since the PC has no mouse-pan at all); LMB is still
+  reclaimed for tap-to-measure while the Measure tool is active (matching
+  the PC exactly — confirmed RMB free-look correctly keeps working while
+  measuring on the PC too, so the client's `measuringRef` early-return was
+  narrowed to LMB only, not both buttons). Keyboard: `Space`/`Ctrl`/`C` ->
+  **`Q`/`E`** for down/up, matching `main.cpp`'s `SDL_SCANCODE_Q`/`_E`
+  exactly. The Pan sensitivity slider is now touch-only (hidden on desktop,
+  since there's no mouse gesture left that uses it).
+- Touch gestures are unchanged (still simple unified look/pinch, no
+  orbit-vs-look distinction — reasonable for a single-finger surface, and
+  not what was reported).
+
+### Verified
+- `npm run build` and `cmake --build ... pfview` both clean.
+- Embedded web hash confirmed matching `webremote/dist/assets/*` (`v1.0.12`).
+- NOT yet tested live: neither the GL-rendered polyline (does it actually
+  show correctly in a real stream frame, at the right screen position) nor
+  the remote-orbit pivot math (does a LMB-drag on the web app orbit around
+  the same point a local LMB-drag would) have been checked against a running
+  exe with a loaded cloud.
+
+### Modified files
+- src/viewer/EmbeddedShaders.h (kLineVertSrc/kLineFragSrc)
+- src/viewer/main.cpp (line-shader setup + draw call in renderPass; ImGui
+  overlay trimmed to text-labels-only; remote orbit wiring)
+- src/viewer/RemoteServer.h, RemoteServer.cpp (orbit field + accessor + stub)
+- webremote/src/FlyTab.tsx (LMB=orbit/RMB=look swap, Q/E keys, Pan hidden on desktop)
+- webremote/src/App.tsx (orbit field threaded through the 30 Hz move loop)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Live-verify both fixes against a loaded cloud: (1) start Measure from the
+  web app, place a couple of points, confirm the yellow polyline is visible
+  *in the video stream itself*, not just the PC's own window; (2) LMB-drag
+  on the web app (desktop browser) and confirm it orbits around the same
+  point a local LMB-drag would, RMB-drag free-looks, Q/E move up/down, wheel
+  zooms, Shift boosts.
+- Still open from earlier: `.app-shell`/`.workspace` flex-overflow audit for
+  the in-app status bar clipping.
+
+## Previous Session (2026-07-06, cont.) - Remote Tap-to-Measure
+
+User asked to check the Measure feature from the web app. Diagnosis: the
+Start/Stop/Undo/Clear controls were already correctly wired end-to-end
+(traced `cmd('measure')` -> server -> `cfg.tool` echo), but there was **no
+way to place a point remotely** — points only ever got added by an LMB click
+on the PC's own viewport (`main.cpp:1434`, local mouse ray -> `pickPoint`).
+`FlyTab.tsx`'s touch/mouse-drag overlay had zero awareness of measure mode,
+so tapping the video just looked/panned the camera; nothing added a point.
+User chose to have this built as a real feature rather than just documented.
+
+### What was built
+- **Server** (`main.cpp`): new `measure_pick` remote cmd, active only while
+  `toolMode == TOOL_MEASURE`. Reuses the existing `RemoteCmd` vec3 payload
+  (`v:[nx, ny, 0]`, normalized 0..1) and feeds the exact same `pendingPick`
+  path a local LMB click uses (`cam.screenRay` + `store.pickPoint`) — just
+  computes `pickX/pickY` as `nx*winW`/`ny*winH` instead of reading the SDL
+  mouse position. Since the video stream is a downscaled copy of the same
+  window (same aspect), this maps 1:1 onto the local pick math with no new
+  ray-casting code.
+- **`VideoLayer.tsx`**: `VideoLayerHandle` gains `getNaturalSize()` — reads
+  `videoWidth/videoHeight` (WebRTC) or `naturalWidth/naturalHeight` (JPEG
+  `<img>`), i.e. the actual decoded frame resolution, not the CSS box.
+  Needed to correctly invert `object-fit:contain`'s letterboxing.
+- **`FlyTab.tsx`**: new `measuring`/`send`/`getVideoNaturalSize` props.
+  `toVideoNormalized(clientX, clientY)` maps a viewport-relative point
+  through the letterbox math back to 0..1 video-content coordinates,
+  returning `null` if the point falls in a letterbox bar (untappable) or no
+  frame has decoded yet. A short tap/left-click (moved less than
+  `TAP_MOVE_THRESHOLD`=10px between press and release, tracked separately
+  from the continuously-updated look-drag delta) fires `sendMeasurePick`;
+  anything longer is treated as a drag as before. While `measuring`, the
+  primary pointer's look/pan is suspended entirely (matches the PC's "measure
+  mode reclaims LMB" — right-drag pan and wheel zoom stay active). Footer
+  hint changes to "Tap the video to place a measurement point".
+- **`ToolsTab.tsx`**: added the same hint line under the Start/Stop button.
+
+### Verified
+- `npm run build` clean; `cmake --build ... pfview` clean (both TSX and the
+  new C++ `measure_pick` branch compile with no errors/warnings).
+- Embedded web hash confirmed matching `webremote/dist/assets/*` exactly
+  (`v1.0.10`).
+- NOT yet tested against a live connection — needs a real loaded cloud +
+  phone/desktop browser session to confirm a tap actually lands a point at
+  the correct 3D location (the letterbox math is unit-reasoned, not
+  measured against a real stream yet).
+
+### Modified files
+- src/viewer/main.cpp (`measure_pick` cmd handler)
+- webremote/src/VideoLayer.tsx (`getNaturalSize`)
+- webremote/src/FlyTab.tsx (tap-to-pick, measuring-aware input)
+- webremote/src/App.tsx (wires `measuring`/`send`/`getVideoNaturalSize` into FlyTab)
+- webremote/src/ToolsTab.tsx (hint text)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe with a real cloud, enable Measure from the web app,
+  and tap the video at a known feature — confirm the placed point lands
+  where expected (verifies both the letterbox-inversion math and the
+  server's `nx*winW`/`ny*winH` mapping together).
+- Test at a non-16:9 window size / narrow inspector width specifically,
+  since that's where letterboxing (and thus the correction math) actually
+  matters — a coincidentally-matching aspect ratio would pass even with a
+  broken letterbox calculation.
+
+## Previous Session (2026-07-06, cont.) - Desktop Camera Input, Dropdown, Slider Audit
+
+Closes the "Windows controls not working from web app via Computer browser"
+report, plus a full slider-wiring audit and two smaller UI fixes.
+
+### Root cause of "speed slider does nothing" / "controls not working"
+`FlyTab.tsx` only ever wired **touch** events (`onTouchStart/Move/End`) — a
+desktop browser has no touch surface, so opening the web remote on a Windows
+PC had **zero** camera-movement input at all (mouse-drag did nothing; the
+only thing that worked was mouse-clicking the UP/DOWN/BOOST hold buttons,
+since those use pointer events). With no baseline movement to scale, the
+Speed slider had nothing to visibly multiply — it was never actually broken,
+there was just no motion for it to act on.
+
+### Fix — desktop mouse + keyboard input (FlyTab.tsx)
+Added a parallel input path, gated on `matchMedia('(pointer: fine)')`
+(desktop/mouse), alongside the existing untouched touch path:
+- **Left-drag** → look (same yaw/pitch math as 1-finger touch, reusing the
+  Look sensitivity slider).
+- **Right-drag** → pan (reuses the Pan slider; `stage` gets
+  `onContextMenu` suppressed on desktop so the browser context menu doesn't
+  interrupt the drag).
+- **Wheel** → zoom (reuses the Zoom slider).
+- **WASD** → fly forward/back/strafe, **Space/Ctrl/C** → up/down, **Shift**
+  → boost — window-level keydown/keyup (ignored while focus is in a text
+  input), applied through the same `heldState` ref the UP/DOWN/BOOST buttons
+  already used, extended to also cover `f`/`s`.
+- Mouse-drag listeners are attached at `window` level (not the stage element)
+  so a drag started inside the viewport keeps tracking even if the cursor
+  leaves it — matches how a native FPS-style camera control normally feels.
+- The "Gesture Sensitivity" panel becomes "Mouse & Keyboard" on desktop, the
+  pinch-mode toggle (a touch-only concept) is hidden, and the instruction
+  footer text updates to describe the new controls.
+
+### Slider wiring audit (user asked to check all sliders)
+Cross-referenced every `Slider`/`Toggle` in `DisplayTab.tsx`, `CameraTab.tsx`,
+`ToolsTab.tsx`, and `ActionBar.tsx` against `SettableKey` (`cfg.ts`) and the
+server's `set.<key>` handler table (`main.cpp` ~1182-1209). **All of them are
+correctly wired end-to-end** — no missing/mismatched keys found. The
+`camSpeedMultiplier` path itself is also correct server-side (`set.speed` and
+the `speed` one-shot cmd both update it, and it's applied to remote-driven
+movement at `main.cpp:1167`) — confirms the "speed does nothing" symptom was
+purely the "no movement to scale" root cause above, not a wiring bug.
+
+### Other fixes
+- **Property panel rail padding**: `.inspector-tab`/`.inspector-icon-rail`
+  widened 48px -> 60px with `padding: 0 6px`, letter-spacing trimmed
+  0.05em -> 0.03em — "DISPLAY" (the widest label) was cramped against the
+  divider. Verified via a detached-DOM measurement at desktop width: 60px
+  box, "DISPLAY" text (42px) comfortably inside the 48px content area.
+- **Stream Engine -> dropdown**: the 2-option segmented control
+  ("JPEG (Compat)"/"WebRTC (F...") was visibly truncated in the inspector's
+  default width. Replaced with the existing `Select` dropdown component
+  (same one used for Color mode). Extended `Select` with an optional
+  `disabledOptions` array so WebRTC can render as a disabled `<option>`
+  instead of a disabled segmented button when the server build lacks it.
+
+### Verified
+- `npm run build` clean.
+- Structural checks via `preview_eval` (detached DOM, since the dev preview
+  has no backend to reach the post-auth app shell): inspector-tab renders at
+  60px/9.5px/6px-padding on desktop viewport (was hitting a *different*,
+  correct mobile override at the default narrow preview viewport — false
+  alarm on first check, resolved by resizing to 1600×900); Select dropdown
+  renders with the second option correctly `disabled`.
+- Exe rebuild in progress at handoff time — confirm completion + bump before
+  further work.
+- NOT yet tested against a live connection: the new mouse-drag/wheel/WASD
+  path needs a real desktop-browser session against the running exe to
+  confirm it actually moves the camera (only verified the code compiles and
+  the touch path's existing tests still typecheck).
+
+### Modified files
+- webremote/src/FlyTab.tsx (desktop mouse+keyboard input)
+- webremote/src/controls.tsx (Select gains `disabledOptions`)
+- webremote/src/DisplayTab.tsx (Stream Engine -> Select)
+- webremote/src/index.css (inspector-tab/rail padding)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe, open the web remote from a Windows desktop browser,
+  and confirm: left-drag look, right-drag pan, wheel zoom, WASD movement,
+  Space/Ctrl up-down, Shift boost, and that the Speed slider now visibly
+  changes movement rate.
+- Then the one item still open from earlier: `.app-shell`/`.workspace`
+  flex-overflow audit so the in-app status bar can't be clipped at desktop
+  window sizes (unrelated — that's the native viewer's own status bar, not
+  the web remote's).
+
+## Previous Session (2026-07-06, cont.) - Build System Bug: Exe Was Embedding a Stale Web Build
+
+User reported the exe didn't reflect the latest webremote changes. Root cause
+was in the build system, not the app — every rebuild this session had
+silently linked against a **stale** `EmbeddedWeb.h`.
+
+### Root cause
+`CMakeLists.txt`'s web-embedding step was `add_custom_command(OUTPUT
+EmbeddedWeb.h DEPENDS web_build ...)`. `web_build` (an `ALL` custom target)
+reliably reran `npm run build` every invocation, correctly refreshing
+`webremote/dist/*` with new content-hashed filenames each time. But the
+*downstream* step's `DEPENDS web_build` names a **target**, not a file — the
+Visual Studio generator has no file timestamp to compare, so it could not
+reliably tell the header needed regenerating and sometimes skipped it. Caught
+by comparing mtimes directly: `EmbeddedWeb.h` was stamped ~13:17 in
+[Previous Session] while several *later* builds (13:39, 13:41, 14:00...) kept
+relinking the exe without ever touching it — every one of those exes silently
+shipped an old web build despite the build log showing `npm run build`
+succeed each time.
+
+### Fix
+Converted `embed_web_header` to a plain `add_custom_target(... ALL)` that
+always runs `tools/embed_web.cmake` — the same always-run pattern already
+used successfully by `web_build`, `version_header`, and the exe-rename
+`POST_BUILD` step (see decisions.md). Verified: rebuilt, and
+`EmbeddedWeb.h`'s embedded hashed filenames (`index-BSgfsghI.js`,
+`index-DrDHFgQ7.css`) now match `webremote/dist/assets/*` exactly, with
+`dist/index.html` (13:17:56) -> `EmbeddedWeb.h` (13:17:57) -> exe link
+(13:18:07) in correct sequence.
+
+### Modified files
+- CMakeLists.txt (embed_web_header target)
+- docs/{decisions,ai_handoff}.md
+
+### Next Recommended Task
+- **Important**: every exe built earlier this session (`v101`-`v106`) may
+  have shipped a stale web UI depending on exactly when the staleness first
+  crept in — only `v107` onward is verified correct. If any of those earlier
+  exes were shared/tested, re-verify or just use `v107+`.
+- Then resume the still-open items: desktop browser mouse/keyboard camera
+  control, and the `.app-shell`/`.workspace` flex-overflow audit for the
+  in-app status bar.
+
+## Previous Session (2026-07-06, cont.) - Connect Screen: Centered Pair + Orientation Layout
 
 Follow-up fixes to the premium connect-screen redesign (same branch,
 `minor-fixes`), driven by a screenshot showing the branding panel and auth

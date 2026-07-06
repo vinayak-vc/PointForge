@@ -123,9 +123,12 @@ export interface SelectProps {
   onChange: (index: number) => void;
   label?: string;
   ariaLabel?: string;
+  /** Per-option disabled flags, same length/order as `options` (e.g. a
+   *  transport that isn't available on this server build). */
+  disabledOptions?: readonly boolean[];
 }
 
-export function Select({ options, value, onChange, label, ariaLabel }: SelectProps) {
+export function Select({ options, value, onChange, label, ariaLabel, disabledOptions }: SelectProps) {
   const control = (
     <span className="select-wrap">
       <select
@@ -135,7 +138,7 @@ export function Select({ options, value, onChange, label, ariaLabel }: SelectPro
         onChange={(e) => onChange(Number(e.target.value))}
       >
         {options.map((opt, i) => (
-          <option key={opt} value={i}>
+          <option key={opt} value={i} disabled={disabledOptions?.[i]}>
             {opt}
           </option>
         ))}

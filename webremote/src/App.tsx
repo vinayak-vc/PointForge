@@ -177,9 +177,9 @@ export default function App() {
     let wasActive = false;
     const id = setInterval(() => {
       const m = moveRef.current;
-      const active = m.f !== 0 || m.s !== 0 || m.u !== 0 || m.yaw !== 0 || m.pit !== 0 || m.boost !== 0;
+      const active = m.f !== 0 || m.s !== 0 || m.u !== 0 || m.yaw !== 0 || m.pit !== 0 || m.boost !== 0 || m.orbit !== 0;
       if (active || wasActive) {
-        send({ t: 'move', f: round3(m.f), s: round3(m.s), u: m.u, yaw: round3(m.yaw), pit: round3(m.pit), boost: m.boost });
+        send({ t: 'move', f: round3(m.f), s: round3(m.s), u: m.u, yaw: round3(m.yaw), pit: round3(m.pit), boost: m.boost, orbit: m.orbit });
         moveRef.current.f = 0;
         moveRef.current.s = 0;
         moveRef.current.u = 0;
@@ -253,7 +253,14 @@ export default function App() {
             className="viewport-watermark"
           />
           <VideoLayer ref={videoLayerRef} rtcStream={stream} type={streamType} />
-          <FlyTab moveRef={moveRef} lastState={lastState} status={status} />
+          <FlyTab
+            moveRef={moveRef}
+            lastState={lastState}
+            status={status}
+            measuring={cfg?.tool === 1}
+            send={send}
+            getVideoNaturalSize={() => videoLayerRef.current?.getNaturalSize() ?? null}
+          />
           <Legend cfg={cfg} />
         </div>
 
