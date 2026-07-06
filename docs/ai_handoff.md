@@ -1,6 +1,101 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-03, cont.) - Web Remote UX Polishing & Orbit Snapping Bugfix
+## Latest Session (2026-07-06) - Legend UI Fixes + Auto-Versioned Builds
+
+UI-only pass (no functional/protocol changes) requested by the user, plus an
+auto-incrementing build version number.
+
+### What was built / Fixed
+- **Color-mode dropdown**: React `DisplayTab.tsx`'s 5-option Color `Segmented`
+  control (which visibly overflowed/clipped "Intensity"/"Classification" in
+  screenshots) replaced with a new `Select` dropdown component (`controls.tsx`)
+  — mutually-exclusive modes read better as a `<select>` than a segmented row.
+- **Elevation/intensity legend moved beside the Properties panel** (C++ viewer,
+  `main.cpp` ~1613-1673): the legend now queries `ImGui::FindWindowByName("Properties")`
+  and anchors just left of it **only if the panel truly abuts the window's
+  right edge** (guards against a left-docked/floating Properties dragging the
+  legend on top of itself — a review-caught bug); falls back to hugging the
+  window edge when the panel is closed or not right-docked. Title width is now
+  included in the reserved layout width (previously "Intensity" — wider than
+  its "max"/"0" labels — could overshoot the reserved bar+label width and, in
+  SBS, bleed across the eye split — also review-caught and fixed).
+- **Legend now survives hide-UI (zen/F5) and renders in SBS**: old gate was
+  `!stereoSBS` only (suppressed in 3D, visible in zen); new code drops the SBS
+  suppression and instead draws the legend **once per eye** with the same
+  ±15px negative-parallax offset the watermark uses (`main.cpp` ~1547-1568 is
+  the copied pattern), so it fuses correctly through a stereoscope.
+- **React app got the same legend**: new `webremote/src/Legend.tsx`, a
+  click-through viewport-corner overlay using a CSS turbo-ramp gradient +
+  zmin/zmax labels. Required a new additive server->client cfg key: `zmin`
+  (`RemoteConfig::zMin` in `RemoteServer.h`, `{"zmin":c.zMin}` in
+  `publishConfig`, filled from `store.cube(store.rootIndex()).min[2]` in
+  `main.cpp`) since the client previously had no elevation range at all
+  (only `cubeSize`, which gives zmax-zmin but not an absolute zmin).
+- **General UX pass** (webremote, CSS/markup only): `.seg` flex->CSS-grid so
+  segmented options wrap instead of clipping (also fixed the "JPEG (Compat)" /
+  "WebRTC (Fast)" stream-engine picker and the 4-option render-quality one);
+  safe-area insets on toolbar/status-bar/fly-overlays for notched phones;
+  `100dvh`/`46dvh` so the mobile bottom-sheet inspector tracks the visual
+  viewport; `@media (pointer: coarse)` target-size bump; mobile toolbar
+  dedup (Camera-tab-duplicated preset/toggle buttons hidden under
+  `.toolbar-group--dup` on phones, speed slider hidden — Camera tab/gesture
+  panel already cover them); connect-screen `overflow-y:auto` +
+  `justify-content: safe center` (was clipping the keypad on short phones);
+  `--text-3` contrast raised to meet WCAG AA; PIN input made typeable
+  (`inputMode="numeric"`, was `readOnly`); lucide `ZoomIn`/`Hand` icons
+  replacing raw emoji in the pinch-mode toggle; stream-quality buttons wrapped
+  in an `aria-label`d group; `aria-pressed` added to Segmented/quality buttons.
+- **Auto-incrementing build version**: `VERSION` file + `tools/bump_version.cmake`
+  (new `ALL` custom target `version_header`) stamp `src/viewer/Version.h`
+  (`PF_VERSION_STRING`) on every build and bump the patch number for the next
+  one. Shown small in the status bar (`v1.0.N`, next to the FPS/GPU stats) and
+  embedded as the exe's real Win32 file-version metadata (`app.rc`'s
+  `1 VERSIONINFO` block — see decisions.md for two build-system gotchas hit
+  along the way: `cmake -P` needs explicit `-D` path args, and the resource ID
+  must be the literal `1`, not the undefined `VS_VERSION_INFO` macro).
+- Reviewed via an adversarial multi-agent pass (C++/React/CSS/coverage
+  dimensions, each finding independently re-verified); the two confirmed
+  findings (title-width overshoot, dock-side assumption) are the fixes
+  described above — everything else proposed did not survive verification.
+
+### Verified
+- `npm run build` (tsc --noEmit + vite) clean.
+- `cmake --build build-static --config Release --target pfview` clean; exe
+  relinked as `build-static/Release/ViitorXPCViewer.exe` with the new webremote
+  embedded and `FileVersion`/`ProductVersion` = 1.0.1 confirmed via
+  `[System.Diagnostics.FileVersionInfo]::GetVersionInfo(...)`.
+- NOT yet visually verified in a running instance against a loaded cloud (no
+  `pfview` launch + screenshot pass this session) — do that before merge.
+
+### Modified files
+- src/viewer/main.cpp (legend layout/anchor/SBS/zen, RemoteConfig.zMin fill,
+  Version.h include + status-bar version text)
+- src/viewer/RemoteServer.h, RemoteServer.cpp (RemoteConfig::zMin, "zmin" cfg key)
+- src/viewer/app.rc (VERSIONINFO resource)
+- CMakeLists.txt (version_header custom target + pfview dependency)
+- tools/bump_version.cmake (new)
+- VERSION (new, auto-managed — do not hand-edit the patch number)
+- .gitignore (ignore generated src/viewer/Version.h)
+- webremote/src/controls.tsx (new `Select` component, `aria-pressed` on Segmented)
+- webremote/src/DisplayTab.tsx (Color mode -> Select)
+- webremote/src/Legend.tsx (new)
+- webremote/src/cfg.ts (Cfg.zmin)
+- webremote/src/App.tsx (mount Legend, typeable PIN, keypad aria-labels)
+- webremote/src/ActionBar.tsx (toolbar-group--dup classes, stream-quality group)
+- webremote/src/StatusHUD.tsx (status-chip classes replacing inline styles)
+- webremote/src/FlyTab.tsx (lucide icons replacing emoji)
+- webremote/src/index.css (full UX pass — see above)
+- docs/{tasks,decisions,ai_handoff}.md
+
+### Next Recommended Task
+- Launch `ViitorXPCViewer.exe` against a loaded cloud and visually verify: the
+  legend sits beside Properties (and at the window edge when closed), persists
+  through F5 zen and F9 SBS (twice, fused), and doesn't clip in either mode at
+  a couple of window sizes/uiScale values. Same check on the phone webremote
+  (Legend overlay + dropdown + mobile toolbar dedup).
+- Then resume the pre-existing next task: merge `webapp-controller` into `main`.
+
+## Previous Session (2026-07-03, cont.) - Web Remote UX Polishing & Orbit Snapping Bugfix
 
 ### What was built / Fixed
 - **Orbit Snapping Bug (C++ App)**: The user reported the camera violently snapping when left-clicking to orbit after right-clicking to look. This was because the `pivot` coordinate was being left stale when the camera rotation changed. Fixed in `main.cpp` by re-projecting the pivot directly onto the camera's current forward axis right as the left-click drag starts, preserving distance without teleporting the camera.

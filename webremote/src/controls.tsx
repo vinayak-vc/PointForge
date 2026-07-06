@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react';
+import { ChevronDown } from 'lucide-react';
 import { hexToRgb, rgbToHex } from './cfg';
 import type { Vec3 } from './cfg';
 
-// Premium shared building blocks: Card, Slider, Toggle, Segmented, ColorRow.
-// Same API as before — only markup/styling upgraded.
+// Premium shared building blocks: Card, Slider, Toggle, Segmented, Select,
+// ColorRow. Same API as before — only markup/styling upgraded.
 
 // -------------------------------------------------------------------- Card
 
@@ -102,12 +103,52 @@ export function Segmented({ options, value, onChange, ariaLabel }: SegmentedProp
           key={opt}
           type="button"
           className={`seg-btn${i === value ? ' active' : ''}`}
+          aria-pressed={i === value}
           onClick={() => onChange(i)}
         >
           {opt}
         </button>
       ))}
     </div>
+  );
+}
+
+// ------------------------------------------------------------------ Select
+
+// Dropdown for mutually-exclusive lists too long for a Segmented control
+// (native <select> keeps OS/mobile picker behaviour; styled to match).
+export interface SelectProps {
+  options: readonly string[];
+  value: number;
+  onChange: (index: number) => void;
+  label?: string;
+  ariaLabel?: string;
+}
+
+export function Select({ options, value, onChange, label, ariaLabel }: SelectProps) {
+  const control = (
+    <span className="select-wrap">
+      <select
+        className="select"
+        value={value}
+        aria-label={ariaLabel ?? label}
+        onChange={(e) => onChange(Number(e.target.value))}
+      >
+        {options.map((opt, i) => (
+          <option key={opt} value={i}>
+            {opt}
+          </option>
+        ))}
+      </select>
+      <ChevronDown size={14} className="select-chevron" aria-hidden="true" />
+    </span>
+  );
+  if (!label) return control;
+  return (
+    <label className="select-row">
+      <span>{label}</span>
+      {control}
+    </label>
   );
 }
 

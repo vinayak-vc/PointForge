@@ -44,8 +44,8 @@ export default function ActionBar({
         <span className="toolbar-brand-name">ViitorXPC</span>
       </div>
 
-      {/* View presets */}
-      <div className="toolbar-group">
+      {/* View presets (duplicated in the Camera tab — hidden on phones) */}
+      <div className="toolbar-group toolbar-group--dup">
         <button className="toolbar-btn" onClick={cmd('frame')} title="Frame all points">
           <Frame size={13} /> Frame
         </button>
@@ -60,10 +60,10 @@ export default function ActionBar({
         </button>
       </div>
 
-      <div className="toolbar-divider" />
+      <div className="toolbar-divider toolbar-group--dup" />
 
-      {/* View toggles */}
-      <div className="toolbar-group">
+      {/* View toggles (duplicated in the Camera tab — hidden on phones) */}
+      <div className="toolbar-group toolbar-group--dup">
         <button
           className={`toolbar-btn${cfg?.ortho ? ' active' : ''}`}
           onClick={() => { if (cfg) setValue('ortho', !cfg.ortho); }}
@@ -87,7 +87,7 @@ export default function ActionBar({
         </button>
       </div>
 
-      <div className="toolbar-divider" />
+      <div className="toolbar-divider toolbar-group--dup" />
 
       {/* Capture */}
       <div className="toolbar-group">
@@ -112,15 +112,21 @@ export default function ActionBar({
               {videoOn ? <Wifi size={13} /> : <WifiOff size={13} />}
               {videoOn ? 'Live' : 'Stream'}
             </button>
-            {videoOn && VQ_OPTIONS.map(([q, label]) => (
-              <button
-                key={q}
-                className={`toolbar-btn${videoQuality === q ? ' active' : ''}`}
-                onClick={() => onVideoQuality(q)}
-              >
-                {label}
-              </button>
-            ))}
+            {videoOn && (
+              <div className="toolbar-group" role="group" aria-label="Stream quality">
+                {VQ_OPTIONS.map(([q, label]) => (
+                  <button
+                    key={q}
+                    className={`toolbar-btn${videoQuality === q ? ' active' : ''}`}
+                    aria-pressed={videoQuality === q}
+                    title={`Stream quality: ${label}`}
+                    onClick={() => onVideoQuality(q)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}

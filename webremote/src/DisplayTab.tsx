@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Cfg, SetValueFn } from './cfg';
-import { Card, ColorRow, Segmented, Slider, Toggle } from './controls';
+import { Card, ColorRow, Segmented, Select, Slider, Toggle } from './controls';
 
 // Display tab: render quality, point size, color mode (+ solid color when
 // colorMode==2), EDL, background, and an Advanced section (LOD/GPU budgets,
@@ -73,9 +73,10 @@ export default function DisplayTab({ cfg, setValue, streamType }: DisplayTabProp
       </Card>
 
       <Card title="Color">
-        <Segmented
+        <Select
+          label="Mode"
           ariaLabel="Color mode"
-          options={['True Color', 'Elevation', 'Solid', 'Intensity', 'Classification']}
+          options={['True Color', 'Elevation', 'Solid Color', 'Intensity', 'Classification']}
           value={cfg.colorMode}
           onChange={(i) => setValue('colorMode', i)}
         />

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import type { StateMsg, WsStatus } from './useWebSocket';
-import { ChevronUp, ChevronDown, Zap } from 'lucide-react';
+import { ChevronUp, ChevronDown, Hand, Zap, ZoomIn } from 'lucide-react';
 
 // Fly page: premium glass controls overlay. All gesture logic is preserved
 // exactly — only the visual layout has been upgraded.
@@ -226,14 +226,14 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
             onTouchEnd={e => { e.stopPropagation(); setPinchMode('zoom'); }}
             onClick={() => setPinchMode('zoom')}
           >
-            🔍 Zoom
+            <ZoomIn size={12} /> Zoom
           </button>
           <button
             className={`pinch-toggle-btn${pinchMode === 'pan' ? ' active' : ''}`}
             onTouchEnd={e => { e.stopPropagation(); setPinchMode('pan'); }}
             onClick={() => setPinchMode('pan')}
           >
-            ✋ Pan
+            <Hand size={12} /> Pan
           </button>
         </div>
       </div>

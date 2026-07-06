@@ -56,16 +56,16 @@ export default function StatusHUD({ state, status }: StatusHUDProps) {
 
           {/* File */}
           {state.file && (
-            <div className="status-chip">
+            <div className="status-chip status-chip--file">
               <FileText />
               <span className="status-chip-val">{state.file}</span>
             </div>
           )}
 
           {/* Position */}
-          <div className="status-chip" style={{ marginLeft: 'auto', flexShrink: 0 }}>
+          <div className="status-chip status-chip--pos">
             <MapPin />
-            <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: 10 }}>
+            <span className="status-chip-val">
               {state.pos[0].toFixed(1)}, {state.pos[1].toFixed(1)}, {state.pos[2].toFixed(1)}
             </span>
           </div>
