@@ -1,6 +1,71 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Desktop Camera Input, Dropdown, Slider Audit
+## Latest Session (2026-07-06, cont.) - Remote Tap-to-Measure
+
+User asked to check the Measure feature from the web app. Diagnosis: the
+Start/Stop/Undo/Clear controls were already correctly wired end-to-end
+(traced `cmd('measure')` -> server -> `cfg.tool` echo), but there was **no
+way to place a point remotely** — points only ever got added by an LMB click
+on the PC's own viewport (`main.cpp:1434`, local mouse ray -> `pickPoint`).
+`FlyTab.tsx`'s touch/mouse-drag overlay had zero awareness of measure mode,
+so tapping the video just looked/panned the camera; nothing added a point.
+User chose to have this built as a real feature rather than just documented.
+
+### What was built
+- **Server** (`main.cpp`): new `measure_pick` remote cmd, active only while
+  `toolMode == TOOL_MEASURE`. Reuses the existing `RemoteCmd` vec3 payload
+  (`v:[nx, ny, 0]`, normalized 0..1) and feeds the exact same `pendingPick`
+  path a local LMB click uses (`cam.screenRay` + `store.pickPoint`) — just
+  computes `pickX/pickY` as `nx*winW`/`ny*winH` instead of reading the SDL
+  mouse position. Since the video stream is a downscaled copy of the same
+  window (same aspect), this maps 1:1 onto the local pick math with no new
+  ray-casting code.
+- **`VideoLayer.tsx`**: `VideoLayerHandle` gains `getNaturalSize()` — reads
+  `videoWidth/videoHeight` (WebRTC) or `naturalWidth/naturalHeight` (JPEG
+  `<img>`), i.e. the actual decoded frame resolution, not the CSS box.
+  Needed to correctly invert `object-fit:contain`'s letterboxing.
+- **`FlyTab.tsx`**: new `measuring`/`send`/`getVideoNaturalSize` props.
+  `toVideoNormalized(clientX, clientY)` maps a viewport-relative point
+  through the letterbox math back to 0..1 video-content coordinates,
+  returning `null` if the point falls in a letterbox bar (untappable) or no
+  frame has decoded yet. A short tap/left-click (moved less than
+  `TAP_MOVE_THRESHOLD`=10px between press and release, tracked separately
+  from the continuously-updated look-drag delta) fires `sendMeasurePick`;
+  anything longer is treated as a drag as before. While `measuring`, the
+  primary pointer's look/pan is suspended entirely (matches the PC's "measure
+  mode reclaims LMB" — right-drag pan and wheel zoom stay active). Footer
+  hint changes to "Tap the video to place a measurement point".
+- **`ToolsTab.tsx`**: added the same hint line under the Start/Stop button.
+
+### Verified
+- `npm run build` clean; `cmake --build ... pfview` clean (both TSX and the
+  new C++ `measure_pick` branch compile with no errors/warnings).
+- Embedded web hash confirmed matching `webremote/dist/assets/*` exactly
+  (`v1.0.10`).
+- NOT yet tested against a live connection — needs a real loaded cloud +
+  phone/desktop browser session to confirm a tap actually lands a point at
+  the correct 3D location (the letterbox math is unit-reasoned, not
+  measured against a real stream yet).
+
+### Modified files
+- src/viewer/main.cpp (`measure_pick` cmd handler)
+- webremote/src/VideoLayer.tsx (`getNaturalSize`)
+- webremote/src/FlyTab.tsx (tap-to-pick, measuring-aware input)
+- webremote/src/App.tsx (wires `measuring`/`send`/`getVideoNaturalSize` into FlyTab)
+- webremote/src/ToolsTab.tsx (hint text)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe with a real cloud, enable Measure from the web app,
+  and tap the video at a known feature — confirm the placed point lands
+  where expected (verifies both the letterbox-inversion math and the
+  server's `nx*winW`/`ny*winH` mapping together).
+- Test at a non-16:9 window size / narrow inspector width specifically,
+  since that's where letterboxing (and thus the correction math) actually
+  matters — a coincidentally-matching aspect ratio would pass even with a
+  broken letterbox calculation.
+
+## Previous Session (2026-07-06, cont.) - Desktop Camera Input, Dropdown, Slider Audit
 
 Closes the "Windows controls not working from web app via Computer browser"
 report, plus a full slider-wiring audit and two smaller UI fixes.

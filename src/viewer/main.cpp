@@ -1216,6 +1216,15 @@ int main(int argc, char** argv) {
                 else if (rc.name == "reset_view" && octreeLoaded) setupCamera();
                 else if (rc.name == "measure" && octreeLoaded)
                     toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                else if (rc.name == "measure_pick" && octreeLoaded && toolMode == TOOL_MEASURE && rc.hasVec) {
+                    // vec[0]/vec[1] are the tap's normalized (0..1) position within
+                    // the streamed video frame; since the stream is a downscaled
+                    // copy of this same window (same aspect), that maps directly
+                    // onto window pixel coords for the existing pick path below.
+                    pendingPick = true;
+                    pickX = (int)(std::clamp(rc.vec[0], 0.0f, 1.0f) * winW);
+                    pickY = (int)(std::clamp(rc.vec[1], 0.0f, 1.0f) * winH);
+                }
                 else if (rc.name == "clip_tool" && octreeLoaded)
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();

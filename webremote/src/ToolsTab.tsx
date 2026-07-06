@@ -55,6 +55,7 @@ export default function ToolsTab({ cfg, setValue, send }: ToolsTabProps) {
         >
           {cfg.tool === 1 ? 'Stop measuring' : 'Start measuring'}
         </button>
+        {cfg.tool === 1 && <p className="dim">Tap the video to place a point.</p>}
         <p className="dim">
           {cfg.measurePts.length} point{cfg.measurePts.length === 1 ? '' : 's'} — total{' '}
           {cfg.measureTotal.toFixed(2)}

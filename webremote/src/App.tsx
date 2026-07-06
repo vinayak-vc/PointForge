@@ -253,7 +253,14 @@ export default function App() {
             className="viewport-watermark"
           />
           <VideoLayer ref={videoLayerRef} rtcStream={stream} type={streamType} />
-          <FlyTab moveRef={moveRef} lastState={lastState} status={status} />
+          <FlyTab
+            moveRef={moveRef}
+            lastState={lastState}
+            status={status}
+            measuring={cfg?.tool === 1}
+            send={send}
+            getVideoNaturalSize={() => videoLayerRef.current?.getNaturalSize() ?? null}
+          />
           <Legend cfg={cfg} />
         </div>
 

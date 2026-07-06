@@ -7,7 +7,12 @@ import { ChevronUp, ChevronDown, Hand, Zap, ZoomIn } from 'lucide-react';
 // exactly from before; this adds a parallel desktop input path (mouse +
 // keyboard) for browsers with a fine pointer (mouse), since a desktop
 // browser previously had NO way to move the camera at all — FlyTab only
-// wired touch events.
+// wired touch events. It also adds tap-to-measure: while the server's
+// Measure tool is active, a short tap/click (not a drag) on the video sends
+// its position — mapped through the object-fit:contain letterboxing back to
+// video-content-relative coordinates — as a `measure_pick` cmd, which the
+// server resolves with the exact same screen-ray pick used for a local LMB
+// click (main.cpp's pendingPick path).
 //
 // Gesture summary:
 //   Touch:   1-finger drag → Look; 2-finger drag → Pan or Zoom (pinch mode
@@ -15,12 +20,19 @@ import { ChevronUp, ChevronDown, Hand, Zap, ZoomIn } from 'lucide-react';
 //   Desktop: Left-drag → Look; Right-drag → Pan; Wheel → Zoom; WASD → fly;
 //            Space/Ctrl → up/down; Shift → boost; UP/DOWN/BOOST buttons
 //            also work via mouse click-hold.
+//   Measuring (either input): a short tap/left-click (no drag) places a
+//   measurement point instead of looking around — look/pan is suspended
+//   for the primary pointer while the Measure tool is active, matching the
+//   PC's "measure mode reclaims LMB" behaviour.
 
 export interface MoveValues {
   f: number; s: number; u: number; yaw: number; pit: number; boost: 0 | 1;
 }
 
 export const ZERO_MOVE: MoveValues = { f: 0, s: 0, u: 0, yaw: 0, pit: 0, boost: 0 };
+
+// A press/tap that moved less than this many px is a "tap", not a drag.
+const TAP_MOVE_THRESHOLD = 10;
 
 // ─── HoldButton ─────────────────────────────────────────────────────────────
 interface HoldButtonProps {
@@ -64,9 +76,14 @@ export interface FlyTabProps {
   moveRef: MutableRefObject<MoveValues>;
   lastState: StateMsg | null;
   status: WsStatus;
+  /** True while the server's Measure tool is active (cfg.tool === 1). */
+  measuring?: boolean;
+  send?: (obj: unknown) => void;
+  /** Intrinsic (decoded) frame size, or null if no frame has arrived yet. */
+  getVideoNaturalSize?: () => { w: number; h: number } | null;
 }
 
-export default function FlyTab({ moveRef }: FlyTabProps) {
+export default function FlyTab({ moveRef, measuring = false, send, getVideoNaturalSize }: FlyTabProps) {
   const [lookSpeed, setLookSpeed] = useState(0.2);
   const [panSpeed, setPanSpeed] = useState(0.2);
   const [zoomSpeed, setZoomSpeed] = useState(0.1);
@@ -83,8 +100,9 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
     return () => { ref.current = { ...ZERO_MOVE }; };
   }, [moveRef]);
 
-  // Keep the latest slider values readable inside non-React event callbacks
-  // (window-level mouse/keyboard listeners are attached once, not per-render).
+  // Keep the latest slider/prop values readable inside non-React event
+  // callbacks (window-level mouse/keyboard listeners are attached once, not
+  // re-created per render).
   const pinchModeRef = useRef<'zoom' | 'pan'>('zoom');
   useEffect(() => { pinchModeRef.current = pinchMode; }, [pinchMode]);
   const lookSpeedRef = useRef(lookSpeed);
@@ -93,15 +111,49 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
   useEffect(() => { panSpeedRef.current = panSpeed; }, [panSpeed]);
   const zoomSpeedRef = useRef(zoomSpeed);
   useEffect(() => { zoomSpeedRef.current = zoomSpeed; }, [zoomSpeed]);
+  const measuringRef = useRef(measuring);
+  useEffect(() => { measuringRef.current = measuring; }, [measuring]);
+
+  const stageRef = useRef<HTMLDivElement>(null);
+
+  // Map a viewport-relative point to normalized (0..1) video-content
+  // coordinates, accounting for object-fit:contain letterboxing. Returns
+  // null if the point falls in a letterbox bar (outside actual video
+  // content) or no frame has decoded yet.
+  const toVideoNormalized = (clientX: number, clientY: number): [number, number] | null => {
+    const stage = stageRef.current;
+    const natural = getVideoNaturalSize?.();
+    if (!stage || !natural || natural.w <= 0 || natural.h <= 0) return null;
+    const rect = stage.getBoundingClientRect();
+    const containerAspect = rect.width / rect.height;
+    const videoAspect = natural.w / natural.h;
+    let contentW = rect.width, contentH = rect.height, offsetX = 0, offsetY = 0;
+    if (videoAspect > containerAspect) {
+      contentH = rect.width / videoAspect;
+      offsetY = (rect.height - contentH) / 2;
+    } else {
+      contentW = rect.height * videoAspect;
+      offsetX = (rect.width - contentW) / 2;
+    }
+    const localX = clientX - rect.left - offsetX;
+    const localY = clientY - rect.top - offsetY;
+    if (localX < 0 || localX > contentW || localY < 0 || localY > contentH) return null;
+    return [localX / contentW, localY / contentH];
+  };
+
+  const sendMeasurePick = (clientX: number, clientY: number) => {
+    const n = toVideoNormalized(clientX, clientY);
+    if (!n || !send) return;
+    send({ t: 'cmd', n: 'measure_pick', v: [n[0], n[1], 0] });
+  };
 
   const touchState = useRef({
     mode: 'none' as 'none' | 'look' | 'pan' | 'zoom',
     lastX: 0, lastY: 0,
     midX: 0, midY: 0,
     startDist: 0,
+    pickStartX: 0, pickStartY: 0,
   });
-
-  const stageRef = useRef<HTMLDivElement>(null);
 
   // iOS Safari non-passive listeners to block system pan/zoom
   useEffect(() => {
@@ -131,6 +183,8 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
     if (e.touches.length === 1) {
       state.lastX = e.touches[0].clientX;
       state.lastY = e.touches[0].clientY;
+      state.pickStartX = e.touches[0].clientX;
+      state.pickStartY = e.touches[0].clientY;
       state.mode = 'look';
     } else if (e.touches.length === 2) {
       state.startDist = getDist(e.touches);
@@ -148,8 +202,12 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
     if (state.mode === 'look' && e.touches.length === 1) {
       const dx = e.touches[0].clientX - state.lastX;
       const dy = e.touches[0].clientY - state.lastY;
-      moveRef.current.yaw += dx * lookSpeed;
-      moveRef.current.pit -= dy * lookSpeed;
+      // While measuring, a single-finger drag places/aims a point instead of
+      // looking around — suspend camera look, same as the PC's LMB reclaim.
+      if (!measuringRef.current) {
+        moveRef.current.yaw += dx * lookSpeed;
+        moveRef.current.pit -= dy * lookSpeed;
+      }
       state.lastX = e.touches[0].clientX;
       state.lastY = e.touches[0].clientY;
     } else if (state.mode === 'zoom' && e.touches.length === 2) {
@@ -169,11 +227,17 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
   const handleTouchEnd = (e: React.TouchEvent) => {
     const state = touchState.current;
     if (e.touches.length === 0) {
+      if (measuringRef.current && state.mode === 'look') {
+        const moved = Math.hypot(state.lastX - state.pickStartX, state.lastY - state.pickStartY);
+        if (moved < TAP_MOVE_THRESHOLD) sendMeasurePick(state.lastX, state.lastY);
+      }
       state.mode = 'none';
     } else if (e.touches.length === 1 && state.mode === 'zoom') {
       state.mode = 'look';
       state.lastX = e.touches[0].clientX;
       state.lastY = e.touches[0].clientY;
+      state.pickStartX = e.touches[0].clientX;
+      state.pickStartY = e.touches[0].clientY;
     }
   };
 
@@ -189,8 +253,9 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
     return () => clearInterval(id);
   }, [moveRef]);
 
-  // ── Desktop mouse: left-drag look, right-drag pan, wheel zoom ──────────
-  const mouseState = useRef({ dragging: false, button: 0, lastX: 0, lastY: 0 });
+  // ── Desktop mouse: left-drag look (or tap-to-measure), right-drag pan,
+  //    wheel zoom ─────────────────────────────────────────────────────────
+  const mouseState = useRef({ dragging: false, button: 0, lastX: 0, lastY: 0, startX: 0, startY: 0 });
 
   useEffect(() => {
     if (!isDesktop) return;
@@ -202,26 +267,39 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
       if (m.button === 2) {
         moveRef.current.s += dx * panSpeedRef.current;
         moveRef.current.u += -dy * panSpeedRef.current;
-      } else {
+      } else if (!measuringRef.current) {
         moveRef.current.yaw += dx * lookSpeedRef.current;
         moveRef.current.pit -= dy * lookSpeedRef.current;
       }
       m.lastX = e.clientX;
       m.lastY = e.clientY;
     };
-    const onUp = () => { mouseState.current.dragging = false; };
+    const onUp = (e: MouseEvent) => {
+      const m = mouseState.current;
+      if (!m.dragging) return;
+      m.dragging = false;
+      if (measuringRef.current && m.button !== 2) {
+        const moved = Math.hypot(e.clientX - m.startX, e.clientY - m.startY);
+        if (moved < TAP_MOVE_THRESHOLD) sendMeasurePick(e.clientX, e.clientY);
+      }
+    };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDesktop, moveRef]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!isDesktop) return;
     e.preventDefault();
-    mouseState.current = { dragging: true, button: e.button, lastX: e.clientX, lastY: e.clientY };
+    mouseState.current = {
+      dragging: true, button: e.button,
+      lastX: e.clientX, lastY: e.clientY,
+      startX: e.clientX, startY: e.clientY,
+    };
   };
 
   const handleWheel = (e: React.WheelEvent) => {
@@ -375,7 +453,9 @@ export default function FlyTab({ moveRef }: FlyTabProps) {
 
       {/* ── Instruction footer ── */}
       <div className="instruction-footer">
-        {isDesktop
+        {measuring
+          ? <>Tap the video to place a measurement point</>
+          : isDesktop
           ? <>Drag: Look &nbsp;·&nbsp; Right-drag: Pan &nbsp;·&nbsp; Wheel: Zoom &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; Shift boost</>
           : <>1-finger: Look &nbsp;·&nbsp; 2-finger: {pinchMode === 'zoom' ? 'Pinch Zoom' : 'Pan'} &nbsp;·&nbsp; Toggle mode ↙</>}
       </div>
