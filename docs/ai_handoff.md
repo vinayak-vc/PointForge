@@ -1,6 +1,49 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Connect Screen: Centered Pair + Orientation Layout
+## Latest Session (2026-07-06, cont.) - Build System Bug: Exe Was Embedding a Stale Web Build
+
+User reported the exe didn't reflect the latest webremote changes. Root cause
+was in the build system, not the app — every rebuild this session had
+silently linked against a **stale** `EmbeddedWeb.h`.
+
+### Root cause
+`CMakeLists.txt`'s web-embedding step was `add_custom_command(OUTPUT
+EmbeddedWeb.h DEPENDS web_build ...)`. `web_build` (an `ALL` custom target)
+reliably reran `npm run build` every invocation, correctly refreshing
+`webremote/dist/*` with new content-hashed filenames each time. But the
+*downstream* step's `DEPENDS web_build` names a **target**, not a file — the
+Visual Studio generator has no file timestamp to compare, so it could not
+reliably tell the header needed regenerating and sometimes skipped it. Caught
+by comparing mtimes directly: `EmbeddedWeb.h` was stamped ~13:17 in
+[Previous Session] while several *later* builds (13:39, 13:41, 14:00...) kept
+relinking the exe without ever touching it — every one of those exes silently
+shipped an old web build despite the build log showing `npm run build`
+succeed each time.
+
+### Fix
+Converted `embed_web_header` to a plain `add_custom_target(... ALL)` that
+always runs `tools/embed_web.cmake` — the same always-run pattern already
+used successfully by `web_build`, `version_header`, and the exe-rename
+`POST_BUILD` step (see decisions.md). Verified: rebuilt, and
+`EmbeddedWeb.h`'s embedded hashed filenames (`index-BSgfsghI.js`,
+`index-DrDHFgQ7.css`) now match `webremote/dist/assets/*` exactly, with
+`dist/index.html` (13:17:56) -> `EmbeddedWeb.h` (13:17:57) -> exe link
+(13:18:07) in correct sequence.
+
+### Modified files
+- CMakeLists.txt (embed_web_header target)
+- docs/{decisions,ai_handoff}.md
+
+### Next Recommended Task
+- **Important**: every exe built earlier this session (`v101`-`v106`) may
+  have shipped a stale web UI depending on exactly when the staleness first
+  crept in — only `v107` onward is verified correct. If any of those earlier
+  exes were shared/tested, re-verify or just use `v107+`.
+- Then resume the still-open items: desktop browser mouse/keyboard camera
+  control, and the `.app-shell`/`.workspace` flex-overflow audit for the
+  in-app status bar.
+
+## Previous Session (2026-07-06, cont.) - Connect Screen: Centered Pair + Orientation Layout
 
 Follow-up fixes to the premium connect-screen redesign (same branch,
 `minor-fixes`), driven by a screenshot showing the branding panel and auth
