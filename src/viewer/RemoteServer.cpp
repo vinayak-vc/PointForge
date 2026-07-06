@@ -1040,6 +1040,7 @@ void RemoteServer::publishConfig(const RemoteConfig& c) {
         {"fullscreen", c.fullscreen}, {"darkTheme", c.darkTheme},
         {"recent", c.recentDirs}, {"file", c.loadedFile},
         {"pts", c.pointCount}, {"nodes", c.nodeCount}, {"cubeSize", c.cubeSize},
+        {"zmin", c.zMin},
         {"streamAvailable", c.streamAvailable},
         {"webrtcAvailable", c.webrtcAvailable},
         {"preferredStream", c.preferredStream},

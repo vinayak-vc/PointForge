@@ -53,6 +53,8 @@ export type Cfg = {
   pts: number;
   nodes: number;
   cubeSize: number;
+  /** World Z of the octree cube bottom; zmax = zmin + cubeSize (legend labels). */
+  zmin: number;
   streamAvailable: boolean;
   webrtcAvailable: boolean;
   preferredStream: number;

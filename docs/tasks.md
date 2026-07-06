@@ -76,6 +76,28 @@
 - `[x]` Unity native plugin (branch `library/unity`): `pfunity` DLL target +
         flat C API (`src/library/unity/PointForgeC.{h,cpp}`) — streaming reader
         only, pfcore untouched; smoke-tested against a real 12.4M-pt octree
+- `[x]` Auto-incrementing build version: `VERSION` file (patch bumps every
+        build via `tools/bump_version.cmake` -> generated `src/viewer/Version.h`);
+        shown small in the C++ status bar (`v1.0.N`) and embedded as the exe's
+        Win32 FILEVERSION/ProductVersion (`app.rc`, `1 VERSIONINFO` — NOT
+        `VS_VERSION_INFO`, which is undefined without `<winver.h>` and silently
+        drops the whole resource)
+- `[x]` Elevation/intensity colour legend UI fixes (C++ viewer + React webremote):
+        legend now dock-aware (anchors left of "Properties" only when it truly
+        abuts the window's right edge — not for left-docked/floating panels),
+        stays visible in zen/hide-UI mode, renders once per eye with the
+        watermark's negative-parallax offset in stereoscopic SBS; title width
+        now reserved in the layout (previously "Intensity" could overshoot past
+        the bar+labels' reserved width and bleed across the SBS eye split).
+        Color-mode control replaced with a `Select` dropdown (`controls.tsx`,
+        `DisplayTab.tsx`) since only one mode is ever active; new
+        `webremote/src/Legend.tsx` viewport overlay mirrors the C++ ramp (new
+        additive `zmin` cfg key, `RemoteConfig.zMin` -> `{"zmin":...}`). CSS UX
+        pass: `.seg` flex->grid (fixes clipped "Intensity"/"Classification"
+        options), safe-area insets, `100dvh`/`46dvh`, coarse-pointer target
+        bump, mobile toolbar dedup (`.toolbar-group--dup`), connect-screen
+        scroll fix, `--text-3` contrast bump, typeable PIN input, lucide icons
+        replacing emoji in the pinch-mode toggle
 
 ## In Progress
 - `[x]` Web remote controller (branch `webapp-controller`) — phone browser drives

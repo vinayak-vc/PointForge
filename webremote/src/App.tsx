@@ -11,6 +11,7 @@ import type { MoveValues } from './FlyTab';
 import DisplayTab from './DisplayTab';
 import CameraTab from './CameraTab';
 import ToolsTab from './ToolsTab';
+import Legend from './Legend';
 import { useCfg } from './cfg';
 import VideoLayer, { VideoLayerHandle } from './VideoLayer';
 import { VIDEO_PRESETS, VideoQuality } from './stream';
@@ -76,9 +77,13 @@ function ConnectScreen({ status, submitPin }: ConnectScreenProps) {
             ref={inputRef}
             className="pin-input"
             type="text"
+            inputMode="numeric"
+            pattern="\d*"
+            maxLength={4}
+            autoComplete="one-time-code"
             placeholder="PIN"
             value={pin}
-            readOnly
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
           />
           <button className="pin-connect" type="submit" disabled={!canSubmit}>
             Connect
@@ -91,6 +96,7 @@ function ConnectScreen({ status, submitPin }: ConnectScreenProps) {
               key={k}
               type="button"
               className="keypad-btn"
+              aria-label={k === 'C' ? 'Clear' : k === 'DEL' ? 'Delete digit' : k}
               onClick={() => handleKeypad(k)}
             >
               {k}
@@ -262,6 +268,7 @@ export default function App() {
           />
           <VideoLayer ref={videoLayerRef} rtcStream={stream} type={streamType} />
           <FlyTab moveRef={moveRef} lastState={lastState} status={status} />
+          <Legend cfg={cfg} />
         </div>
 
         {/* Inspector: vertical icon rail + content */}

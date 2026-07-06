@@ -50,6 +50,7 @@ struct RemoteConfig {
     std::vector<std::string> recentDirs;
     std::string loadedFile;
     uint64_t pointCount = 0; uint64_t nodeCount = 0; float cubeSize = 0;
+    float zMin = 0;                  // world Z of the octree cube bottom (elevation legend labels)
     // stream
     bool streamAvailable = false;
     bool webrtcAvailable = false;

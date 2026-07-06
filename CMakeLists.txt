@@ -154,6 +154,19 @@ message(STATUS "PointForge optional format libs: ${PF_OPTIONAL_LIBS}")
 message(STATUS "PointForge format defines:       ${PF_OPTIONAL_DEFS}")
 
 # ---------------------------------------------------------------------------
+# Build version stamp — VERSION's patch number auto-increments every build;
+# generates src/viewer/Version.h (PF_VERSION_STRING) consumed by main.cpp.
+# ---------------------------------------------------------------------------
+add_custom_target(version_header ALL
+    COMMAND ${CMAKE_COMMAND}
+            -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION
+            -DOUTPUT_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/src/viewer/Version.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/bump_version.cmake
+    COMMENT "Stamping build version"
+    VERBATIM
+)
+
+# ---------------------------------------------------------------------------
 # Web UI embedding
 # ---------------------------------------------------------------------------
 if(PF_EMBED_WEB)
@@ -285,6 +298,7 @@ target_link_libraries(pfview PRIVATE
     nlohmann_json::nlohmann_json
     $<IF:$<TARGET_EXISTS:libjpeg-turbo::turbojpeg>,libjpeg-turbo::turbojpeg,libjpeg-turbo::turbojpeg-static>
 )
+add_dependencies(pfview version_header)
 if(WIN32)
     target_link_libraries(pfview PRIVATE ws2_32 iphlpapi)
 endif()
