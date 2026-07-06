@@ -112,6 +112,7 @@ struct RemoteServerImpl {
     // ---- input state (server threads write, main loop reads) --------------
     std::atomic<float> f{0}, s{0}, u{0}, yaw{0}, pit{0};
     std::atomic<bool>  boost{false};
+    std::atomic<bool>  orbit{false};
     std::atomic<int64_t> lastMoveMs{0};
 
     std::mutex             cmdMx;
@@ -757,6 +758,7 @@ struct RemoteServerImpl {
             f = ax("f"); s = ax("s"); u = ax("u");
             yaw = ax("yaw"); pit = ax("pit");
             boost = m.value("boost", 0) != 0;
+            orbit = m.value("orbit", 0) != 0;
             lastMoveMs = nowMs();
         } else if (t == "cmd" || t == "set") {
             RemoteCmd c;
@@ -988,6 +990,7 @@ float RemoteServer::up()        const { return inputActive() ? impl_->u.load()  
 float RemoteServer::yawRate()   const { return inputActive() ? impl_->yaw.load() : 0.0f; }
 float RemoteServer::pitchRate() const { return inputActive() ? impl_->pit.load() : 0.0f; }
 bool  RemoteServer::boost()     const { return inputActive() && impl_->boost.load(); }
+bool  RemoteServer::orbit()     const { return inputActive() && impl_->orbit.load(); }
 
 std::vector<RemoteCmd> RemoteServer::consumeCommands() {
     std::vector<RemoteCmd> out;
@@ -1143,6 +1146,7 @@ float RemoteServer::yawRate() const { return 0; }
 void RemoteServer::setForceDiskWeb(bool) {}
 float RemoteServer::pitchRate() const { return 0; }
 bool  RemoteServer::boost() const { return false; }
+bool  RemoteServer::orbit() const { return false; }
 bool  RemoteServer::inputActive() const { return false; }
 std::vector<RemoteCmd> RemoteServer::consumeCommands() { return {}; }
 void RemoteServer::publishState(float, uint64_t, const float*, bool, const std::string&) {}

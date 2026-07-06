@@ -1,6 +1,108 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Remote Tap-to-Measure
+## Latest Session (2026-07-06, cont.) - Measure Lines Not in Stream + Desktop Controls Didn't Match PC
+
+Two user-reported follow-ups, both real bugs.
+
+### Bug 1: "Measure lines are not appearing in Web App"
+Root cause: the web-remote video capture happens on the raw post-EDL
+backbuffer **before any ImGui drawing occurs** (`main.cpp` ~1533, comment:
+"Backbuffer now holds the post-EDL scene and no UI yet"). The measurement
+polyline was drawn entirely via `ImGui::GetForegroundDrawList()`, which only
+rasterizes later in the frame — so it never reached the captured frame,
+even though the numeric point list (via `cfg.measurePts`) was already
+correctly showing in the ToolsTab. Restructuring to a split ImGui
+render (draw-some/capture/draw-rest) was considered and rejected as too
+invasive/risky for what's needed.
+
+**Fix**: the polyline (lines + point markers) is now drawn as **real GL
+geometry**, baked into the same offscreen FBO the point cloud renders to —
+inside `renderPass()` itself, right after the octree traversal, so it uses
+that eye's exact `vp` matrix (correct for both mono and stereo SBS) and gets
+captured by the stream like any other scene content. New tiny shader pair
+(`kLineVertSrc`/`kLineFragSrc` in `EmbeddedShaders.h`, `Shader lineShader` +
+a small dynamic VBO in `main.cpp`) — position-only, flat colour, drawn with
+depth test disabled (matches the old ImGui overlay's always-on-top look).
+The ImGui overlay now draws **only** the per-segment distance text labels
+(no GL text renderer exists, so labels stay PC-only) — the old
+`AddCircleFilled`/`AddCircle`/`AddLine` calls were removed to avoid double-
+drawing the same geometry twice.
+
+**Caught while implementing**: `GL_PROGRAM_POINT_SIZE` is already enabled
+once globally at init for the point-cloud shader's `gl_PointSize`. My first
+draft toggled it off after drawing the measurement points, which would have
+broken the *second* eye's point-cloud rendering in stereo SBS mode (state
+leaks across the two `renderPass` calls in the same frame). Fixed by not
+touching that global state at all — the shader's own `gl_PointSize` write
+is all that's needed. Depth-test on/off is contained within the same block
+and safe.
+
+### Bug 2: "Windows controls not working... should be same as C++ app"
+Follow-up to last session's desktop input work — I had *invented* a mapping
+(left-drag=look, right-drag=pan) without checking the native app's actual
+scheme first. Checked `main.cpp`'s real `SDL_MOUSEBUTTONDOWN` handlers:
+**LMB = orbit** (rotates the camera *position* around a pivot,
+`Camera::orbit`), **RMB = free-look** (`Camera::addYawPitch`, no position
+change), wheel = zoom, **Q/E = down/up** (not Space/Ctrl), Shift = 5x boost.
+
+Free-look was already replicable remotely (the existing `yaw`/`pit` move
+fields feed `addYawPitch` either way) — but **orbit was not**: it needs a
+server-maintained pivot point re-established each drag-start, which no
+existing remote input carried.
+
+**Fix**:
+- New `orbit: 0|1` field on the `move` WS message (`RemoteServer`: new
+  `std::atomic<bool> orbit`, parsed alongside f/s/u/yaw/pit/boost, exposed
+  via `RemoteServer::orbit()`, PF_WITH_REMOTE-absent stub returns `false`).
+- `main.cpp`'s remote-input block now branches: `remote.orbit()` true ->
+  on the rising edge (drag start) recompute `pivot = cam.position +
+  cam.front()*dist` exactly like the local LMB handler, then call
+  `cam.orbit(dYaw, dPit, pivot)` every tick; otherwise (RMB-equivalent) the
+  unchanged `cam.addYawPitch(dYaw, dPit)` path. `Camera::orbit()` internally
+  calls `addYawPitch` with identical units, so no rescaling was needed.
+- `FlyTab.tsx`: **left-drag now sends `orbit:1`** while held (matches LMB);
+  **right-drag is free-look** (matches RMB, previously incorrectly mapped
+  to "pan" — dropped, since the PC has no mouse-pan at all); LMB is still
+  reclaimed for tap-to-measure while the Measure tool is active (matching
+  the PC exactly — confirmed RMB free-look correctly keeps working while
+  measuring on the PC too, so the client's `measuringRef` early-return was
+  narrowed to LMB only, not both buttons). Keyboard: `Space`/`Ctrl`/`C` ->
+  **`Q`/`E`** for down/up, matching `main.cpp`'s `SDL_SCANCODE_Q`/`_E`
+  exactly. The Pan sensitivity slider is now touch-only (hidden on desktop,
+  since there's no mouse gesture left that uses it).
+- Touch gestures are unchanged (still simple unified look/pinch, no
+  orbit-vs-look distinction — reasonable for a single-finger surface, and
+  not what was reported).
+
+### Verified
+- `npm run build` and `cmake --build ... pfview` both clean.
+- Embedded web hash confirmed matching `webremote/dist/assets/*` (`v1.0.12`).
+- NOT yet tested live: neither the GL-rendered polyline (does it actually
+  show correctly in a real stream frame, at the right screen position) nor
+  the remote-orbit pivot math (does a LMB-drag on the web app orbit around
+  the same point a local LMB-drag would) have been checked against a running
+  exe with a loaded cloud.
+
+### Modified files
+- src/viewer/EmbeddedShaders.h (kLineVertSrc/kLineFragSrc)
+- src/viewer/main.cpp (line-shader setup + draw call in renderPass; ImGui
+  overlay trimmed to text-labels-only; remote orbit wiring)
+- src/viewer/RemoteServer.h, RemoteServer.cpp (orbit field + accessor + stub)
+- webremote/src/FlyTab.tsx (LMB=orbit/RMB=look swap, Q/E keys, Pan hidden on desktop)
+- webremote/src/App.tsx (orbit field threaded through the 30 Hz move loop)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Live-verify both fixes against a loaded cloud: (1) start Measure from the
+  web app, place a couple of points, confirm the yellow polyline is visible
+  *in the video stream itself*, not just the PC's own window; (2) LMB-drag
+  on the web app (desktop browser) and confirm it orbits around the same
+  point a local LMB-drag would, RMB-drag free-looks, Q/E move up/down, wheel
+  zooms, Shift boosts.
+- Still open from earlier: `.app-shell`/`.workspace` flex-overflow audit for
+  the in-app status bar clipping.
+
+## Previous Session (2026-07-06, cont.) - Remote Tap-to-Measure
 
 User asked to check the Measure feature from the web app. Diagnosis: the
 Start/Stop/Undo/Clear controls were already correctly wired end-to-end
