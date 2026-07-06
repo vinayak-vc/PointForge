@@ -1,6 +1,95 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Build System Bug: Exe Was Embedding a Stale Web Build
+## Latest Session (2026-07-06, cont.) - Desktop Camera Input, Dropdown, Slider Audit
+
+Closes the "Windows controls not working from web app via Computer browser"
+report, plus a full slider-wiring audit and two smaller UI fixes.
+
+### Root cause of "speed slider does nothing" / "controls not working"
+`FlyTab.tsx` only ever wired **touch** events (`onTouchStart/Move/End`) — a
+desktop browser has no touch surface, so opening the web remote on a Windows
+PC had **zero** camera-movement input at all (mouse-drag did nothing; the
+only thing that worked was mouse-clicking the UP/DOWN/BOOST hold buttons,
+since those use pointer events). With no baseline movement to scale, the
+Speed slider had nothing to visibly multiply — it was never actually broken,
+there was just no motion for it to act on.
+
+### Fix — desktop mouse + keyboard input (FlyTab.tsx)
+Added a parallel input path, gated on `matchMedia('(pointer: fine)')`
+(desktop/mouse), alongside the existing untouched touch path:
+- **Left-drag** → look (same yaw/pitch math as 1-finger touch, reusing the
+  Look sensitivity slider).
+- **Right-drag** → pan (reuses the Pan slider; `stage` gets
+  `onContextMenu` suppressed on desktop so the browser context menu doesn't
+  interrupt the drag).
+- **Wheel** → zoom (reuses the Zoom slider).
+- **WASD** → fly forward/back/strafe, **Space/Ctrl/C** → up/down, **Shift**
+  → boost — window-level keydown/keyup (ignored while focus is in a text
+  input), applied through the same `heldState` ref the UP/DOWN/BOOST buttons
+  already used, extended to also cover `f`/`s`.
+- Mouse-drag listeners are attached at `window` level (not the stage element)
+  so a drag started inside the viewport keeps tracking even if the cursor
+  leaves it — matches how a native FPS-style camera control normally feels.
+- The "Gesture Sensitivity" panel becomes "Mouse & Keyboard" on desktop, the
+  pinch-mode toggle (a touch-only concept) is hidden, and the instruction
+  footer text updates to describe the new controls.
+
+### Slider wiring audit (user asked to check all sliders)
+Cross-referenced every `Slider`/`Toggle` in `DisplayTab.tsx`, `CameraTab.tsx`,
+`ToolsTab.tsx`, and `ActionBar.tsx` against `SettableKey` (`cfg.ts`) and the
+server's `set.<key>` handler table (`main.cpp` ~1182-1209). **All of them are
+correctly wired end-to-end** — no missing/mismatched keys found. The
+`camSpeedMultiplier` path itself is also correct server-side (`set.speed` and
+the `speed` one-shot cmd both update it, and it's applied to remote-driven
+movement at `main.cpp:1167`) — confirms the "speed does nothing" symptom was
+purely the "no movement to scale" root cause above, not a wiring bug.
+
+### Other fixes
+- **Property panel rail padding**: `.inspector-tab`/`.inspector-icon-rail`
+  widened 48px -> 60px with `padding: 0 6px`, letter-spacing trimmed
+  0.05em -> 0.03em — "DISPLAY" (the widest label) was cramped against the
+  divider. Verified via a detached-DOM measurement at desktop width: 60px
+  box, "DISPLAY" text (42px) comfortably inside the 48px content area.
+- **Stream Engine -> dropdown**: the 2-option segmented control
+  ("JPEG (Compat)"/"WebRTC (F...") was visibly truncated in the inspector's
+  default width. Replaced with the existing `Select` dropdown component
+  (same one used for Color mode). Extended `Select` with an optional
+  `disabledOptions` array so WebRTC can render as a disabled `<option>`
+  instead of a disabled segmented button when the server build lacks it.
+
+### Verified
+- `npm run build` clean.
+- Structural checks via `preview_eval` (detached DOM, since the dev preview
+  has no backend to reach the post-auth app shell): inspector-tab renders at
+  60px/9.5px/6px-padding on desktop viewport (was hitting a *different*,
+  correct mobile override at the default narrow preview viewport — false
+  alarm on first check, resolved by resizing to 1600×900); Select dropdown
+  renders with the second option correctly `disabled`.
+- Exe rebuild in progress at handoff time — confirm completion + bump before
+  further work.
+- NOT yet tested against a live connection: the new mouse-drag/wheel/WASD
+  path needs a real desktop-browser session against the running exe to
+  confirm it actually moves the camera (only verified the code compiles and
+  the touch path's existing tests still typecheck).
+
+### Modified files
+- webremote/src/FlyTab.tsx (desktop mouse+keyboard input)
+- webremote/src/controls.tsx (Select gains `disabledOptions`)
+- webremote/src/DisplayTab.tsx (Stream Engine -> Select)
+- webremote/src/index.css (inspector-tab/rail padding)
+- docs/ai_handoff.md
+
+### Next Recommended Task
+- Load the rebuilt exe, open the web remote from a Windows desktop browser,
+  and confirm: left-drag look, right-drag pan, wheel zoom, WASD movement,
+  Space/Ctrl up-down, Shift boost, and that the Speed slider now visibly
+  changes movement rate.
+- Then the one item still open from earlier: `.app-shell`/`.workspace`
+  flex-overflow audit so the in-app status bar can't be clipped at desktop
+  window sizes (unrelated — that's the native viewer's own status bar, not
+  the web remote's).
+
+## Previous Session (2026-07-06, cont.) - Build System Bug: Exe Was Embedding a Stale Web Build
 
 User reported the exe didn't reflect the latest webremote changes. Root cause
 was in the build system, not the app — every rebuild this session had

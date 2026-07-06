@@ -31,23 +31,14 @@ export default function DisplayTab({ cfg, setValue, streamType }: DisplayTabProp
     <div className="panel">
       {(cfg.webrtcAvailable || cfg.streamAvailable) && (
         <Card title="Stream Engine">
-          <div className="seg">
-            <button
-              type="button"
-              className={`seg-btn ${streamType === 'jpeg' ? 'active' : ''}`}
-              onClick={() => setValue('preferredStream', 0)}
-            >
-              JPEG (Compat)
-            </button>
-            <button
-              type="button"
-              className={`seg-btn ${streamType === 'webrtc' ? 'active' : ''}`}
-              onClick={() => setValue('preferredStream', 1)}
-              disabled={!cfg.webrtcAvailable}
-            >
-              WebRTC (Fast)
-            </button>
-          </div>
+          <Select
+            label="Transport"
+            ariaLabel="Stream engine"
+            options={['JPEG (Compatible)', 'WebRTC (Fast)']}
+            disabledOptions={[false, !cfg.webrtcAvailable]}
+            value={streamType === 'webrtc' ? 1 : 0}
+            onChange={(i) => setValue('preferredStream', i)}
+          />
         </Card>
       )}
 

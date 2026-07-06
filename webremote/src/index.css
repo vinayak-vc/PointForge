@@ -332,8 +332,8 @@ body {
 .inspector-icon-rail {
   display: flex;
   flex-direction: column;
-  width: 48px;
-  min-width: 48px;
+  width: 60px;
+  min-width: 60px;
   border-right: 1px solid var(--border);
   background: rgba(13,15,18,0.7);
   padding: 6px 0;
@@ -345,16 +345,17 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  width: 48px;
-  height: 54px;
+  gap: 5px;
+  width: 60px;
+  height: 56px;
+  padding: 0 6px;
   border: none;
   background: transparent;
   color: var(--text-2);
   font-family: var(--font);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
   cursor: pointer;
   transition: background var(--t-base), color var(--t-base), box-shadow var(--t-base);
