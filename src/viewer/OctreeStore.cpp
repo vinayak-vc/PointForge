@@ -13,6 +13,8 @@
 
 namespace pf {
 
+OctreeStore::OctreeStore() = default;
+
 OctreeStore::~OctreeStore() {
     clear();
 }

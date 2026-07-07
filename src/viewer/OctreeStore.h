@@ -47,6 +47,10 @@ struct LoadResult {
 // payloads are read and converted to GPU vertices.
 class OctreeStore {
 public:
+    // Both defined in OctreeStore.cpp: pkgReader_ is a unique_ptr to the
+    // forward-declared PackageReader, so any TU that instantiates the
+    // implicit constructor/destructor would need the complete type.
+    OctreeStore();
     ~OctreeStore();
 
     // Reset store and stop worker threads to allow loading a new point cloud safely

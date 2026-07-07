@@ -1,4 +1,59 @@
-## Latest Session (2026-07-07) - VXPC Phases 5, 12, 15 (Thumbnails, Custom Meta, ZSTD)
+# AI Handoff - PointForge (C++ repo)
+
+## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
+
+Two-part session: (1) full audit of newdev.md features 1-6, (2) completion of
+#6's remaining items. All six medium features are now **DONE**. Work landed on
+`vxpc/thumbnails` (the branch the working tree was on — it contains the full
+multi-cloud lineage; see repo-state note below).
+
+### Audit results (features 1-6)
+- #1/#2/#3/#4/#5 confirmed done. Gating re-verified: RemoteServer.cpp:748
+  blocks all move/cmd/set from viewer-role clients BEFORE parsing, so every
+  cmd added since (#3 path_*, #5 anno_*, #6 cloud_vis) inherits it.
+- Tests: CTest `octree_roundtrip` green (covers #1 byte-identity + #4
+  forEachPointInBox bounds/count/estimate assertions). #2/#3/#5 live-smoke
+  verified only; no automated coverage.
+- Bugs found and FIXED (details in decisions.md "Multi-Cloud Completion +
+  Audit Round"): 1d68eaf didn't compile (unique_ptr `.` access) + its
+  aggregated status-bar stats were never displayed; CSV slice export lost
+  precision (6 sig digits ≈ 10 m on georeferenced coords → setprecision 15);
+  four scene-space mixups (currentSliceBox, slice-PNG framing, gotoAnnotation,
+  measure/anno label projection used activeStore().cubeCenter() where
+  sceneOrigin is required — wrong whenever active cloud ≠ first); OctreeStore
+  C2027 (unique_ptr<PackageReader> member without a declared ctor).
+
+### #6 completed this session
+- Scene panel already existed (docs were stale — checked its rows: visibility,
+  active-select, close, add all present); copy cleaned up.
+- NEW: remote surface — `RemoteConfig::Cloud` + `clouds:[{name,pts,visible}]`
+  in publishConfig; `cloud_vis` cmd (`v=[index,on,0]`, bounds-checked) in
+  main.cpp; webremote `cfg.ts` `SceneCloud`/`clouds` + ToolsTab "Scene" card
+  (Toggle per cloud, rendered only when 2+ clouds).
+- newdev.md #6 checkboxes + status board DONE; tasks/roadmap/decisions synced.
+
+### Validation
+- `npm run build` clean; pfview+pftest clean build (`ViitorXPCViewer_v1038.exe`);
+  CTest pass; `--export-video` smoke on Tikal-13 → ffprobe-verified 121-frame
+  1080p30 H.264 (also proves the #6 refactor didn't break the #3 pipeline).
+- **NOT done: live two-cloud acceptance walk** (fly between two real scans,
+  toggle visibility, cross-cloud measure) — no second converted scan staged.
+  Run it before merging: convert a second .las, File > Open it on top of the
+  first, walk newdev.md #6's acceptance list, and check the phone Scene card.
+
+### Repo-state warning
+Mid-audit, a PARALLEL session switched this working tree from
+`multi-cloud-scene` to `vxpc/thumbnails` and committed VXPC package-format
+work (04a5168..34c614e) — 04a5168 absorbed this audit's first two fixes.
+`multi-cloud-scene`'s tip (1d68eaf) is still the non-compiling version; #4/#5
+branches are unmerged to main (main tip = PR #9). Branch cleanup + PRs needed.
+
+### Next Recommended Task
+Live two-cloud acceptance walk (above), then raise PRs: the multi-cloud/#6
+work (this branch or a clean cherry-pick back onto `multi-cloud-scene`) and
+the unmerged #4/#5 branches, in dependency order 4 → 5 → 6.
+
+## Previous Session (2026-07-07) - VXPC Phases 5, 12, 15 (Thumbnails, Custom Meta, ZSTD)
 
 ### What was built
 - **ZSTD Payload Compression** (Phase 15): Embedded ZSTD payload compression natively into `PackageWriter::AddMemory`. Modified `PackageReader::Read` to detect compressed entries and decompress on the fly.

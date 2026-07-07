@@ -20,6 +20,12 @@ export type Annotation = {
   label: string;
 };
 
+export type SceneCloud = {
+  name: string;
+  pts: number;
+  visible: boolean;
+};
+
 // Full cfg snapshot as broadcast by the server (assumed complete each time;
 // merged defensively so a partial broadcast would still work after the first).
 export type Cfg = {
@@ -75,6 +81,10 @@ export type Cfg = {
   pathKeys: number;
   pathDuration: number;
   pathPlaying: boolean;
+  /** Multi-cloud scene rows (name, point count, visibility). Toggle a
+   *  cloud via cmd cloud_vis with v = [index, on ? 1 : 0, 0]; loading and
+   *  closing clouds stay PC-only. */
+  clouds: SceneCloud[];
 };
 
 // Keys the client may write back with {"t":"set",...}. (tool/fullscreen and

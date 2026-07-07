@@ -234,12 +234,23 @@ Recommended order; update newdev.md status board as these move:
 - `[x]` 5. Annotations from phone (branch `annotations-from-phone`):
         remote/local Annotate tool, JSON per-cloud persistence,
         Web Remote annotation card, GL stream-visible pins + PC/phone labels.
-- `[x]` 6. Multi-cloud scene (branch `multi-cloud-scene`): SceneCloud vector,
-        per-cloud renderer, scene
-        origin = first cloud's cube centre, Scene panel per architecture §7)
+- `[x]` 6. Multi-cloud scene (branch `multi-cloud-scene`, completed on
+        `vxpc/thumbnails`): SceneCloud vector (unique_ptr store+renderer per
+        cloud), scene origin = first cloud's cube centre, per-cloud
+        worldOffset render/pick/frame-all, GPU budget split total/N, Scene
+        panel (left dock: visibility, active-cloud select, close, add),
+        convert-done Replace/Add prompt, aggregated status-bar stats,
+        remote `clouds` cfg + `cloud_vis` cmd + webremote Scene card.
+        Audit fixes folded in: compile-breaking status-bar code, unused
+        aggregates, CSV export precision (6 -> 15 sig digits), and
+        scene-space mixups (slice box, annotation goto, overlay projection
+        used the ACTIVE cloud's centre where sceneOrigin was required).
+        Pending: live two-cloud acceptance walk (needs a second converted
+        scan on disk).
 - `[ ]` Linearised-depth EDL (current uses raw depth diff; tune for ortho)
 - `[ ]` Convert cancel for Phase A/B (currently aborts at Phase C chunk boundaries)
 - `[ ]` VR/OpenXR initialization support
 - `[ ]` Workspace layout presets (Window menu: save/restore named DockBuilder layouts)
 - `[ ]` Recent-files pin/unpin + cached point-count/size metadata
-- `[ ]` Scene panel (multi-cloud) — deferred until multi-cloud rendering exists
+- `[x]` Scene panel (multi-cloud) — shipped with newdev.md #6 (left dock,
+        visibility/active/close/add rows)

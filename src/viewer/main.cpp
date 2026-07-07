@@ -56,6 +56,7 @@
 #include <thread>
 #include <atomic>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1075,7 +1076,9 @@ int main(int argc, char** argv) {
         out << root.dump(2);
     };
     auto gotoAnnotation = [&](const Annotation& a) {
-        pivot = glm::vec3(a.pos - activeStore().cubeCenter());
+        // Annotation positions are world-space; the camera lives in scene
+        // space (origin = first cloud's centre) — NOT the active cloud's.
+        pivot = glm::vec3(a.pos - sceneOrigin);
         float dist = glm::length(cam.position - pivot);
         if (dist < 1.0f) dist = 10.0f;
         cam.position = pivot - cam.front() * dist;
@@ -1305,6 +1308,9 @@ int main(int argc, char** argv) {
                         job->state = SliceExportJob::State::Failed;
                         return;
                     }
+                    // Full double precision: the default 6 significant digits
+                    // truncate georeferenced coordinates to ~10 m granularity.
+                    out << std::setprecision(15);
                     out << "x,y,z,r,g,b,intensity,classification\n";
                     uint64_t delivered = sliceStore->forEachPointInBox(
                         box, maxDepth, &job->cancelFlag,
@@ -1367,7 +1373,11 @@ int main(int argc, char** argv) {
 
     auto currentSliceBox = [&]() -> AABB {
         AABB box;
-        const glm::dvec3 center = activeStore().cubeCenter();
+        // clipMin/Max are scene-space (the per-cloud render subtracts each
+        // cloud's worldOffset), so world = sceneOrigin + clip — using the
+        // ACTIVE cloud's centre here shifted the box by that cloud's offset
+        // whenever it wasn't the first-loaded cloud.
+        const glm::dvec3 center = sceneOrigin;
         const double x0 = center.x + std::min((double)clipMin[0], (double)clipMax[0]);
         const double y0 = center.y + std::min((double)clipMin[1], (double)clipMax[1]);
         const double z0 = center.z + std::min((double)clipMin[2], (double)clipMax[2]);
@@ -1391,7 +1401,7 @@ int main(int argc, char** argv) {
         hookBox.min[hookAxis] = mid - thickness * 0.5;
         hookBox.max[hookAxis] = mid + thickness * 0.5;
 
-        const glm::dvec3 center = activeStore().cubeCenter();
+        const glm::dvec3 center = sceneOrigin;   // clip bounds are scene-space
         enableClipping = true;
         clipMin[0] = (float)(hookBox.min.x - center.x);
         clipMin[1] = (float)(hookBox.min.y - center.y);
@@ -1946,6 +1956,14 @@ int main(int argc, char** argv) {
                     int idx = (int)rc.value;
                     if (idx >= 0 && idx < (int)annotations.size()) gotoAnnotation(annotations[idx]);
                 }
+                else if (rc.name == "cloud_vis" && octreeLoaded && rc.hasVec) {
+                    // v = [cloud index, on, 0] — mirrors the Scene panel eye.
+                    int idx = (int)rc.vec[0];
+                    if (idx >= 0 && idx < (int)scene.size()) {
+                        scene[(size_t)idx].visible = rc.vec[1] != 0.0f;
+                        remoteCfgT = 1.0f;   // republish cfg promptly
+                    }
+                }
                 else if (rc.name == "clip_tool" && octreeLoaded)
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
@@ -2047,6 +2065,13 @@ int main(int argc, char** argv) {
                     rc.pathKeys = (int)cp.keys.size();
                     rc.pathDuration = (float)cp.duration();
                     rc.pathPlaying = pathPreviewing;
+                }
+                for (const SceneCloud& sc : scene) {
+                    RemoteConfig::Cloud rcc;
+                    rcc.name = baseName(sc.dir);
+                    rcc.pts = sc.store ? sc.store->meta().pointCount : 0;
+                    rcc.visible = sc.visible;
+                    rc.clouds.push_back(std::move(rcc));
                 }
                 remote.publishConfig(rc);
             }
@@ -2500,7 +2525,9 @@ int main(int argc, char** argv) {
                     float savedClipMin[3] = { clipMin[0], clipMin[1], clipMin[2] };
                     float savedClipMax[3] = { clipMax[0], clipMax[1], clipMax[2] };
 
-                    const glm::dvec3 center = activeStore().cubeCenter();
+                    // Camera + clip work in scene space (origin = first
+                    // cloud's centre); the slice box is world-space.
+                    const glm::dvec3 center = sceneOrigin;
                     const Vec3d boxCenter = pendingSlicePngBox.center();
                     const glm::vec3 target((float)(boxCenter.x - center.x),
                                            (float)(boxCenter.y - center.y),
@@ -2698,7 +2725,10 @@ int main(int argc, char** argv) {
             (!measurePts.empty() || !overlayAnnotations.empty() || toolMode == TOOL_MEASURE || toolMode == TOOL_ANNOTATE)) {
             cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
             glm::mat4 mvp = cam.viewProj();
-            glm::dvec3 ctr = activeStore().cubeCenter();
+            // Measure/annotation positions are world-space; camera is in
+            // scene space — project through sceneOrigin, not the active
+            // cloud's centre (wrong for non-first clouds).
+            glm::dvec3 ctr = sceneOrigin;
             auto project = [&](const glm::dvec3& world, ImVec2& out) -> bool {
                 glm::vec4 clip = mvp * glm::vec4(glm::vec3(world - ctr), 1.0f);
                 if (clip.w <= 0.0f) return false; // behind the camera
@@ -3081,7 +3111,7 @@ int main(int argc, char** argv) {
                             ImGui::PushID(i);
                             bool visible = cloud.visible;
                             if (ImGui::Checkbox("##vis", &visible)) cloud.visible = visible;
-                            ImGui::SetItemTooltip("Visible when multi-cloud rendering is enabled");
+                            ImGui::SetItemTooltip("Show/hide this cloud in the viewport");
                             ImGui::SameLine();
                             bool selected = i == activeCloudIndex;
                             std::string label = baseName(cloud.dir) + "##cloud";
@@ -3097,7 +3127,8 @@ int main(int argc, char** argv) {
                         }
                         if (closeIndex >= 0) closeCloud(closeIndex);
                         if (scene.size() > 1) {
-                            ImGui::TextWrapped("This first slice keeps rendering and tools on the active cloud while the scene model is generalized.");
+                            ImGui::TextDisabled("Tools (measure, clip, slice) follow the active cloud;");
+                            ImGui::TextDisabled("rendering and frame-all include every visible cloud.");
                         }
                     }
                 }

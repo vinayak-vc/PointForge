@@ -23,7 +23,7 @@ tree on 2026-07-06.
 | 3 | Camera path animation + MP4 export   | DONE | branch `camera-path-export` | CamPath spline + IMFSinkWriter MP4; smoke-verified 1080p30 export (121 frames) via `--export-video` hook |
 | 4 | Cross-section / slice export         | DONE | branch `cross-section-slice-export` | real-model smoke: DXF/CSV/PNG exported from `PointForgeCache_direct`; 871,420 pts; PNG visually verified |
 | 5 | Annotations from phone               | DONE | branch `annotations-from-phone` | remote/local annotate mode, JSON persistence, synced PC/phone UI |
-| 6 | Multi-cloud scene                    | IN PROGRESS | branch `multi-cloud-scene` | engine backend complete, Scene panel UI pending |
+| 6 | Multi-cloud scene                    | DONE | branch `multi-cloud-scene` (finished on `vxpc/thumbnails`) | SceneCloud vector + scene origin, Scene panel (left dock), remote `clouds` cfg + `cloud_vis` cmd + webremote card; audit fixed 6 scene-space/CSV bugs |
 
 **Recommended order = table order.** Rationale: 1–2 are low-coupling and ship
 user-visible value fast (1 touches only pfcore, 2 touches only RemoteServer +
@@ -394,15 +394,21 @@ clouds with visibility toggles; side-by-side comparison workflows.
         scene-space (bookmark file keying: keep per-dir for single cloud;
         multi-cloud sessions key bookmarks by first cloud — document).
 - Week 2 — Scene panel + integration:
-  - [ ] Left "Scene" dock (architecture.md §7 pattern): cloud rows (name,
-        point count, visibility eye, remove, per-cloud point-size scale
-        optional), selection drives Cloud Info section.
+  - [x] Left "Scene" dock (docked via DockBuilder left split, Window menu
+        toggle, Reset Layout aware): cloud rows — visibility checkbox,
+        selectable name (sets the ACTIVE cloud, which tools/Properties
+        follow), point count, Close button, "+" add; empty state offers
+        "Open Cloud...". Per-cloud point-size scale deferred (follow-up).
   - [x] Convert-job completion "Load" adds to scene instead of replacing
         (prompt: replace / add).
-  - [ ] Remote cfg: `clouds:[{name,pts,visible}]` + `cloud_vis{i,on}` cmd;
-        webremote Tools card.
-  - [x] Stats/status bar: total points/nodes across clouds; per-cloud in
-        Scene panel tooltips.
+  - [x] Remote cfg: `clouds:[{name,pts,visible}]` (RemoteConfig::Cloud) +
+        `cloud_vis` cmd (`v=[index,on,0]`, bounds-checked, prompt cfg
+        republish); webremote Tools tab "Scene" card (Toggle per cloud,
+        shown only when 2+ clouds; load/close stay PC-side). Viewer-role
+        clients can't toggle — cmd gate at RemoteServer.cpp:748 covers it.
+  - [x] Stats/status bar: total GPU MB + points across clouds (audit fixed:
+        the aggregation loop existed but its results were unused — and the
+        committed loop didn't compile, see decisions.md).
 
 **Risks:** biggest-blast-radius change — schedule after 1–5 land.
 Streaming worker threads scale linearly (N clouds = N workers; cap N at ~4 in
@@ -413,6 +419,14 @@ follow-up. EDL/depth: unchanged (single FBO, all clouds draw into it).
 **Acceptance:** load two real scans side by side; fly between them; toggle
 visibility; frame-all frames both; measure a distance ACROSS clouds; GPU
 budget respected (no VRAM blowup); single-cloud workflows byte-identical UX.
+Status: code-complete — render/pick/frame-all iterate all visible clouds,
+budget split total/N, single-cloud smoke green (`--export-video` +
+`--export-slice` on Tikal-13, CTest pass). A live two-cloud side-by-side
+session (the full acceptance walk) has NOT been run yet — no second
+converted real scan was staged; do that walk before the PR merges.
+Audit note (2026-07-07): the backend commit `1d68eaf` shipped non-compiling
+status-bar code and five scene-space bugs (slice box / annotation goto /
+overlay projection / CSV precision) — all fixed; see decisions.md.
 
 ---
 
