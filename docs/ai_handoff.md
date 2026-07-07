@@ -1,3 +1,20 @@
+## Previous Session (2026-07-07) - Multi-Cloud Scene Refactor
+
+### What was built / Fixed
+- **Multi-Cloud Scene Architecture**: Transitioned the global `OctreeStore` and `PointRenderer` instances in `main.cpp` into a `std::vector<SceneCloud> scene` to support loading and rendering multiple point clouds simultaneously.
+- **Render & Interaction Loop Updates**: The `renderPass` now iterates through all `SceneCloud` objects. Picking, cursor hover (`worldUnderCursor`), camera focus, and `frameAll` logic were updated to handle multiple point clouds relative to a shared scene origin (the first loaded cloud's center).
+- **Convert Job "Replace/Add" Prompt**: Implemented an ImGui modal dialog to prompt users whether they want to "Replace" the existing scene or "Add" a newly converted cloud when a conversion job completes. Uses a temporary `pendingLoadDir` state.
+- **Aggregated Stats**: Updated the status bar and the Remote Config broadcast to correctly aggregate GPU memory consumption and point counts across all loaded point clouds.
+- **Syntax Error Fixes**: Resolved severe syntax errors (unbalanced braces) introduced during multi-replace operations by surgically recovering the file structure using python scripts and validating brace parity with HEAD.
+
+### Modified files
+c:/UnrealProject/PointForge/src/viewer/main.cpp
+docs/{tasks,decisions}.md
+
+### Next Recommended Task
+- The basic multi-cloud engine support is complete and the viewer builds and runs.
+- **Scene Panel**: The remaining planned work for this feature is the "Scene panel" (task 6 part 2) to give the user a UI to manage (hide/show, delete, color-code) the individual clouds in the scene vector.
+
 # AI Handoff - PointForge (C++ repo)
 
 ## Latest Session (2026-07-07, cont.) - Phone annotations DONE (newdev.md #5, branch `annotations-from-phone`)

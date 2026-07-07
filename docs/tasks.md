@@ -230,14 +230,9 @@ Recommended order; update newdev.md status board as these move:
 - `[x]` 5. Annotations from phone (branch `annotations-from-phone`):
         remote/local Annotate tool, JSON per-cloud persistence,
         Web Remote annotation card, GL stream-visible pins + PC/phone labels.
-- `[ ]` 6. Multi-cloud scene (SceneCloud vector, per-cloud renderer, scene
+- `[x]` 6. Multi-cloud scene (branch `multi-cloud-scene`): SceneCloud vector,
+        per-cloud renderer, scene
         origin = first cloud's cube centre, Scene panel per architecture §7)
-
-## To Do
-- `[ ]` Orthographic screen-space-error variant in the C API (Unity scene
-        cameras can be ortho; streaming currently pauses in ortho views)
-- `[ ]` Improved caching: auto-purge old converted-cloud cache dirs on disk
-- `[ ]` UI font re-rasterization at scale (current DPI path scales metrics + FontGlobalScale only)
 - `[ ]` Linearised-depth EDL (current uses raw depth diff; tune for ortho)
 - `[ ]` Convert cancel for Phase A/B (currently aborts at Phase C chunk boundaries)
 - `[ ]` VR/OpenXR initialization support
