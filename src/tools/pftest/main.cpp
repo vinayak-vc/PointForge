@@ -110,9 +110,8 @@ static void verifyStructure(const pf::OctreeStore& store, uint64_t inputPoints,
     uint64_t reached = 0, chunkTreePoints = 0;
     while (!stack.empty()) {
         uint32_t idx = stack.back(); stack.pop_back();
-        CHECK(idx < nodes.size(), "child index out of range");
-        if (idx >= nodes.size()) return;
-        CHECK(!seen[idx], "node reached twice (cycle or shared child)");
+        if (idx >= nodes.size()) { CHECK(false, "child index out of range"); continue; }
+        if (seen[idx]) { CHECK(false, "node reached twice (cycle or shared child)"); continue; }
         seen[idx] = 1;
         ++reached;
         const pf::NodeRecord& r = nodes[idx];
@@ -125,21 +124,39 @@ static void verifyStructure(const pf::OctreeStore& store, uint64_t inputPoints,
                 continue;
             }
             CHECK((r.childMask & (1u << o)) != 0, "childMask bit missing for child");
-            CHECK(nodes[r.children[o]].level == r.level + 1 ||
-                  nodes[r.children[o]].level >= r.level + 1,
-                  "child level does not increase");
-            stack.push_back(r.children[o]);
+            if (r.children[o] < nodes.size()) {
+                CHECK(nodes[r.children[o]].level > r.level,
+                      "child level does not increase");
+            }
+            stack.push_back(r.children[o]); // bounds re-checked at pop
         }
     }
     CHECK(reached == nodes.size(), "unreachable nodes in hierarchy");
     // Coarse levels re-sample points that also live in chunk subtrees, so the
     // total across nodes is >= the input count, never less.
     CHECK(chunkTreePoints >= inputPoints, "fewer points stored than input");
+
+    // Exercise the payload DECODE path (byte-identity alone can't tell a
+    // correctly-written payload from a consistently-corrupt one): cast a ray
+    // straight down through a known synthetic cluster and expect a hit there.
+    glm::dvec3 c = store.cubeCenter();
+    glm::vec3 origin((float)(26.0 - c.x), (float)(51.0 - c.y), (float)(200.0 - c.z));
+    glm::dvec3 hit(0.0);
+    bool got = store.pickPoint(origin, glm::vec3(0, 0, -1), 0.02, hit);
+    CHECK(got, "pickPoint found nothing above the synthetic cluster");
+    if (got) {
+        CHECK(hit.x > 24.0 && hit.x < 28.0 && hit.y > 49.0 && hit.y < 53.0,
+              "picked point is not inside the expected cluster footprint");
+        CHECK(hit.z > 9.0 && hit.z < 13.0,
+              "picked point height is outside the cluster range");
+    }
 }
 
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
-    int threads = 0; // auto
+    // Default to a fixed thread count > 1 so the parallel leg is never
+    // vacuously equal to the sequential one (auto could resolve to 1 core).
+    int threads = 8;
     bool keep = false;
     std::string work = "pftest_work";
     for (int i = 1; i < argc; ++i) {

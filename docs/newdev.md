@@ -81,8 +81,16 @@ faster + progress stays monotonic).
 - [x] Test harness: `pftest` target (`src/tools/pftest/main.cpp`) — first
       automated test in the repo. Deterministic synthetic .xyz → sequential
       vs parallel byte-identity (hierarchy/octree/meta) for compress on+off,
-      + DFS structural invariants via OctreeStore. Wired as CTest
-      `octree_roundtrip`. `PF_BUILD_TESTS` option (ON).
+      + DFS structural invariants via OctreeStore, + a pickPoint decode check
+      through a known synthetic cluster. Wired as CTest `octree_roundtrip`.
+      `PF_BUILD_TESTS` option (ON).
+- [x] Adversarial review round (3 lenses + refute pass) applied: worker and
+      coordinator bodies are exception-safe (a bad_alloc in a chunk build now
+      FAILS THE JOB instead of std::terminate-ing the viewer — conversion
+      runs in-process via JobQueue); workers always joined before unwinding;
+      fwrite short-write detected (disk full); pftest DFS no longer loops on
+      a cyclic hierarchy, bounds-checks child indices before dereference, and
+      its parallel leg uses fixed threads=8 (never vacuously sequential).
 
 **Risks:** ~~determinism~~ resolved — in-order splice makes output
 byte-identical. Phase C2 starts only after workers join. Remaining known

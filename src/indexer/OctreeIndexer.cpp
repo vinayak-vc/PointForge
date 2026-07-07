@@ -379,7 +379,18 @@ bool buildOctree(const std::string& inputPath,
     std::map<size_t, ChunkResult> readyResults; // seq index -> result
     size_t nextToBuild = 0;
     size_t nextToConsume = 0;
-    bool   aborted = false;
+    bool   aborted = false;   // user cancel OR failure — stop everything
+    bool   failed  = false;   // an exception was caught (distinct log/report)
+    std::string failReason;
+
+    // Stop all workers and wake everyone. Callable from any thread.
+    auto signalAbort = [&](const char* why) {
+        std::lock_guard<std::mutex> lk(mx);
+        aborted = true;
+        if (why) { failed = true; if (failReason.empty()) failReason = why; }
+        cvProduce.notify_all();
+        cvConsume.notify_all();
+    };
 
     auto buildOne = [&](size_t seq) -> ChunkResult {
         const auto& ch = cs.chunks[seq];
@@ -401,31 +412,37 @@ bool buildOctree(const std::string& inputPath,
         return res;
     };
 
+    // Exceptions must not escape the thread callable (std::terminate would
+    // take down the whole viewer — conversion runs in-process via JobQueue).
+    // A chunk this size can genuinely throw bad_alloc; fail the JOB instead.
     auto workerFn = [&]() {
-        for (;;) {
-            size_t seq;
-            {
-                std::unique_lock<std::mutex> lk(mx);
-                cvProduce.wait(lk, [&] {
-                    return aborted || nextToBuild >= total ||
-                           nextToBuild - nextToConsume < inFlightCap;
-                });
-                if (aborted || nextToBuild >= total) return;
-                seq = nextToBuild++;
+        try {
+            for (;;) {
+                size_t seq;
+                {
+                    std::unique_lock<std::mutex> lk(mx);
+                    cvProduce.wait(lk, [&] {
+                        return aborted || nextToBuild >= total ||
+                               nextToBuild - nextToConsume < inFlightCap;
+                    });
+                    if (aborted || nextToBuild >= total) return;
+                    seq = nextToBuild++;
+                }
+                if (opts.cancel && opts.cancel->load()) {
+                    signalAbort(nullptr);
+                    return;
+                }
+                ChunkResult res = buildOne(seq);
+                {
+                    std::lock_guard<std::mutex> lk(mx);
+                    readyResults.emplace(seq, std::move(res));
+                    cvConsume.notify_all();
+                }
             }
-            if (opts.cancel && opts.cancel->load()) {
-                std::lock_guard<std::mutex> lk(mx);
-                aborted = true;
-                cvProduce.notify_all();
-                cvConsume.notify_all();
-                return;
-            }
-            ChunkResult res = buildOne(seq);
-            {
-                std::lock_guard<std::mutex> lk(mx);
-                readyResults.emplace(seq, std::move(res));
-                cvConsume.notify_all();
-            }
+        } catch (const std::exception& e) {
+            signalAbort(e.what());
+        } catch (...) {
+            signalAbort("unknown exception in chunk worker");
         }
     };
 
@@ -437,62 +454,72 @@ bool buildOctree(const std::string& inputPath,
                 std::to_string(total) + " chunks");
     const auto phaseCStart = std::chrono::steady_clock::now();
 
+    // The coordinator can throw too (hierarchy/coarse growth = bad_alloc).
+    // Catch everything so the workers are ALWAYS joined before unwinding —
+    // destroying a joinable std::thread is std::terminate.
     size_t done = 0;
-    while (nextToConsume < total) {
-        ChunkResult res;
-        {
-            std::unique_lock<std::mutex> lk(mx);
-            cvConsume.wait(lk, [&] {
-                return aborted || readyResults.count(nextToConsume) != 0;
-            });
-            if (aborted) break;
-            auto it = readyResults.find(nextToConsume);
-            res = std::move(it->second);
-            readyResults.erase(it);
-            ++nextToConsume;
-            cvProduce.notify_all(); // an in-flight slot freed up
-        }
-        if (opts.cancel && opts.cancel->load()) {
-            std::lock_guard<std::mutex> lk(mx);
-            aborted = true;
-            cvProduce.notify_all();
-            cvConsume.notify_all();
-            break;
-        }
-
-        ++done;
-        if (!res.empty) {
-            // Rebase chunk-local records into the global hierarchy + file.
-            const uint32_t base = (uint32_t)hierarchy.size();
-            for (NodeRecord& rec : res.records) {
-                for (int o = 0; o < 8; ++o)
-                    if (rec.children[o] != kNoChild) rec.children[o] += base;
-                rec.byteOffset += offset;
+    try {
+        while (nextToConsume < total) {
+            ChunkResult res;
+            {
+                std::unique_lock<std::mutex> lk(mx);
+                cvConsume.wait(lk, [&] {
+                    return aborted || readyResults.count(nextToConsume) != 0;
+                });
+                if (aborted) break;
+                auto it = readyResults.find(nextToConsume);
+                res = std::move(it->second);
+                readyResults.erase(it);
+                ++nextToConsume;
+                cvProduce.notify_all(); // an in-flight slot freed up
             }
-            if (!res.blob.empty())
-                std::fwrite(res.blob.data(), 1, res.blob.size(), payload);
-            offset += res.blob.size();
-            hierarchy.insert(hierarchy.end(), res.records.begin(), res.records.end());
-            chunkRoots[res.chunkIndex] = base + res.localRootIdx;
-            coarse.insert(coarse.end(), res.coarseSamples.begin(), res.coarseSamples.end());
-        }
+            if (opts.cancel && opts.cancel->load()) {
+                signalAbort(nullptr);
+                break;
+            }
 
-        if ((done % 64) == 0 || done == total) {
-            std::string msg = "buildOctree: indexed " + std::to_string(done) + "/" +
-                              std::to_string(total) + " chunks";
-            logInfo(msg);
-            if (opts.progressCb) {
-                float pct = total == 0 ? 1.0f : (float)done / total;
-                // Subtree building maps from 0.5 to 1.0
-                opts.progressCb(0.5f + pct * 0.5f, msg);
+            ++done;
+            if (!res.empty) {
+                // Rebase chunk-local records into the global hierarchy + file.
+                const uint32_t base = (uint32_t)hierarchy.size();
+                for (NodeRecord& rec : res.records) {
+                    for (int o = 0; o < 8; ++o)
+                        if (rec.children[o] != kNoChild) rec.children[o] += base;
+                    rec.byteOffset += offset;
+                }
+                if (!res.blob.empty() &&
+                    std::fwrite(res.blob.data(), 1, res.blob.size(), payload) != res.blob.size()) {
+                    signalAbort("octree.bin write failed (disk full?)");
+                    break;
+                }
+                offset += res.blob.size();
+                hierarchy.insert(hierarchy.end(), res.records.begin(), res.records.end());
+                chunkRoots[res.chunkIndex] = base + res.localRootIdx;
+                coarse.insert(coarse.end(), res.coarseSamples.begin(), res.coarseSamples.end());
+            }
+
+            if ((done % 64) == 0 || done == total) {
+                std::string msg = "buildOctree: indexed " + std::to_string(done) + "/" +
+                                  std::to_string(total) + " chunks";
+                logInfo(msg);
+                if (opts.progressCb) {
+                    float pct = total == 0 ? 1.0f : (float)done / total;
+                    // Subtree building maps from 0.5 to 1.0
+                    opts.progressCb(0.5f + pct * 0.5f, msg);
+                }
             }
         }
+    } catch (const std::exception& e) {
+        signalAbort(e.what());
+    } catch (...) {
+        signalAbort("unknown exception in chunk coordinator");
     }
 
     for (auto& w : workers) w.join();
     if (aborted) {
         std::fclose(payload);
-        logWarn("buildOctree: cancelled by user");
+        if (failed) logError("buildOctree: failed — " + failReason);
+        else        logWarn("buildOctree: cancelled by user");
         return false;
     }
     if (total > 0) {

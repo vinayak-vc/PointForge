@@ -43,6 +43,23 @@ First medium feature from docs/newdev.md landed. Test-first, per the plan.
 - CMakeLists.txt (pftest target, PF_BUILD_TESTS, enable_testing)
 - docs/{newdev,tasks,decisions,ai_handoff}.md
 
+### Review round (same session)
+Adversarial review (3 lenses, refute pass) confirmed one major defect, fixed
+along with test-harness bugs the reviewers spotted:
+- **Worker exception → std::terminate**: buildOne allocates heavily (chunk
+  load + subtree + blob + zstd bound buffers); a bad_alloc escaping the
+  std::thread callable would kill the whole viewer mid-convert (conversion is
+  in-process via JobQueue, whose try/catch can't see worker threads). Workers
+  and the coordinator drain loop are now wrapped; any failure sets a
+  failed/failReason flag, wakes everyone, joins, closes octree.bin and fails
+  the job with a logError. fwrite short-writes (disk full) also detected.
+- pftest hardening: DFS cycle no longer infinite-loops, child indices
+  bounds-checked before dereference, level check de-tautologised (strictly
+  increasing), parallel leg fixed at threads=8, and a pickPoint decode check
+  through a known synthetic cluster (byte-identity alone can't distinguish
+  correct payloads from consistently-corrupt ones).
+pftest PASS after all fixes.
+
 ### Next Recommended Task
 One live conversion through the viewer's Convert dialog (Jobs panel) on a big
 scan to smoke the UI path, then commit + PR `parallel-indexer`, flip newdev.md
