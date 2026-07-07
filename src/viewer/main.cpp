@@ -30,12 +30,15 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "viewer/Camera.h"
+#include "viewer/CamPath.h"
 #include "viewer/Shader.h"
 #include "viewer/OctreeStore.h"
 #include "viewer/PointRenderer.h"
 #include "viewer/Controller.h"
 #include "viewer/SerialController.h"
 #include "viewer/RemoteServer.h"
+#include "viewer/VideoExporter.h"
+#include "viewer/Nv12.h"
 #include "viewer/qrcodegen.hpp"
 #include "viewer/EmbeddedShaders.h"
 #include "viewer/EmbeddedImage.h"
@@ -240,7 +243,8 @@ static bool icontains(const std::string& hay, const std::string& needle) {
 
 struct Toast {
     std::string text;
-    std::string openDir;   // non-empty -> show an [Open] button loading this octree
+    std::string openDir;    // non-empty -> show an [Open] button loading this octree
+    std::string revealPath; // non-empty -> show a [Show] button revealing this file in Explorer
     float       ttl = 6.0f;
     bool        isError = false;
 };
@@ -288,6 +292,11 @@ int main(int argc, char** argv) {
     // Convert-dialog path (JobQueue + Jobs panel + toasts + load-when-done).
     // Smoke-test hook for the in-app conversion pipeline.
     std::string convertOnStart;
+    // --export-video <out.mp4>: build a default 3-key orbit path around the
+    // initially loaded cloud and start an MP4 export through the exact
+    // Export-dialog path, quitting when it finishes. Smoke-test hook for the
+    // camera-path export pipeline (same spirit as --convert).
+    std::string exportVideoOnStart;
     // Simple argument parsing
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -295,6 +304,8 @@ int main(int argc, char** argv) {
             remoteForceDiskWeb = true;
         } else if (strcmp(a, "--convert") == 0 && i + 1 < argc) {
             convertOnStart = argv[++i];
+        } else if (strcmp(a, "--export-video") == 0 && i + 1 < argc) {
+            exportVideoOnStart = argv[++i];
         } else if (i == 1) {
             // First positional argument interpreted as initial directory
             initialDir = a;
@@ -455,6 +466,60 @@ int main(int argc, char** argv) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, streamTex, 0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         streamFboW = w; streamFboH = h;
+    };
+
+    // ---- camera-path MP4 export (offline render into export-sized FBOs) ----
+    // Incremental job driven by the main loop: each viewer frame renders one or
+    // more path frames (re-rendering a frame until async node streaming settles
+    // so the video never shows half-loaded LOD), EDL-post-processes into a
+    // second FBO, reads it back, converts to NV12 and hands it to the
+    // IMFSinkWriter. The viewer stays responsive; a modal shows progress.
+    struct VideoExportJob {
+        bool  active = false;
+        int   frameIdx = 0, totalFrames = 0;
+        int   settleTicks = 0;         // renders spent waiting for LOD streaming
+        VideoExportSettings cfg;
+        VideoExporter exporter;
+        // camera state to restore when the export ends
+        glm::vec3 savedPos{0}; float savedYaw = 0, savedPitch = 0;
+        bool savedOrtho = false; float savedOrthoSize = 100;
+        // scene FBO (color+depth, like edlFbo) + post-process FBO (color only)
+        GLuint fbo = 0, colorTex = 0, depthTex = 0, postFbo = 0, postTex = 0;
+        int fboW = 0, fboH = 0;
+        std::vector<uint8_t> rgb, nv12;
+    };
+    VideoExportJob vex;
+    auto ensureExportFbo = [&](int w, int h) {
+        if (w == vex.fboW && h == vex.fboH && vex.fbo) return;
+        if (!vex.fbo)      glGenFramebuffers(1, &vex.fbo);
+        if (!vex.colorTex) glGenTextures(1, &vex.colorTex);
+        if (!vex.depthTex) glGenTextures(1, &vex.depthTex);
+        if (!vex.postFbo)  glGenFramebuffers(1, &vex.postFbo);
+        if (!vex.postTex)  glGenTextures(1, &vex.postTex);
+        glBindTexture(GL_TEXTURE_2D, vex.colorTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, vex.depthTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, vex.postTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, vex.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, vex.colorTex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, vex.depthTex, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, vex.postFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, vex.postTex, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        vex.fboW = w; vex.fboH = h;
     };
 
     // ---- camera initial framing ------------------------------------------
@@ -773,8 +838,65 @@ int main(int argc, char** argv) {
         logInfo("Bookmark saved: " + name); // (addToast is defined later)
     };
 
+    // ---- camera paths (keyframed fly-throughs, persisted per-cloud) --------
+    // Stored in AppData campaths.txt as TSV: <cloudDir> \t <t px py pz yaw pitch
+    // ortho orthoSize> — same per-dir keying rationale as bookmarks (poses are
+    // in centred space). First line is a version header.
+    std::map<std::string, CamPath> allCamPaths;
+    bool   pathPreviewing = false;   // realtime preview playing in the viewport
+    double pathPreviewT   = 0.0;
+
+    auto camPathsPath = [&]() -> std::string {
+        std::string p = "campaths.txt";
+        if (char* pref = SDL_GetPrefPath("ViitorX", "PointForge")) {
+            p = std::string(pref) + "campaths.txt";
+            SDL_free(pref);
+        }
+        return p;
+    };
+    auto loadCamPaths = [&]() {
+        allCamPaths.clear();
+        FILE* f = fopen(camPathsPath().c_str(), "r");
+        if (!f) return;
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+            if (line[0] == '#') continue;                    // version header
+            char* t1 = strchr(line, '\t'); if (!t1) continue;
+            *t1 = 0;
+            CamKey k;
+            double t;
+            if (sscanf(t1 + 1, "%lf %f %f %f %f %f %d %f",
+                       &t, &k.px, &k.py, &k.pz, &k.yaw, &k.pitch,
+                       &k.ortho, &k.orthoSize) == 8) {
+                k.t = t;
+                allCamPaths[line].keys.push_back(k);
+            }
+        }
+        fclose(f);
+        for (auto& kv : allCamPaths) kv.second.sortKeys();
+    };
+    auto saveCamPaths = [&]() {
+        FILE* f = fopen(camPathsPath().c_str(), "w");
+        if (!f) return;
+        fprintf(f, "# pf-campath 1\n");
+        for (const auto& kv : allCamPaths)
+            for (const auto& k : kv.second.keys)
+                fprintf(f, "%s\t%f %f %f %f %f %f %d %f\n",
+                        kv.first.c_str(), k.t, k.px, k.py, k.pz,
+                        k.yaw, k.pitch, k.ortho, k.orthoSize);
+        fclose(f);
+    };
+    auto applyPathPose = [&](const CamKey& k) {
+        cam.position = glm::vec3(k.px, k.py, k.pz);
+        cam.yaw = k.yaw; cam.pitch = k.pitch;
+        cam.isOrtho = k.ortho != 0;
+        cam.orthoSize = k.orthoSize;
+        pivot = glm::vec3(0.0f);
+    };
+
     loadSettings();
     loadBookmarks();
+    loadCamPaths();
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
@@ -854,11 +976,62 @@ int main(int argc, char** argv) {
     Uint32 lastEscapeTime = 0;
 
     auto addToast = [&](const std::string& text, const std::string& openDir = "",
-                        bool isError = false) {
+                        bool isError = false, const std::string& revealPath = "") {
         Toast t; t.text = text; t.openDir = openDir; t.isError = isError;
+        t.revealPath = revealPath;
         t.ttl = isError ? 10.0f : 6.0f;
         toasts.push_back(std::move(t));
         if (toasts.size() > 5) toasts.erase(toasts.begin());
+    };
+
+    // ---- camera-path export control (state machine lives in VideoExportJob) --
+    // Export dialog state (Properties > Camera Path > "Export MP4...").
+    bool showExportDialog = false;
+    int  exportResIdx = 1;                 // 720p / 1080p / 1440p / 4K
+    int  exportFpsIdx = 1;                 // 24 / 30 / 60
+    int  exportBitrate = 20;               // Mbps
+    char exportPathBuf[512] = "";
+    static const int kExportRes[][2] = { {1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160} };
+    static const int kExportFps[] = { 24, 30, 60 };
+
+    auto startVideoExport = [&]() -> bool {
+        const CamPath& path = allCamPaths[loadedDir];
+        if (!octreeLoaded || path.keys.size() < 2 || path.duration() <= 0.01) return false;
+        if (vex.active) return false;
+        vex.cfg.width = kExportRes[exportResIdx][0];
+        vex.cfg.height = kExportRes[exportResIdx][1];
+        vex.cfg.fps = kExportFps[exportFpsIdx];
+        vex.cfg.bitrateMbps = exportBitrate;
+        vex.cfg.outPath = exportPathBuf;
+        if (!vex.exporter.begin(vex.cfg)) {
+            addToast("Video export failed: " + vex.exporter.error(), "", true);
+            return false;
+        }
+        vex.totalFrames = (int)std::ceil(path.duration() * vex.cfg.fps) + 1;
+        vex.frameIdx = 0;
+        vex.settleTicks = 0;
+        vex.savedPos = cam.position; vex.savedYaw = cam.yaw; vex.savedPitch = cam.pitch;
+        vex.savedOrtho = cam.isOrtho; vex.savedOrthoSize = cam.orthoSize;
+        pathPreviewing = false;            // preview and export share the camera
+        vex.active = true;
+        return true;
+    };
+    auto endVideoExport = [&](bool canceled) {
+        if (!vex.active) return;
+        if (canceled) {
+            vex.exporter.abort();
+            addToast("Video export canceled");
+        } else if (vex.exporter.finish()) {
+            addToast("Video exported: " + baseName(vex.cfg.outPath), "", false, vex.cfg.outPath);
+#ifdef _WIN32
+            MessageBeep(MB_ICONINFORMATION);
+#endif
+        } else {
+            addToast("Video export FAILED: " + vex.exporter.error(), "", true);
+        }
+        cam.position = vex.savedPos; cam.yaw = vex.savedYaw; cam.pitch = vex.savedPitch;
+        cam.isOrtho = vex.savedOrtho; cam.orthoSize = vex.savedOrthoSize;
+        vex.active = false;
     };
 
     auto applyQualityPreset = [&](int idx) {
@@ -939,6 +1112,38 @@ int main(int argc, char** argv) {
         openConvertDialog(convertOnStart);   // fills convInputs + default output
         logInfo("--convert: enqueueing " + convertOnStart + " -> " + convOutput);
         enqueueConvert();
+    }
+
+    // --export-video smoke hook: synth a 3-key orbit path over the loaded
+    // cloud, start the export via the exact dialog path, quit when it ends.
+    bool exportHookArmed = false;
+    if (!exportVideoOnStart.empty()) {
+        if (!octreeLoaded) {
+            logError("--export-video: no cloud loaded (pass an octree dir first)");
+        } else {
+            CamPath& cp = allCamPaths[loadedDir];
+            cp.keys.clear();
+            const double cs = store.cube(store.rootIndex()).size;
+            const float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
+            const Camera savedCam = cam;
+            for (int i = 0; i < 3; ++i) {
+                const float ang = glm::radians(-90.0f + 60.0f * i);   // 120° sweep
+                cam.position = glm::vec3(std::cos(ang) * dist, std::sin(ang) * dist, dist * 0.3f);
+                cam.lookAt(glm::vec3(0.0f));
+                CamKey k;
+                k.t = i * 2.0;
+                k.px = cam.position.x; k.py = cam.position.y; k.pz = cam.position.z;
+                k.yaw = cam.yaw; k.pitch = cam.pitch;
+                k.ortho = 0; k.orthoSize = cam.orthoSize;
+                cp.keys.push_back(k);
+            }
+            cam = savedCam;
+            snprintf(exportPathBuf, sizeof(exportPathBuf), "%s", exportVideoOnStart.c_str());
+            exportResIdx = 1; exportFpsIdx = 1; exportBitrate = 20;   // 1080p30
+            logInfo("--export-video: 3-key orbit path (4 s) -> " + exportVideoOnStart);
+            exportHookArmed = startVideoExport();
+            if (!exportHookArmed) logError("--export-video: export failed to start");
+        }
     }
 
     // View presets work in CENTRED space (cube centre = origin) like frameAll —
@@ -1079,6 +1284,8 @@ int main(int argc, char** argv) {
                 } else if (k == SDLK_ESCAPE) {
                     if (stereoSBS) {
                         stereoSBS = false; saveSettings();      // Esc leaves stereo first
+                    } else if (vex.active) {
+                        endVideoExport(true);                   // Esc cancels a running export
                     } else if (showPalette) {
                         showPalette = false;
                     } else if (!typing && toolMode != TOOL_NAV) {
@@ -1305,6 +1512,13 @@ int main(int argc, char** argv) {
                     int i = (int)rc.value;
                     if (i >= 0 && i < (int)v.size()) { v.erase(v.begin() + i); saveBookmarks(); }
                 }
+                else if (rc.name == "path_play" && octreeLoaded && !vex.active) {
+                    if (allCamPaths[loadedDir].keys.size() >= 2) {
+                        pathPreviewing = true;
+                        pathPreviewT = 0.0;
+                    }
+                }
+                else if (rc.name == "path_stop") pathPreviewing = false;
             }
             if (remoteChanged) remoteSaveT = 2.0f;   // debounced settings save
 
@@ -1355,12 +1569,36 @@ int main(int argc, char** argv) {
                 rc.preferredStream = remotePreferredStream;
                 rc.appVersion = PF_VERSION_STRING;
                 for (const auto& b : allBookmarks[loadedDir]) rc.bookmarks.push_back(b.name);
+                {
+                    const CamPath& cp = allCamPaths[loadedDir];
+                    rc.pathKeys = (int)cp.keys.size();
+                    rc.pathDuration = (float)cp.duration();
+                    rc.pathPlaying = pathPreviewing;
+                }
                 remote.publishConfig(rc);
             }
         }
         // Debounced save: rapid slider streams from the phone shouldn't write
         // the config file on every message.
         if (remoteSaveT > 0.0f && (remoteSaveT -= dt) <= 0.0f) saveSettings();
+
+        // --export-video smoke hook: quit once the armed export ends (either
+        // completion or failure — the exit code is the log's job to explain).
+        if (exportHookArmed && !vex.active) running = false;
+
+        // ---- camera-path preview (realtime playback in the viewport) -------
+        if (pathPreviewing && octreeLoaded && !vex.active) {
+            const CamPath& cp = allCamPaths[loadedDir];
+            if (cp.keys.size() < 2) {
+                pathPreviewing = false;
+            } else {
+                pathPreviewT += dt;
+                CamKey k;
+                const double dur = cp.duration();
+                if (pathPreviewT >= dur) { pathPreviewT = dur; pathPreviewing = false; }
+                if (cp.sample(pathPreviewT, k)) applyPathPose(k);
+            }
+        }
 
         // ---- absorb finished async loads ---------------------------------
         if (octreeLoaded) {
@@ -1598,6 +1836,107 @@ int main(int argc, char** argv) {
             glBindVertexArray(0);
             glActiveTexture(GL_TEXTURE0);
             glEnable(GL_DEPTH_TEST);
+
+            // ---- camera-path MP4 export step (incremental offline render) ----
+            // Reuses this frame's renderPass lambda against export-sized FBOs.
+            // A path frame is only written once its LOD streaming has settled
+            // (every frustum-visible node resident), re-rendering it across
+            // viewer frames until then — capped so a stuck load can't hang the
+            // export forever. Multiple settled frames are written per viewer
+            // frame within a small time budget to keep the UI responsive.
+            if (vex.active) {
+                // Extra absorption beyond the main loop's uploadsPerFrame cap:
+                // settling wants loads on the GPU as fast as they decode.
+                for (int i = 0; i < 512; ++i) {
+                    LoadResult res;
+                    if (!store.popResult(res)) break;
+                    renderer.upload(res.nodeIndex, res.verts);
+                }
+                ensureExportFbo(vex.cfg.width, vex.cfg.height);
+                const Uint64 stepStart = SDL_GetPerformanceCounter();
+                auto stepMs = [&]() {
+                    return (double)(SDL_GetPerformanceCounter() - stepStart) * 1000.0 /
+                           (double)SDL_GetPerformanceFrequency();
+                };
+                const CamPath& cp = allCamPaths[loadedDir];
+                bool progressing = true;
+                while (vex.active && progressing && stepMs() < 30.0) {
+                    CamKey k;
+                    cp.sample((double)vex.frameIdx / vex.cfg.fps, k);
+                    const glm::vec3 uPos = cam.position;
+                    const float uYaw = cam.yaw, uPitch = cam.pitch, uAspect = cam.aspect;
+                    const bool uOrtho = cam.isOrtho; const float uOrthoSize = cam.orthoSize;
+                    cam.position = glm::vec3(k.px, k.py, k.pz);
+                    cam.yaw = k.yaw; cam.pitch = k.pitch;
+                    cam.isOrtho = k.ortho != 0; cam.orthoSize = k.orthoSize;
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, vex.fbo);
+                    glViewport(0, 0, vex.cfg.width, vex.cfg.height);
+                    glClearColor(clearColor[0], clearColor[1], clearColor[2], 1.0f);
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                    const size_t vis0 = totalVisibleNodes, drawn0 = totalDrawnNodes;
+                    renderPass(glm::vec3(0.0f), 0, 0, vex.cfg.width, vex.cfg.height);
+                    const size_t vis = totalVisibleNodes - vis0;
+                    const size_t drawn = totalDrawnNodes - drawn0;
+                    // Export traversal must not skew the on-screen stats HUD.
+                    totalVisibleNodes = vis0; totalDrawnNodes = drawn0;
+
+                    cam.position = uPos; cam.yaw = uYaw; cam.pitch = uPitch;
+                    cam.aspect = uAspect; cam.isOrtho = uOrtho; cam.orthoSize = uOrthoSize;
+
+                    if (drawn < vis && vex.settleTicks < 240) {
+                        ++vex.settleTicks;      // wait for streaming; retry next tick
+                        progressing = false;
+                    } else {
+                        if (drawn < vis)
+                            logWarn("Video export: frame " + std::to_string(vex.frameIdx) +
+                                    " written with " + std::to_string(vis - drawn) +
+                                    " nodes still loading (settle timeout)");
+                        vex.settleTicks = 0;
+                        // EDL post-process into the color-only post FBO — the
+                        // exported pixels match the viewport exactly.
+                        glBindFramebuffer(GL_FRAMEBUFFER, vex.postFbo);
+                        glViewport(0, 0, vex.cfg.width, vex.cfg.height);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                        glDisable(GL_DEPTH_TEST);
+                        edlShader.use();
+                        edlShader.setInt("uColor", 0);
+                        edlShader.setInt("uDepth", 1);
+                        edlShader.setVec2("uTexel", 1.0f / (float)vex.cfg.width, 1.0f / (float)vex.cfg.height);
+                        edlShader.setFloat("uStrength", edlStrength);
+                        edlShader.setFloat("uRadius", edlRadius);
+                        edlShader.setInt("uEdlOn", enableEDL ? 1 : 0);
+                        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, vex.colorTex);
+                        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, vex.depthTex);
+                        glBindVertexArray(quadVao);
+                        glDrawArrays(GL_TRIANGLES, 0, 3);
+                        glBindVertexArray(0);
+                        glActiveTexture(GL_TEXTURE0);
+                        glEnable(GL_DEPTH_TEST);
+
+                        glBindFramebuffer(GL_READ_FRAMEBUFFER, vex.postFbo);
+                        vex.rgb.resize((size_t)vex.cfg.width * vex.cfg.height * 3);
+                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                        glReadPixels(0, 0, vex.cfg.width, vex.cfg.height,
+                                     GL_RGB, GL_UNSIGNED_BYTE, vex.rgb.data());
+                        vex.nv12.resize((size_t)vex.cfg.width * vex.cfg.height * 3 / 2);
+                        rgbToNv12BottomUp(vex.rgb.data(), vex.cfg.width, vex.cfg.height,
+                                          vex.nv12.data());
+                        if (!vex.exporter.writeFrameNV12(vex.nv12.data(), vex.nv12.size())) {
+                            addToast("Video export FAILED: " + vex.exporter.error(), "", true);
+                            vex.exporter.abort();
+                            cam.position = vex.savedPos; cam.yaw = vex.savedYaw;
+                            cam.pitch = vex.savedPitch; cam.isOrtho = vex.savedOrtho;
+                            cam.orthoSize = vex.savedOrthoSize;
+                            vex.active = false;
+                        } else if (++vex.frameIdx >= vex.totalFrames) {
+                            endVideoExport(false);
+                        }
+                    }
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glViewport(0, 0, winW, winH);
+            }
         } else {
             glViewport(0, 0, winW, winH);
             glClearColor(clearColor[0], clearColor[1], clearColor[2], 1.0f);
@@ -1608,7 +1947,9 @@ int main(int argc, char** argv) {
         // Backbuffer now holds the post-EDL scene and no UI yet — exactly what
         // the phone should see. wantFrame() gates on subscribers + encoder
         // idle + fps interval, so the blit/readback cost is only paid then.
-        if (remote.wantFrame() && winW > 0 && winH > 0) {
+        // Suspended while a video export runs: the backbuffer shows a stale
+        // viewport and the export must not fight the stream encoder.
+        if (!vex.active && remote.wantFrame() && winW > 0 && winH > 0) {
             int sw = std::max(2, std::min(remote.streamMaxWidth(), winW)) & ~1;
             int sh = std::max(2, (int)((int64_t)sw * winH / winW)) & ~1;
             ensureStreamFbo(sw, sh);
@@ -2109,6 +2450,88 @@ int main(int argc, char** argv) {
                         ImGui::EndDisabled();
                     }
 
+                    // Camera Path (keyframed fly-through + MP4 export)
+                    if (ImGui::CollapsingHeader("Camera Path")) {
+                        ImGui::BeginDisabled(!octreeLoaded);
+                        auto& cp = allCamPaths[loadedDir];
+                        bool pathChanged = false;
+                        int delKey = -1;
+                        for (int i = 0; i < (int)cp.keys.size(); ++i) {
+                            ImGui::PushID(i);
+                            ImGui::Text("%2d", i + 1);
+                            ImGui::SameLine();
+                            float tf = (float)cp.keys[i].t;
+                            ImGui::SetNextItemWidth(80.0f * S);
+                            if (ImGui::DragFloat("##kt", &tf, 0.05f, 0.0f, 3600.0f, "%.1f s"))
+                                cp.keys[i].t = std::max(0.0f, tf);
+                            // Re-sort only once the edit ends, so dragging a key's
+                            // time past a neighbour doesn't reshuffle mid-drag.
+                            if (ImGui::IsItemDeactivatedAfterEdit()) { cp.sortKeys(); pathChanged = true; }
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Go")) { pathPreviewing = false; applyPathPose(cp.keys[i]); }
+                            ImGui::SetItemTooltip("Jump the camera to this keyframe");
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Set")) {
+                                cp.keys[i].px = cam.position.x;
+                                cp.keys[i].py = cam.position.y;
+                                cp.keys[i].pz = cam.position.z;
+                                cp.keys[i].yaw = cam.yaw;
+                                cp.keys[i].pitch = cam.pitch;
+                                cp.keys[i].ortho = cam.isOrtho ? 1 : 0;
+                                cp.keys[i].orthoSize = cam.orthoSize;
+                                pathChanged = true;
+                            }
+                            ImGui::SetItemTooltip("Overwrite this keyframe with the current view");
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("x")) delKey = i;
+                            ImGui::PopID();
+                        }
+                        if (delKey >= 0) { cp.keys.erase(cp.keys.begin() + delKey); pathChanged = true; }
+                        if (ImGui::Button("Add Key at Current View")) {
+                            CamKey k;
+                            k.t = cp.keys.empty() ? 0.0 : cp.duration() + 2.0;
+                            k.px = cam.position.x; k.py = cam.position.y; k.pz = cam.position.z;
+                            k.yaw = cam.yaw; k.pitch = cam.pitch;
+                            k.ortho = cam.isOrtho ? 1 : 0; k.orthoSize = cam.orthoSize;
+                            cp.keys.push_back(k);
+                            pathChanged = true;
+                        }
+                        if (!cp.keys.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Clear")) { cp.keys.clear(); pathChanged = true; }
+                        }
+                        if (cp.keys.size() >= 2) {
+                            const float dur = (float)cp.duration();
+                            ImGui::Text("Duration: %.1f s", dur);
+                            static float pathScrub = 0.0f;
+                            pathScrub = std::min(pathScrub, dur);
+                            if (ImGui::SliderFloat("Scrub", &pathScrub, 0.0f, dur, "%.1f s")) {
+                                pathPreviewing = false;
+                                CamKey k;
+                                if (cp.sample(pathScrub, k)) applyPathPose(k);
+                            }
+                            ImGui::SetItemTooltip("Drag to move the camera along the path");
+                            if (ImGui::Button(pathPreviewing ? "Stop Preview" : "Preview")) {
+                                if (pathPreviewing) pathPreviewing = false;
+                                else if (!vex.active) { pathPreviewing = true; pathPreviewT = 0.0; }
+                            }
+                            ImGui::SameLine();
+                            ImGui::BeginDisabled(vex.active);
+                            if (ImGui::Button("Export MP4...")) {
+                                showExportDialog = true;
+                                if (!exportPathBuf[0]) {
+                                    std::string def = screenshotDir() + baseName(loadedDir) + "_flythrough.mp4";
+                                    snprintf(exportPathBuf, sizeof(exportPathBuf), "%s", def.c_str());
+                                }
+                            }
+                            ImGui::EndDisabled();
+                        } else {
+                            ImGui::TextDisabled("Add at least 2 keys to build a path.");
+                        }
+                        if (pathChanged) saveCamPaths();
+                        ImGui::EndDisabled();
+                    }
+
                     // Tool sections APPEND (never replace the panel) so display
                     // settings stay reachable mid-tool.
                     if (toolMode == TOOL_MEASURE) {
@@ -2440,6 +2863,89 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("Runs in the background - watch it in the Jobs panel.");
                 }
                 ImGui::End();
+            }
+
+            // ---- Export Video dialog (Properties > Camera Path) -----------------
+            if (showExportDialog) {
+                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                               vp->WorkPos.y + vp->WorkSize.y * 0.45f),
+                                        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                if (ImGui::Begin("Export Video", &showExportDialog,
+                                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
+                    const CamPath& cp = allCamPaths[loadedDir];
+                    const float dur = (float)cp.duration();
+                    const char* resNames[] = { "1280 x 720", "1920 x 1080 (Full HD)",
+                                               "2560 x 1440", "3840 x 2160 (4K)" };
+                    const char* fpsNames[] = { "24", "30", "60" };
+                    ImGui::SetNextItemWidth(220.0f * S);
+                    ImGui::Combo("Resolution", &exportResIdx, resNames, IM_ARRAYSIZE(resNames));
+                    ImGui::SetNextItemWidth(220.0f * S);
+                    ImGui::Combo("Frame rate", &exportFpsIdx, fpsNames, IM_ARRAYSIZE(fpsNames));
+                    ImGui::SetNextItemWidth(220.0f * S);
+                    ImGui::SliderInt("Bitrate", &exportBitrate, 5, 100, "%d Mbps");
+                    ImGui::SetItemTooltip("H.264 average bitrate. Dense point content wants more than typical video.");
+
+                    ImGui::Text("Output");
+                    ImGui::SameLine(90.0f * S);
+                    if (ImGui::Button("Browse...##mp4")) {
+                        std::string defName = baseName(loadedDir) + "_flythrough.mp4";
+                        std::string p = pf::saveFileDialog("MP4 Video\0*.mp4\0All Files\0*.*\0",
+                                                           defName.c_str(), "mp4");
+                        if (!p.empty()) snprintf(exportPathBuf, sizeof(exportPathBuf), "%s", p.c_str());
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    ImGui::InputText("##mp4path", exportPathBuf, sizeof(exportPathBuf));
+
+                    const int fps = kExportFps[exportFpsIdx];
+                    const int frames = (int)std::ceil(dur * fps) + 1;
+                    ImGui::TextDisabled("%.1f s path  -  %d frames  -  ~%.0f MB at %d Mbps",
+                                        dur, frames, dur * exportBitrate / 8.0, exportBitrate);
+
+                    const bool canExport = octreeLoaded && cp.keys.size() >= 2 && dur > 0.01f &&
+                                           exportPathBuf[0] != 0 && VideoExporter::available() &&
+                                           !vex.active;
+                    ImGui::BeginDisabled(!canExport);
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.85f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.53f, 0.95f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.38f, 0.75f, 1.0f));
+                    if (ImGui::Button("Start Export", ImVec2(-FLT_MIN, 30.0f * S))) {
+                        if (startVideoExport()) showExportDialog = false;
+                    }
+                    ImGui::PopStyleColor(3);
+                    ImGui::EndDisabled();
+                    if (!VideoExporter::available())
+                        ImGui::TextDisabled("MP4 export requires Windows (Media Foundation).");
+                    else if (cp.keys.size() < 2 || dur <= 0.01f)
+                        ImGui::TextDisabled("The path needs at least 2 keys spanning some time.");
+                }
+                ImGui::End();
+            }
+
+            // ---- video export progress (modal; Cancel aborts + deletes) ---------
+            if (vex.active && !ImGui::IsPopupOpen("Exporting Video"))
+                ImGui::OpenPopup("Exporting Video");
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                           vp->WorkPos.y + vp->WorkSize.y * 0.45f),
+                                    ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::BeginPopupModal("Exporting Video", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                if (!vex.active) {
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    ImGui::Text("%s   (%dx%d @ %d fps)", baseName(vex.cfg.outPath).c_str(),
+                                vex.cfg.width, vex.cfg.height, vex.cfg.fps);
+                    char ov[48];
+                    snprintf(ov, sizeof(ov), "%d / %d frames", vex.frameIdx, vex.totalFrames);
+                    float frac = vex.totalFrames > 0 ? (float)vex.frameIdx / (float)vex.totalFrames : 0.0f;
+                    ImGui::ProgressBar(frac, ImVec2(340.0f * S, 0), ov);
+                    if (vex.settleTicks > 0)
+                        ImGui::TextDisabled("Waiting for detail to stream in...");
+                    else
+                        ImGui::TextDisabled("Rendering offline at full LOD...");
+                    if (ImGui::Button("Cancel", ImVec2(100, 0))) endVideoExport(true);
+                }
+                ImGui::EndPopup();
             }
 
             // ---- Preferences dialog ---------------------------------------------
@@ -2916,6 +3422,16 @@ int main(int argc, char** argv) {
                                 t.ttl = 0.0f;
                             }
                         }
+#ifdef _WIN32
+                        if (!t.revealPath.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Show")) {
+                                std::string args = "/select,\"" + t.revealPath + "\"";
+                                ShellExecuteA(nullptr, "open", "explorer.exe",
+                                              args.c_str(), nullptr, SW_SHOWNORMAL);
+                            }
+                        }
+#endif
                         ty -= ImGui::GetWindowSize().y + 8.0f;
                     }
                     ImGui::End();

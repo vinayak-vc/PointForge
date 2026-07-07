@@ -20,7 +20,7 @@ tree on 2026-07-06.
 |---|--------------------------------------|---------|-------|-------|
 | 1 | Parallel indexer (Phase C)           | DONE | branch `parallel-indexer` | 2.9× real-scan phase C; byte-identical output; pftest added; in-app JobQueue smoke ✔ (`--convert` hook) |
 | 2 | Multi-client roles (view-only mode)  | DONE | branch `multi-client-roles` | viewer PIN, server-side gating, read-only UI; live-verified driver+viewer side by side |
-| 3 | Camera path animation + MP4 export   | PLANNED |       |       |
+| 3 | Camera path animation + MP4 export   | DONE | branch `camera-path-export` | CamPath spline + IMFSinkWriter MP4; smoke-verified 1080p30 export (121 frames) via `--export-video` hook |
 | 4 | Cross-section / slice export         | PLANNED |       |       |
 | 5 | Annotations from phone               | PLANNED |       |       |
 | 6 | Multi-cloud scene                    | PLANNED |       |       |
@@ -175,36 +175,46 @@ feature.
 
 **Plan**
 - Week 1 — engine:
-  - [ ] `src/viewer/CamPath.h` — `struct CamKey { double t; pose (same fields
-        as CamBookmark); }` + Catmull-Rom position / slerp-ish yaw-pitch
-        interpolation (angles interpolated shortest-way; ease-in/out per
-        segment optional flag). Persist per-cloud next to bookmarks
-        (`campaths.txt`, same TSV pattern, versioned header line).
-  - [ ] `src/viewer/VideoExporter.{h,cpp}` — **new, self-contained**: wraps
-        `IMFSinkWriter` (`MFCreateSinkWriterFromURL`) + reuses the encoder
-        *selection* logic pattern (Sink Writer does its own MFT selection —
-        set `MF_SINK_WRITER_ENABLE_HARDWARE_TRANSFORMS` and feed NV12 samples;
-        we do NOT reuse the WebRTC packetizer path, only the NV12 conversion
-        helper — lift it out of RemoteServer into a shared
-        `src/viewer/Nv12.h`). Input: NV12 frames + timestamps; output MP4
-        (H.264, configurable bitrate/fps/size).
-  - [ ] Offline render loop: modal job — for frame i: set cam from
-        `path.sample(i/fps)`, render `renderPass` into an export-sized FBO
-        (independent of window size), `glReadPixels`, NV12, SinkWriter write.
-        Runs on the main thread with a progress dialog (GL context is main
-        thread; encode submission is cheap — SinkWriter has its own thread).
-        Cancel button. UI suppressed in export frames (like stereo SBS zero-
-        chrome path).
+  - [x] `src/viewer/CamPath.h` — `CamKey{t, px/py/pz, yaw, pitch, ortho,
+        orthoSize}` + **non-uniform** Catmull-Rom (finite-difference tangents,
+        so unevenly spaced key times don't overshoot); yaw unwrapped to the
+        shortest way across the four control points; pitch clamped ±89 at
+        sample time; ortho is a step channel (previous key wins). Persisted
+        per-cloud in AppData `campaths.txt` (TSV, `# pf-campath 1` header,
+        same keying as bookmarks).
+  - [x] `src/viewer/VideoExporter.{h,cpp}` — self-contained IMFSinkWriter
+        wrapper (`MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS`, NV12 in → H.264
+        High MP4 out, per-frame-index timestamps so rounding never drifts).
+        Owns its COM/MFStartup lifetime (ref-counted, tolerates the app's
+        apartment); `abort()` skips Finalize and deletes the partial file.
+        NV12 conversion lifted out of RemoteServer into shared
+        `src/viewer/Nv12.h` (`rgbToNv12BottomUp`, used by both paths).
+  - [x] Offline render loop: incremental in-frame job (not a modal freeze) —
+        each viewer frame renders as many settled export frames as fit a
+        30 ms budget into an export-sized FBO pair (scene + EDL post), reads
+        back RGB, NV12-converts, SinkWriter-writes. A frame is only written
+        once its frustum-visible nodes are all GPU-resident (LOD settle, max
+        240 retries then written-with-warning). Progress modal + Cancel;
+        Esc cancels too; camera saved/restored around the export.
 - Week 2 — UX + polish:
-  - [ ] Properties > "Camera Path" section (appears like Measure/Clip):
-        keyframe list (add-at-current-pose, reorder, per-key time, goto),
-        duration, preview scrub slider (sets camera live), "Preview" (play in
-        viewport realtime), "Export MP4..." (resolution 720/1080/1440/4K
-        presets, fps 24/30/60, bitrate slider default 20 Mbps, file picker).
-  - [ ] Remote: broadcast path key names in cfg (like bookmarks), phone gets
-        Play/Stop preview cmds (`path_play`/`path_stop`). Export stays
-        PC-only.
-  - [ ] Toast + open-folder on completion (existing addToast openDir).
+  - [x] Properties > "Camera Path" collapsing header: keyframe list
+        (per-key DragFloat time — re-sorts on edit-end so mid-drag doesn't
+        reshuffle, Go / Set-to-current-view / delete), Add Key at Current
+        View (+2 s after last), Clear, duration readout, Scrub slider (moves
+        camera live), Preview play/stop, "Export MP4..." dialog (720/1080/
+        1440/4K, 24/30/60 fps, 5–100 Mbps slider default 20, Browse via
+        `pf::saveFileDialog` — new save-dialog support in FileDialog.{h,cpp},
+        size estimate line, guarded Start button).
+  - [x] Remote: cfg broadcasts `pathKeys`/`pathDuration`/`pathPlaying`;
+        `path_play`/`path_stop` cmds; CameraTab "Camera Path" card with
+        Play/Stop (or an author-on-PC hint when <2 keys). Export stays
+        PC-only. Streaming `wantFrame()` suspended while an export runs
+        (stale backbuffer + encoder contention).
+  - [x] Toast on completion with a [Show] button (Explorer /select reveal —
+        `Toast.revealPath`), MessageBeep, error/cancel toasts.
+  - [x] Bonus: `--export-video <out.mp4>` smoke hook (same spirit as
+        `--convert`): synths a 3-key 120° orbit path over the loaded cloud,
+        drives the exact Export-dialog path, quits when the export ends.
 
 **Risks (from scout):** render loop is vsync-tied — the export loop must run
 its own pump (don't wait for swap; render FBO-only, no SwapWindow needed per
@@ -215,9 +225,14 @@ thread — MFStartup is currently done on encThread; VideoExporter must
 MFStartup/Shutdown itself (ref-counted, safe). Streaming while exporting:
 disable `wantFrame()` during export (encoder contention + wrong camera).
 
-**Acceptance:** 3-keyframe path over a real scan exports a 1080p30 MP4 that
-plays in Windows Media Player + phone; export cancel works; path persists per
-cloud; preview matches export framing.
+**Acceptance:** ✔ 3-keyframe path over a real scan (Tikal-13, 12.4M pts)
+exports a 1080p30 MP4 via the `--export-video` hook: 121 frames, exit 0,
+ffprobe-verified `h264 High 1920x1080 30/1 nb_frames=121` (standard MP4 —
+plays in WMP/phone players); ✔ cancel path implemented (Cancel button + Esc →
+`abort()` deletes the partial file) — code-verified, not yet exercised live;
+✔ path persists per cloud (campaths.txt, loaded at startup); ✔ preview and
+export share the same `CamPath::sample` + `renderPass` (identical framing by
+construction; export additionally waits for full LOD settle).
 
 ---
 

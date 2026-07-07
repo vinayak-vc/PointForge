@@ -1,5 +1,6 @@
 #include "RemoteServer.h"
 #include "common/Log.h"
+#include "Nv12.h"
 #include <cmath>
 
 #ifdef PF_WITH_REMOTE
@@ -381,33 +382,10 @@ struct RemoteServerImpl {
 
 #if defined(PF_REMOTE_WEBRTC) && defined(_WIN32)
             if (nWebrtc > 0 && initMF(w, h)) {
-                // Convert RGB to NV12
+                // Convert RGB to NV12 (shared helper — also used by VideoExporter)
                 int nv12Size = w * h + (w * h) / 2;
-                if (nv12Buf.size() < nv12Size) nv12Buf.resize(nv12Size);
-                uint8_t* yPlane = nv12Buf.data();
-                uint8_t* uvPlane = nv12Buf.data() + w * h;
-                
-                for (int y = 0; y < h; ++y) {
-                    const uint8_t* srcRow = rgb.data() + (h - 1 - y) * w * 3;
-                    uint8_t* dstY = yPlane + y * w;
-                    uint8_t* dstUV = uvPlane + (y / 2) * w;
-                    
-                    for (int x = 0; x < w; ++x) {
-                        int r = srcRow[x * 3 + 0];
-                        int g = srcRow[x * 3 + 1];
-                        int b = srcRow[x * 3 + 2];
-                        
-                        int Y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-                        dstY[x] = (uint8_t)std::clamp(Y, 0, 255);
-                        
-                        if (y % 2 == 0 && x % 2 == 0) {
-                            int U = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                            int V = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-                            dstUV[x] = (uint8_t)std::clamp(U, 0, 255);
-                            dstUV[x + 1] = (uint8_t)std::clamp(V, 0, 255);
-                        }
-                    }
-                }
+                if ((int)nv12Buf.size() < nv12Size) nv12Buf.resize(nv12Size);
+                rgbToNv12BottomUp(rgb.data(), w, h, nv12Buf.data());
 
                 // ---- shared: fan an encoded sample out to WebRTC clients ----
                 auto sendEncodedSample = [&](IMFSample* smp) {
@@ -1091,7 +1069,9 @@ void RemoteServer::publishConfig(const RemoteConfig& c) {
         {"streamAvailable", c.streamAvailable},
         {"webrtcAvailable", c.webrtcAvailable},
         {"preferredStream", c.preferredStream},
-        {"bookmarks", c.bookmarks}
+        {"bookmarks", c.bookmarks},
+        {"pathKeys", c.pathKeys}, {"pathDuration", c.pathDuration},
+        {"pathPlaying", c.pathPlaying}
     };
     json mp = json::array();
     for (const auto& p : c.measurePts) mp.push_back({p[0], p[1], p[2]});

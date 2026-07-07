@@ -15,4 +15,10 @@ std::vector<std::string> openFileDialogMulti(const char* filters);
 // Opens a native folder selection dialog.
 std::string openFolderDialog();
 
+// Opens a native "Save As" dialog. Same filter format as openFileDialog;
+// defaultName pre-fills the file name field, defaultExt (no dot, e.g. "mp4")
+// is appended when the user types a bare name. Empty string on cancel.
+std::string saveFileDialog(const char* filters, const char* defaultName,
+                           const char* defaultExt);
+
 } // namespace pf

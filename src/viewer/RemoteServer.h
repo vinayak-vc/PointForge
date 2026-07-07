@@ -60,6 +60,12 @@ struct RemoteConfig {
     // {"t":"cmd","n":"bookmark_goto","v":<idx>}, save via "bookmark_add",
     // delete via "bookmark_del")
     std::vector<std::string> bookmarks;
+    // camera path (keyframed fly-through) for the loaded cloud. Phone gets
+    // preview transport only ({"t":"cmd","n":"path_play"|"path_stop"});
+    // authoring + MP4 export stay PC-side.
+    int   pathKeys = 0;              // keyframe count (>=2 -> playable)
+    float pathDuration = 0;          // seconds
+    bool  pathPlaying = false;       // preview currently running
 };
 
 struct RemoteServerImpl;   // defined in RemoteServer.cpp (civetweb kept out of headers)
