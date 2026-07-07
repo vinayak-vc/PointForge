@@ -19,7 +19,7 @@ tree on 2026-07-06.
 | # | Feature                              | Status  | Owner | Notes |
 |---|--------------------------------------|---------|-------|-------|
 | 1 | Parallel indexer (Phase C)           | DONE | branch `parallel-indexer` | 2.9× real-scan phase C; byte-identical output; pftest added; in-app JobQueue smoke ✔ (`--convert` hook) |
-| 2 | Multi-client roles (view-only mode)  | PLANNED |       |       |
+| 2 | Multi-client roles (view-only mode)  | DONE | branch `multi-client-roles` | viewer PIN, server-side gating, read-only UI; live-verified driver+viewer side by side |
 | 3 | Camera path animation + MP4 export   | PLANNED |       |       |
 | 4 | Cross-section / slice export         | PLANNED |       |       |
 | 5 | Annotations from phone               | PLANNED |       |       |
@@ -122,32 +122,35 @@ drive. "Boss watches on tablet while you drive."
   `status === 'connected'`.
 
 **Plan**
-- [ ] `Client.role` enum: `driver` / `viewer`. Two PINs: existing 4-digit PIN
-      = driver; new independent 4-digit view PIN (regenerated per start,
-      shown in the same QR modal — second QR or a "viewer PIN" line).
-      `hello{pin}` matches either → `hello_ok` gains `{"role":"driver"|"viewer"}`.
-- [ ] Server gating: `move`, `cmd`, `set` from a `viewer` role → silently
-      ignored (return 1, optionally log once). `stream`/`webrtc_*` allowed for
-      both. `state`/`cfg` broadcast to both.
-- [ ] Optional single-driver rule: if a driver is already connected, later
-      driver hellos still work (current last-write-wins behaviour kept —
-      simplest; arbitration explicitly out of scope, note in decisions.md).
-- [ ] Webremote: store role from `hello_ok`; `viewer` role hides Fly overlay,
-      toolbar edit controls, sliders (render read-only Display/Tools info +
-      video). Banner "View-only".
-- [ ] Viewer preferences: checkbox "Allow view-only clients" (default on) +
-      show both PINs in Preferences > Input and the QR dialog.
-- [ ] Security note: view PIN still required — never expose the stream
-      unauthenticated (same reasoning as /shot.png PIN gate).
+- [x] `Client.viewer` flag. Two PINs: driver (existing) + independent viewer
+      PIN, both regenerated per start (guaranteed distinct). `hello{pin}`
+      matches either → `hello_ok` carries `{"role":"driver"|"viewer"}`.
+- [x] Server gating: `move`/`cmd`/`set` from a viewer silently ignored;
+      `stream`/`webrtc_*` + `state`/`cfg` broadcasts for both roles.
+      `/shot.png` accepts either PIN (read-only by nature).
+- [x] Single-driver arbitration explicitly out of scope (last-write-wins
+      kept) — recorded in decisions.md.
+- [x] Webremote: `role` from `hello_ok` via useWebSocket; viewer role = video
+      + status bar + stream controls only (no Fly overlay/gestures, no
+      inspector, no move loop, no presets/toggles/speed), "View-only" banner.
+- [x] Viewer preferences: "Allow view-only clients" checkbox (persisted,
+      default on, applied live via setAllowViewers); driver+viewer PINs and
+      viewer count shown in Preferences > Input and the QR dialog.
+- [x] Security: viewer PIN always required; allow-viewers off = viewer PIN
+      rejected entirely.
 
 **Risks:** broadcast fan-out already holds `clMx` during the whole loop — more
 clients amplifies the slow-client stall risk (documented in scout); acceptable
 for LAN v1, note as follow-up. Don't touch the JPEG/WebRTC per-client encode
 paths (they already handle N clients).
 
-**Acceptance:** phone drives while a second browser watches live; view client
-cannot move camera or change settings (verified by sending forged `move`);
-both PINs rotate on server restart.
+**Acceptance:** ✔ all verified live against the real exe (two concurrent WS
+clients): driver role moves camera; viewer's forged `move`×45 + `cmd
+bookmark_add` + `set pointSize` all ignored (camera pos, cfg unchanged);
+viewer receives JPEG frames + state broadcasts; bad PIN still rejected; both
+PINs rotate on restart (distinct by construction). Browser UI as viewer:
+"View-only" badge over live video, toolbar reduced to brand+Stream, no
+inspector/gestures/move-loop.
 
 ---
 

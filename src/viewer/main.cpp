@@ -522,6 +522,7 @@ int main(int argc, char** argv) {
     float remoteCfgT   = 0.0f;       // cfg broadcast heartbeat accumulator
     float remoteSaveT  = -1.0f;      // debounced saveSettings() after remote edits
     int remotePreferredStream = 0;   // 0: JPEG, 1: WebRTC
+    bool remoteAllowViewers = true;  // second watch-only PIN active
     // Control page lives beside the exe (like shaders/); resolve via the exe
     // path, not the cwd, so launching from a terminal elsewhere still works.
     std::string remoteWebRoot = "web";
@@ -629,6 +630,7 @@ int main(int argc, char** argv) {
         fprintf(f, "jBtns=%d,%d,%d,%d,%d,%d\n", pad.jBtnA, pad.jBtnB, pad.jBtnLB, pad.jBtnRB, pad.jBtnBack, pad.jBtnStart);
         fprintf(f, "remoteEnabled=%d\n", (int)remoteEnabled);
         fprintf(f, "remotePort=%d\n", remotePort);
+        fprintf(f, "remoteAllowViewers=%d\n", (int)remoteAllowViewers);
         fprintf(f, "serialEnabled=%d\n", (int)serialEnabled);
         fprintf(f, "serialAuto=%d\n", (int)serialAuto);
         fprintf(f, "serialMac=%s\n", serialMac.c_str());
@@ -680,6 +682,7 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "jBtns=%d,%d,%d,%d,%d,%d", &pad.jBtnA, &pad.jBtnB, &pad.jBtnLB, &pad.jBtnRB, &pad.jBtnBack, &pad.jBtnStart) == 6) {}
             else if (sscanf(line, "remoteEnabled=%d", &i) == 1) remoteEnabled = (i != 0);
             else if (sscanf(line, "remotePort=%d", &i) == 1) remotePort = std::clamp(i, 1024, 65535);
+            else if (sscanf(line, "remoteAllowViewers=%d", &i) == 1) remoteAllowViewers = (i != 0);
             else if (sscanf(line, "serialEnabled=%d", &i) == 1) serialEnabled = (i != 0);
             else if (sscanf(line, "serialAuto=%d", &i) == 1) serialAuto = (i != 0);
             else if (strncmp(line, "serialMac=", 10) == 0) {
@@ -775,6 +778,7 @@ int main(int argc, char** argv) {
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
+    remote.setAllowViewers(remoteAllowViewers);
     if (remoteEnabled && RemoteServer::available()) remote.start(remotePort, remoteWebRoot);
     if (stereoSBS) stereoHintT = 5.0f;   // booted straight into stereo -> show the exit hint
 
@@ -2557,12 +2561,20 @@ int main(int argc, char** argv) {
                                     remotePort = std::clamp(rp, 1024, 65535);
                                     settingsChanged = true;
                                 }
+                                if (ImGui::Checkbox("Allow view-only clients", &remoteAllowViewers)) {
+                                    settingsChanged = true;
+                                    remote.setAllowViewers(remoteAllowViewers);
+                                }
+                                helpMarker("A second PIN grants watch-only access: video stream and status, "
+                                           "but camera input and settings changes are ignored.");
                                 if (remote.running()) {
                                     ImGui::TextColored(ImVec4(0.6f, 1, 0.6f, 1), "Serving: %s", remote.url().c_str());
-                                    ImGui::Text("PIN: %s   Clients: %d", remote.pin().c_str(), remote.clientCount());
+                                    ImGui::Text("Driver PIN: %s   Clients: %d", remote.pin().c_str(), remote.clientCount());
+                                    if (remoteAllowViewers)
+                                        ImGui::Text("Viewer PIN: %s   Viewers: %d", remote.viewPin().c_str(), remote.viewerCount());
                                     if (ImGui::Button("Show connect QR")) showRemoteQR = true;
                                     ImGui::SameLine();
-                                    if (ImGui::Button("Restart (new PIN)")) remote.start(remotePort, remoteWebRoot);
+                                    if (ImGui::Button("Restart (new PINs)")) remote.start(remotePort, remoteWebRoot);
                                 } else if (remoteEnabled) {
                                     ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "Failed to start (port in use?)");
                                 }
@@ -2632,7 +2644,9 @@ int main(int argc, char** argv) {
                             }
                     ImGui::Dummy(ImVec2(size, size));
                     ImGui::Text("URL: %s", curUrl.c_str());
-                    ImGui::Text("PIN: %s", remote.pin().c_str());
+                    ImGui::Text("Driver PIN: %s", remote.pin().c_str());
+                    if (remoteAllowViewers)
+                        ImGui::Text("Viewer PIN: %s  (watch-only)", remote.viewPin().c_str());
                 } else {
                     ImGui::TextUnformatted("Web remote is not running.");
                 }

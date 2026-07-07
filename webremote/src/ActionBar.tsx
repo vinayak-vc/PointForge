@@ -15,6 +15,8 @@ export interface ActionBarProps {
   streamAvailable: boolean;
   /** Take a screenshot on the PC and download it to this device. */
   onShot: () => void;
+  /** Watch-only role: only the brand + stream controls are shown. */
+  readOnly?: boolean;
 }
 
 const SPEED_MIN = 0.1;
@@ -32,6 +34,7 @@ const VQ_OPTIONS: ReadonlyArray<readonly [VideoQuality, string]> = [
 
 export default function ActionBar({
   send, cfg, setValue, videoOn, onVideoToggle, videoQuality, onVideoQuality, streamAvailable, onShot,
+  readOnly = false,
 }: ActionBarProps) {
   const cmd = (n: string) => () => send({ t: 'cmd', n });
   const speed = clamp(cfg?.speed ?? SPEED_DEFAULT, SPEED_MIN, SPEED_MAX);
@@ -45,6 +48,7 @@ export default function ActionBar({
       </div>
 
       {/* View presets — icon-only (duplicated w/ labels in the Camera tab) */}
+      {!readOnly && (
       <div className="toolbar-group toolbar-group--dup">
         <button className="toolbar-btn toolbar-btn--icon" onClick={cmd('frame')} title="Frame all points" aria-label="Frame all points">
           <Frame size={15} />
@@ -59,10 +63,12 @@ export default function ActionBar({
           <LayoutGrid size={15} />
         </button>
       </div>
+      )}
 
-      <div className="toolbar-divider toolbar-group--dup" />
+      {!readOnly && <div className="toolbar-divider toolbar-group--dup" />}
 
       {/* View toggles + capture — one clubbed group, icon-only */}
+      {!readOnly && (
       <div className="toolbar-group toolbar-group--dup">
         <button
           className={`toolbar-btn toolbar-btn--icon${cfg?.ortho ? ' active' : ''}`}
@@ -95,6 +101,7 @@ export default function ActionBar({
           <Maximize2 size={15} />
         </button>
       </div>
+      )}
 
       {/* Stream */}
       {streamAvailable && (
@@ -130,7 +137,8 @@ export default function ActionBar({
 
       <div className="toolbar-spacer" />
 
-      {/* Speed */}
+      {/* Speed (drivers only) */}
+      {!readOnly && (
       <div className="toolbar-speed">
         <span className="toolbar-speed-label">
           Speed {speed < 1 ? speed.toFixed(2) : speed.toFixed(1)}×
@@ -146,6 +154,7 @@ export default function ActionBar({
           aria-label="Fly speed"
         />
       </div>
+      )}
     </div>
   );
 }

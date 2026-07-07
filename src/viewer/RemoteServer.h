@@ -98,9 +98,18 @@ public:
     bool running() const;
 
     int         port() const;
-    std::string pin() const;                 // "0000".."9999"
+    std::string pin() const;                 // driver PIN, "0000".."9999"
     std::string url() const;                 // http://<lan-ipv4>:<port>/
     int         clientCount() const;         // currently authed sockets
+
+    // ---- roles -------------------------------------------------------------
+    // Two PINs, two roles. The driver PIN grants full control; the viewer PIN
+    // grants watch-only access (stream + state/cfg broadcasts; move/cmd/set
+    // are silently ignored server-side). Both regenerate on start(). hello_ok
+    // carries {"role":"driver"|"viewer"} so the web UI can adapt.
+    std::string viewPin() const;             // viewer PIN, always != pin()
+    void setAllowViewers(bool allow);        // default true; off = viewer PIN rejected
+    int  viewerCount() const;                // authed view-only sockets
 
     // ---- input (polled by the main loop each frame) -----------------------
     // Axes in [-1,1]; forced to 0 when stale (see safety note above).

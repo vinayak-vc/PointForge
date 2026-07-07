@@ -102,7 +102,9 @@ static std::string lanIPv4() {
 struct RemoteServerImpl {
     mg_context* ctx = nullptr;
     int         listenPort = 0;
-    std::string pinCode;
+    std::string pinCode;      // driver PIN (full control)
+    std::string viewPinCode;  // viewer PIN (watch-only), always != pinCode
+    std::atomic<bool> allowViewers{true};
     std::string ip;
     bool        forceDiskWeb = false;
 
@@ -120,10 +122,11 @@ struct RemoteServerImpl {
     std::vector<RemoteCmd> cmds;
 
     // ---- clients -----------------------------------------------------------
-    struct Client { 
-        bool authed = false; 
-        int badTries = 0; 
-        bool stream = false; 
+    struct Client {
+        bool authed = false;
+        bool viewer = false;   // authed with the viewer PIN -> watch-only
+        int badTries = 0;
+        bool stream = false;
         bool webrtc = false;
 #ifdef PF_REMOTE_WEBRTC
         std::shared_ptr<rtc::PeerConnection> pc;
@@ -133,6 +136,7 @@ struct RemoteServerImpl {
     std::mutex                            clMx;
     std::map<mg_connection*, Client>      clients;   // keyed by WS connection
     std::atomic<int>                      authedCount{0};
+    std::atomic<int>                      viewerCnt{0};  // authed watch-only clients
 
     int64_t lastStateMs = 0;   // publishState throttle (main thread only)
 
@@ -579,13 +583,15 @@ struct RemoteServerImpl {
     }
 
     void recountLocked() {
-        int a = 0, s = 0, wr = 0;
+        int a = 0, s = 0, wr = 0, vw = 0;
         for (auto& kv : clients) {
             if (kv.second.authed) ++a;
+            if (kv.second.authed && kv.second.viewer) ++vw;
             if (kv.second.authed && kv.second.stream) ++s;
             if (kv.second.authed && kv.second.webrtc) ++wr;
         }
         authedCount = a;
+        viewerCnt   = vw;
         streamSubs  = s;
         webrtcSubs  = wr;
     }
@@ -614,12 +620,19 @@ struct RemoteServerImpl {
         Client& cl = it->second;
 
         if (t == "hello") {
-            if (m.value("pin", "") == pinCode) {
+            const std::string tryPin = m.value("pin", "");
+            const bool isDriver = tryPin == pinCode;
+            const bool isViewer = !isDriver && allowViewers.load() &&
+                                  !viewPinCode.empty() && tryPin == viewPinCode;
+            if (isDriver || isViewer) {
                 cl.authed = true;
+                cl.viewer = isViewer;
                 recountLocked();
                 lk.unlock();
-                sendTo(conn, R"({"t":"hello_ok"})");
-                pf::logInfo("Remote: client authenticated");
+                sendTo(conn, isViewer ? R"({"t":"hello_ok","role":"viewer"})"
+                                      : R"({"t":"hello_ok","role":"driver"})");
+                pf::logInfo(std::string("Remote: client authenticated (") +
+                            (isViewer ? "viewer" : "driver") + ")");
             } else {
                 bool drop = ++cl.badTries >= kMaxPinTries;
                 lk.unlock();
@@ -630,6 +643,7 @@ struct RemoteServerImpl {
         }
 
         if (!cl.authed) return 0;    // anything else before hello -> drop
+        const bool watchOnly = cl.viewer; // captured before lk unlocks below
 
         if (t == "stream") {
             cl.stream = m.value("on", 0) != 0;
@@ -751,6 +765,10 @@ struct RemoteServerImpl {
 #endif
         lk.unlock();
 
+        // Watch-only role: input and settings changes are silently ignored.
+        // (stream/webrtc subscription above stays allowed — that's the point.)
+        if (watchOnly && (t == "move" || t == "cmd" || t == "set")) return 1;
+
         if (t == "move") {
             // f/s/u are joystick-style axes (held-stick deflection, resent every
             // tick) — genuinely bounded to [-1,1] by design.
@@ -843,7 +861,11 @@ static int shot_handler(struct mg_connection* conn, void* ud) {
     if (ri->query_string)
         mg_get_var(ri->query_string, strlen(ri->query_string), "pin", pin, sizeof(pin));
     pf::logInfo("shot_handler: pin parsed");
-    if (impl->pinCode.empty() || impl->pinCode != pin) {
+    // Either role may download the capture — it's read-only by nature.
+    const bool driverOk = !impl->pinCode.empty() && impl->pinCode == pin;
+    const bool viewerOk = impl->allowViewers.load() &&
+                          !impl->viewPinCode.empty() && impl->viewPinCode == pin;
+    if (!driverOk && !viewerOk) {
         mg_send_http_error(conn, 403, "%s", "bad pin");
         pf::logInfo("shot_handler: 403 sent");
         return 403;
@@ -910,11 +932,16 @@ bool RemoteServer::start(int port, const std::string& webRoot) {
     static bool libInit = false;
     if (!libInit) { mg_init_library(0); libInit = true; }
 
-    // Fresh pairing PIN each start.
+    // Fresh pairing PINs each start (driver + watch-only viewer; must differ,
+    // or a viewer PIN entry would silently grant driver rights).
     std::random_device rd;
     char pinBuf[8];
     snprintf(pinBuf, sizeof(pinBuf), "%04u", rd() % 10000u);
     impl_->pinCode = pinBuf;
+    do {
+        snprintf(pinBuf, sizeof(pinBuf), "%04u", rd() % 10000u);
+    } while (impl_->pinCode == pinBuf);
+    impl_->viewPinCode = pinBuf;
 
     char portBuf[16];
     snprintf(portBuf, sizeof(portBuf), "%d", port);
@@ -956,7 +983,7 @@ bool RemoteServer::start(int port, const std::string& webRoot) {
     impl_->encThread = std::thread([this] { impl_->encodeLoop(); });
 #endif
     pf::logInfo("Remote: serving " + (PF_EMBED_WEB ? "embedded resources" : webRoot) + " at " + url() +
-                " (PIN " + impl_->pinCode + ")");
+                " (driver PIN " + impl_->pinCode + ", viewer PIN " + impl_->viewPinCode + ")");
     return true;
 }
 
@@ -986,6 +1013,9 @@ void RemoteServer::stop() {
 bool RemoteServer::running() const { return impl_->ctx != nullptr; }
 int  RemoteServer::port()    const { return impl_->listenPort; }
 std::string RemoteServer::pin() const { return impl_->pinCode; }
+std::string RemoteServer::viewPin() const { return impl_->viewPinCode; }
+void RemoteServer::setAllowViewers(bool allow) { impl_->allowViewers = allow; }
+int  RemoteServer::viewerCount() const { return impl_->viewerCnt.load(); }
 
 std::string RemoteServer::url() const {
     return "http://" + impl_->ip + ":" + std::to_string(impl_->listenPort) + "/";
@@ -1150,6 +1180,9 @@ void RemoteServer::stop() {}
 bool RemoteServer::running() const { return false; }
 int  RemoteServer::port() const { return 0; }
 std::string RemoteServer::pin() const { return ""; }
+std::string RemoteServer::viewPin() const { return ""; }
+void RemoteServer::setAllowViewers(bool) {}
+int  RemoteServer::viewerCount() const { return 0; }
 std::string RemoteServer::url() const { return ""; }
 int   RemoteServer::clientCount() const { return 0; }
 float RemoteServer::fwd() const { return 0; }

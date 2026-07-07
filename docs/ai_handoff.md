@@ -1,5 +1,51 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Latest Session (2026-07-07) - Multi-client roles (newdev.md #2, branch `multi-client-roles`)
+
+`parallel-indexer` PR merged; #2 implemented and live-verified.
+
+### What was built
+- **Server** (`RemoteServer.{h,cpp}`): second watch-only viewer PIN
+  (regenerated each start, guaranteed != driver PIN), `Client.viewer` flag,
+  role decided at hello and echoed as `{"role":"driver"|"viewer"}` in
+  hello_ok. move/cmd/set from viewers silently ignored — the SERVER is the
+  security boundary, UI hiding is just UX. stream/webrtc/state/cfg and
+  /shot.png (either PIN) work for both roles. New API: `viewPin()`,
+  `setAllowViewers(bool)`, `viewerCount()` (+ stubs). Startup log prints
+  both PINs.
+- **Viewer prefs** (`main.cpp`): "Allow view-only clients" checkbox
+  (persisted `remoteAllowViewers`, applied live), driver+viewer PINs and
+  viewer count shown in Preferences > Input and the Connect-phone QR dialog.
+- **Webremote**: `useWebSocket` exposes `role`; viewer role renders video +
+  status bar + Stream toggle only ("View-only" badge; no Fly overlay, no
+  inspector, no move loop, no presets/toggles/speed). `ActionBar` gains
+  `readOnly` prop.
+
+### Verified live (real exe, two concurrent WS clients via Playwright)
+driver=driver/viewer=viewer roles; viewer's forged move*45 + bookmark_add +
+set pointSize all no-ops (camera pos + cfg unchanged); driver move works;
+viewer receives JPEG frames + state; bad PIN rejected; browser as viewer
+shows the read-only shell over the live Tikal stream (screenshot taken).
+
+### Build gotcha (recurred — recipe in decisions.md)
+After merging main, CMakeCache held a RELATIVE VCPKG_OVERLAY_TRIPLETS=./triplets
+-> toolset pin silently ignored -> ports rebuilt with MSVC 14.51 -> LNK2019
+__std_* against the 14.44 CRT. Fix: wipe build-static/vcpkg_installed,
+reconfigure with the ABSOLUTE overlay path.
+
+### Modified files
+- src/viewer/RemoteServer.{h,cpp} (roles, viewer PIN, gating, log)
+- src/viewer/main.cpp (allow-viewers pref, PIN displays, persistence)
+- webremote/src/{useWebSocket.ts,App.tsx,ActionBar.tsx,index.css}
+- docs/{newdev,tasks,decisions,ai_handoff}.md
+
+### Next Recommended Task
+User raises the `multi-client-roles` PR. Then newdev.md **#3 Camera path
+animation + MP4 export** (branch `camera-path-export`): start with
+`src/viewer/CamPath.h` keyframes + the offline FBO render loop, MP4 muxing
+via IMFSinkWriter (lift the NV12 helper out of RemoteServer into a shared
+header first).
+
 ## Latest Session (2026-07-06, cont.) - Parallel Indexer implemented (newdev.md #1, branch `parallel-indexer`)
 
 First medium feature from docs/newdev.md landed. Test-first, per the plan.
