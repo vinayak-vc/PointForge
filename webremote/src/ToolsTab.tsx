@@ -1,4 +1,5 @@
-import type { Cfg, SetValueFn, Vec3 } from './cfg';
+import { useEffect, useState } from 'react';
+import type { Annotation, Cfg, SetValueFn, Vec3 } from './cfg';
 import { Card, Slider, Toggle } from './controls';
 import { formatPoints } from './StatusHUD';
 
@@ -28,6 +29,55 @@ function withAxis(v: Vec3, axis: number, value: number): Vec3 {
   return next;
 }
 
+function cleanLabel(value: string): string {
+  return value.replace(/[\n\r\t]/g, '').slice(0, 96).trim();
+}
+
+interface AnnotationRowProps {
+  annotation: Annotation;
+  index: number;
+  send: (obj: unknown) => void;
+}
+
+function AnnotationRow({ annotation, index, send }: AnnotationRowProps) {
+  const [draft, setDraft] = useState(annotation.label);
+
+  useEffect(() => {
+    setDraft(annotation.label);
+  }, [annotation.label]);
+
+  const commit = () => {
+    const label = cleanLabel(draft);
+    setDraft(label || annotation.label);
+    if (label.length > 0 && label !== annotation.label) {
+      send({ t: 'cmd', n: 'anno_label', v: index, text: label });
+    }
+  };
+
+  return (
+    <li className="annotation-row">
+      <input
+        className="annotation-label-input"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+        }}
+      />
+      <button type="button" onClick={() => send({ t: 'cmd', n: 'anno_goto', v: index })}>
+        Go
+      </button>
+      <button type="button" className="bookmark-del" onClick={() => send({ t: 'cmd', n: 'anno_del', v: index })}>
+        x
+      </button>
+      <span className="dim">
+        {annotation.p[0].toFixed(2)}, {annotation.p[1].toFixed(2)}, {annotation.p[2].toFixed(2)}
+      </span>
+    </li>
+  );
+}
+
 export default function ToolsTab({ cfg, setValue, send }: ToolsTabProps) {
   const cmd = (n: string) => () => send({ t: 'cmd', n });
 
@@ -44,6 +94,7 @@ export default function ToolsTab({ cfg, setValue, send }: ToolsTabProps) {
   const clipDisabled = !(cfg.clipExt > 0);
   const clipRange = clipDisabled ? 1 : cfg.clipExt;
   const clipStep = clipRange / 200;
+  const annotations = cfg.annotations ?? [];
 
   return (
     <div className="panel">
@@ -84,6 +135,27 @@ export default function ToolsTab({ cfg, setValue, send }: ToolsTabProps) {
             Clear
           </button>
         </div>
+      </Card>
+
+      <Card title="Annotations">
+        <button
+          type="button"
+          className={`big-btn${cfg.tool === 3 ? ' active' : ''}`}
+          onClick={cmd('anno_tool')}
+        >
+          {cfg.tool === 3 ? 'Stop annotating' : 'Start annotating'}
+        </button>
+        {cfg.tool === 3 && <p className="dim">Tap the video to place a pin.</p>}
+        <p className="dim">
+          {annotations.length} pin{annotations.length === 1 ? '' : 's'}
+        </p>
+        {annotations.length > 0 && (
+          <ol className="annotation-list">
+            {annotations.map((annotation, i) => (
+              <AnnotationRow key={`${i}-${annotation.p.join(',')}`} annotation={annotation} index={i} send={send} />
+            ))}
+          </ol>
+        )}
       </Card>
 
       <Card title="Clip box">

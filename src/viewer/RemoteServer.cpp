@@ -779,11 +779,15 @@ struct RemoteServerImpl {
                 c.name = m.value("n", "");
                 if (c.name.empty()) return 1;
             }
+            if (m.contains("text") && m["text"].is_string()) {
+                c.text = m["text"].get<std::string>();
+            }
             // v: number, bool (as 0/1) or [r,g,b] array.
             if (m.contains("v")) {
                 const auto& v = m["v"];
                 if (v.is_boolean())     c.value = v.get<bool>() ? 1.0f : 0.0f;
                 else if (v.is_number()) c.value = v.get<float>();
+                else if (v.is_string()) c.text = v.get<std::string>();
                 else if (v.is_array() && v.size() >= 3) {
                     c.hasVec = true;
                     for (int i = 0; i < 3; ++i)
@@ -1076,6 +1080,14 @@ void RemoteServer::publishConfig(const RemoteConfig& c) {
     json mp = json::array();
     for (const auto& p : c.measurePts) mp.push_back({p[0], p[1], p[2]});
     j["measurePts"] = std::move(mp);
+    json ap = json::array();
+    for (const RemoteAnnotation& a : c.annotations) {
+        ap.push_back({
+            {"p", {a.p[0], a.p[1], a.p[2]}},
+            {"label", a.label}
+        });
+    }
+    j["annotations"] = std::move(ap);
 
     const std::string msg = j.dump();
     std::lock_guard<std::mutex> g(impl_->clMx);

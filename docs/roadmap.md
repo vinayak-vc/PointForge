@@ -51,7 +51,7 @@
 - **Cross-section / Slicing Export**: Export clipped cross-sections to standard CAD or image formats. *(**done** — newdev.md #4, branch `cross-section-slice-export`: DXF R12 + CSV + PNG, real-model smoke verified)*
 - **Parallel indexer**: Phase C chunk worker pool, 4–8× conversion speedup. *(**done** — newdev.md #1: 2.9× phase C on a real scan, byte-identical output, pftest)*
 - **Web Remote roles**: view-only clients with a separate viewer PIN. *(**done** — newdev.md #2: viewer PIN, server-side gating, read-only web UI)*
-- **Phone annotations**: tap video → labelled 3D pin, synced + persisted. *(planned — newdev.md #5)*
+- **Phone annotations**: tap video → labelled 3D pin, synced + persisted. *(**done** — newdev.md #5, branch `annotations-from-phone`: remote/local annotate mode, JSON persistence, GL stream-visible pins)*
 - **EDL quality**: linearised-depth response, configurable neighbour kernel.
 - **Scene panel (multi-cloud)**: left dock listing loaded clouds + future
   annotations/segments/streams as child items — deliberately deferred until

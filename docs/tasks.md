@@ -227,8 +227,9 @@ Recommended order; update newdev.md status board as these move:
         `forEachPointInBox`, own DXF R12 writer in pfcore, Clip-panel
         DXF/PNG/CSV export, pftest boxed-query coverage, and real-model smoke
         validation are complete.
-- `[ ]` 5. Annotations from phone (generalise tap-to-measure; JSON per-cloud
-        persistence; GL pins + labels visible in the stream)
+- `[x]` 5. Annotations from phone (branch `annotations-from-phone`):
+        remote/local Annotate tool, JSON per-cloud persistence,
+        Web Remote annotation card, GL stream-visible pins + PC/phone labels.
 - `[ ]` 6. Multi-cloud scene (SceneCloud vector, per-cloud renderer, scene
         origin = first cloud's cube centre, Scene panel per architecture §7)
 

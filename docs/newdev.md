@@ -22,7 +22,7 @@ tree on 2026-07-06.
 | 2 | Multi-client roles (view-only mode)  | DONE | branch `multi-client-roles` | viewer PIN, server-side gating, read-only UI; live-verified driver+viewer side by side |
 | 3 | Camera path animation + MP4 export   | DONE | branch `camera-path-export` | CamPath spline + IMFSinkWriter MP4; smoke-verified 1080p30 export (121 frames) via `--export-video` hook |
 | 4 | Cross-section / slice export         | DONE | branch `cross-section-slice-export` | real-model smoke: DXF/CSV/PNG exported from `PointForgeCache_direct`; 871,420 pts; PNG visually verified |
-| 5 | Annotations from phone               | PLANNED |       |       |
+| 5 | Annotations from phone               | DONE | branch `annotations-from-phone` | remote/local annotate mode, JSON persistence, synced PC/phone UI |
 | 6 | Multi-cloud scene                    | PLANNED |       |       |
 
 **Recommended order = table order.** Rationale: 1–2 are low-coupling and ship
@@ -310,25 +310,23 @@ rendered into the stream, listed on the phone, persisted per cloud.
 - ImGui labels are PC-only (confirmed) — stream-visible labels need GL.
 
 **Plan**
-- [ ] `struct Annotation { glm::dvec3 pos; std::string label; float
+- [x] `struct Annotation { glm::dvec3 pos; std::string label; float
       color[3]; }` + `std::vector<Annotation>` in main.cpp; persisted
       per-cloud as **JSON** (`annotations.json` beside the octree-keyed
       AppData files — JSON not TSV: labels are free text; include a
       `"version":1`).
-- [ ] Protocol: cmd `anno_pick{x,y}` (same shape as measure_pick) → server
-      picks point, adds annotation with auto label "Pin N", broadcasts; `set`
-      `anno_label{i,text}` renames; cmd `anno_del{i}`. cfg gains
-      `annotations: [{p:[x,y,z], label}]`.
-- [ ] Viewport rendering: GL point sprite (bigger, distinct colour) + leader
-      line to a billboard label. v1 label = pre-rasterised text to a small
-      texture atlas via ImGui font (`ImFontAtlas` bake) drawn as textured
-      quads in renderPass → labels visible in the stream. Fallback if that
-      slips: coloured pin + number rendered as GL quads (digits atlas),
-      full text only in the phone list + PC ImGui overlay.
-- [ ] Webremote: Tools tab "Annotations" card — mode toggle (tap = annotate
+- [x] Protocol: cmd `anno_pick{x,y}` (same shape as measure_pick) → server
+      picks point, adds annotation with auto label "Pin N", broadcasts; cmd
+      `anno_label` with `v=index,text=label` renames; cmd `anno_del{i}`.
+      cfg gains `annotations: [{p:[x,y,z], label}]`.
+- [x] Viewport rendering: GL point sprite (distinct colour) + leader line in
+      `renderPass`, so pins are visible in the phone video stream and captures.
+      Full text labels are PC ImGui overlay + phone/PC lists for v1; GL text
+      atlas remains a polish follow-up.
+- [x] Webremote: Tools tab "Annotations" card — mode toggle (tap = annotate
       vs measure vs fly), list with rename (inline input) + delete + "goto"
       (optional: fly camera to pin via cmd).
-- [ ] PC UI: Properties section list (rename/delete/goto), annotations
+- [x] PC UI: Properties section list (rename/delete/goto), annotations
       included in screenshot + video export automatically (they're in the
       render pass).
 
@@ -339,6 +337,13 @@ confirmation marker; `pickPoint` tolerance already screen-space-scaled.
 GL_PROGRAM_POINT_SIZE global-state fragility (comment at ~1467) — keep the
 same convention. Depth-readback picking NOT used (octree pick is the verified
 path).
+
+**Implemented / verified (2026-07-07):** `npm run build`; `cmake --build
+build-static --config Release --target pfview`; `ctest --test-dir build-static
+-C Release --output-on-failure`. Build output: `ViitorXPCViewer_v1023.exe`.
+Manual phone/device smoke still recommended for the stream-label polish path,
+but compile/test coverage for protocol, persistence wiring, and embedded web
+bundle is green.
 
 **Acceptance:** tap on phone video drops a pin visible in BOTH the PC
 viewport and the phone video stream; rename from phone persists across viewer

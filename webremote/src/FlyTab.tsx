@@ -7,12 +7,12 @@ import { ChevronUp, ChevronDown, Hand, Zap, ZoomIn } from 'lucide-react';
 // exactly from before; this adds a parallel desktop input path (mouse +
 // keyboard) for browsers with a fine pointer (mouse), since a desktop
 // browser previously had NO way to move the camera at all — FlyTab only
-// wired touch events. It also adds tap-to-measure: while the server's
-// Measure tool is active, a short tap/click (not a drag) on the video sends
+// wired touch events. It also adds tap-to-pick: while the server's Measure or
+// Annotate tool is active, a short tap/click (not a drag) on the video sends
 // its position — mapped through the object-fit:contain letterboxing back to
-// video-content-relative coordinates — as a `measure_pick` cmd, which the
+// video-content-relative coordinates — as a tool-specific pick cmd, which the
 // server resolves with the exact same screen-ray pick used for a local LMB
-// click (main.cpp's pendingPick path).
+// click.
 //
 // Desktop input deliberately mirrors the native ViitorXPC app's own mouse
 // scheme (see main.cpp's SDL_MOUSEBUTTONDOWN handlers) rather than inventing
@@ -29,10 +29,10 @@ import { ChevronUp, ChevronDown, Hand, Zap, ZoomIn } from 'lucide-react';
 //   Desktop: Left-drag → Orbit; Right-drag → Look; Wheel → Zoom; WASD → fly;
 //            Q/E → down/up; Shift → boost; UP/DOWN/BOOST buttons also work
 //            via mouse click-hold.
-//   Measuring (either input): a short tap/left-click (no drag) places a
-//   measurement point instead of orbiting/looking — rotation is suspended
-//   for the primary pointer while the Measure tool is active, matching the
-//   PC's "measure mode reclaims LMB" behaviour.
+//   Picking (either input): a short tap/left-click (no drag) places a
+//   measurement point or annotation pin instead of orbiting/looking —
+//   rotation is suspended for the primary pointer while a pick tool is active,
+//   matching the PC's "tool mode reclaims LMB" behaviour.
 
 export interface MoveValues {
   f: number; s: number; u: number; yaw: number; pit: number; boost: 0 | 1; orbit: 0 | 1;
@@ -87,12 +87,14 @@ export interface FlyTabProps {
   status: WsStatus;
   /** True while the server's Measure tool is active (cfg.tool === 1). */
   measuring?: boolean;
+  /** True while the server's Annotate tool is active (cfg.tool === 3). */
+  annotating?: boolean;
   send?: (obj: unknown) => void;
   /** Intrinsic (decoded) frame size, or null if no frame has arrived yet. */
   getVideoNaturalSize?: () => { w: number; h: number } | null;
 }
 
-export default function FlyTab({ moveRef, measuring = false, send, getVideoNaturalSize }: FlyTabProps) {
+export default function FlyTab({ moveRef, measuring = false, annotating = false, send, getVideoNaturalSize }: FlyTabProps) {
   const [lookSpeed, setLookSpeed] = useState(0.2);
   const [panSpeed, setPanSpeed] = useState(0.2);
   const [zoomSpeed, setZoomSpeed] = useState(0.1);
@@ -122,6 +124,8 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
   useEffect(() => { zoomSpeedRef.current = zoomSpeed; }, [zoomSpeed]);
   const measuringRef = useRef(measuring);
   useEffect(() => { measuringRef.current = measuring; }, [measuring]);
+  const annotatingRef = useRef(annotating);
+  useEffect(() => { annotatingRef.current = annotating; }, [annotating]);
 
   const stageRef = useRef<HTMLDivElement>(null);
 
@@ -154,6 +158,17 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
     const n = toVideoNormalized(clientX, clientY);
     if (!n || !send) return;
     send({ t: 'cmd', n: 'measure_pick', v: [n[0], n[1], 0] });
+  };
+
+  const sendAnnotationPick = (clientX: number, clientY: number) => {
+    const n = toVideoNormalized(clientX, clientY);
+    if (!n || !send) return;
+    send({ t: 'cmd', n: 'anno_pick', v: [n[0], n[1], 0] });
+  };
+
+  const sendActivePick = (clientX: number, clientY: number) => {
+    if (measuringRef.current) sendMeasurePick(clientX, clientY);
+    else if (annotatingRef.current) sendAnnotationPick(clientX, clientY);
   };
 
   const touchState = useRef({
@@ -213,7 +228,7 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
       const dy = e.touches[0].clientY - state.lastY;
       // While measuring, a single-finger drag places/aims a point instead of
       // looking around — suspend camera look, same as the PC's LMB reclaim.
-      if (!measuringRef.current) {
+      if (!measuringRef.current && !annotatingRef.current) {
         moveRef.current.yaw += dx * lookSpeed;
         moveRef.current.pit -= dy * lookSpeed;
       }
@@ -236,9 +251,9 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
   const handleTouchEnd = (e: React.TouchEvent) => {
     const state = touchState.current;
     if (e.touches.length === 0) {
-      if (measuringRef.current && state.mode === 'look') {
+      if ((measuringRef.current || annotatingRef.current) && state.mode === 'look') {
         const moved = Math.hypot(state.lastX - state.pickStartX, state.lastY - state.pickStartY);
-        if (moved < TAP_MOVE_THRESHOLD) sendMeasurePick(state.lastX, state.lastY);
+        if (moved < TAP_MOVE_THRESHOLD) sendActivePick(state.lastX, state.lastY);
       }
       state.mode = 'none';
     } else if (e.touches.length === 1 && state.mode === 'zoom') {
@@ -273,7 +288,7 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
       if (!m.dragging) return;
       // Matches the PC: LMB is reclaimed for placing points while measuring,
       // but RMB free-look keeps working regardless of tool mode.
-      if (m.button === 0 && measuringRef.current) return;
+      if (m.button === 0 && (measuringRef.current || annotatingRef.current)) return;
       const dx = e.clientX - m.lastX;
       const dy = e.clientY - m.lastY;
       moveRef.current.yaw += dx * lookSpeedRef.current;
@@ -287,9 +302,9 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
       if (!m.dragging) return;
       m.dragging = false;
       if (m.button === 0) moveRef.current.orbit = 0;
-      if (measuringRef.current && m.button === 0) {
+      if ((measuringRef.current || annotatingRef.current) && m.button === 0) {
         const moved = Math.hypot(e.clientX - m.startX, e.clientY - m.startY);
-        if (moved < TAP_MOVE_THRESHOLD) sendMeasurePick(e.clientX, e.clientY);
+        if (moved < TAP_MOVE_THRESHOLD) sendActivePick(e.clientX, e.clientY);
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -471,6 +486,8 @@ export default function FlyTab({ moveRef, measuring = false, send, getVideoNatur
       <div className="instruction-footer">
         {measuring
           ? <>Tap the video to place a measurement point</>
+          : annotating
+          ? <>Tap the video to place an annotation pin</>
           : isDesktop
           ? <>Left-drag: Orbit &nbsp;·&nbsp; Right-drag: Look &nbsp;·&nbsp; Wheel: Zoom &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; Q/E down/up &nbsp;·&nbsp; Shift boost</>
           : <>1-finger: Look &nbsp;·&nbsp; 2-finger: {pinchMode === 'zoom' ? 'Pinch Zoom' : 'Pan'} &nbsp;·&nbsp; Toggle mode ↙</>}
