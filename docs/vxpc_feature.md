@@ -74,68 +74,73 @@
 - Retain JSON export purely for debugging. Store as binary natively.
 
 ## Phase 7: Camera Data
-**Goal**: Pack user navigation states.
-- Support saving: Bookmarks, Saved Views, Camera Paths, Timeline data, and future animation tracks.
+**Goal**: Pack user navigation states into the `.vxpc` container.
+- **Research & Implementation**: 
+  - Data structures: `CameraBookmark` (pos, yaw, pitch, ortho), `CameraPath` (spline control points, timestamps).
+  - Currently stored in loose `bookmarks.txt` and `campaths.txt`.
+  - To implement: In `PackageWriter`, add an `AddJsonList("bookmarks.json", bookmarks)` API. 
+  - During `PackageReader::Open()`, read these blocks into memory. The Viewer UI needs a "Save to VXPC" button, which implies we need an "Append to VXPC" functionality in `PackageWriter` (or a shadow file that gets repacked later).
 
 ## Phase 8: Measurements
 **Goal**: Save engineering measurement artifacts inside the package.
-- Storage for: Distance, Area, Volume, Polyline, Height, Radius, and future types.
+- **Research & Implementation**: 
+  - Measurements (distance, area, polyline) are currently transient or saved to CSV. 
+  - Implementation: Define a unified `Measurement` JSON schema. Store as `measurements.json` via `PackageWriter`.
+  - Requires the `PackageWriter` to support in-place updates or the application must rewrite the `.vxpc` footer when measurements are added. A simpler approach is storing edits in an external sidecar file until "Save Project" is hit, triggering a repack.
 
 ## Phase 9: Annotations
-**Goal**: Embed collaboration markers.
-- Support: Text, Image, Audio, Issue Marker, Arrow, Label, Pinned Note.
-
-## Phase 10: Multi Cloud
-**Goal**: Store entire project scenes inside a single `.vxpc`.
-- Support Cloud 1...N.
-- Each cloud maintains its own: metadata, hierarchy, octree, bounding box, statistics, transform, visibility.
+**Goal**: Embed collaboration markers directly in the package.
+- **Research & Implementation**: 
+  - `annotations.json` is currently written to AppData.
+  - Implementation: Move `annotations.json` into the `.vxpc` archive. 
+  - Future expansion: Audio and Image attachments. `PackageWriter::AddFile("annotations/image_1.jpg", path)` can embed external files. `PackageReader` can stream these back into ImGui textures (`UTexture2D` in Unity).
 
 ## Phase 11: Plugin Data
-**Goal**: Ensure extensibility for 3rd party tools.
-- Implement a `/plugins/` namespace.
-- Plugins may store arbitrary binary blobs. Core ignores contents.
-
-## Phase 12: Custom Metadata
-**Goal**: Flexible user-defined schema.
-- Arbitrary key/value metadata. E.g., `Scanner=BLK360`, `Weather=Sunny`, `Temperature=41`, `Operator=John`.
-- No hardcoded schema.
+**Goal**: Ensure extensibility for 3rd party tools without breaking the core parser.
+- **Research & Implementation**: 
+  - Provide a `/plugins/<vendor>/` namespace convention in the directory entries.
+  - Expose a C-API `PF_Package_WritePluginData(pkg, "vendor/data.bin", buffer, size)` for native plugin DLLs (like Unity tools) to inject their own state.
+  - Core PointForge completely ignores files prefixed with `/plugins/`.
 
 ## Phase 13: Streaming Support
-**Goal**: Cloud-native access.
-- `PackageReader` should support `Read(offset, size)` without loading the entire package.
-- Design layout suitable for HTTP Range Requests, NAS, Cloud Storage, and future WebRTC streaming.
-
-## Phase 14: Chunked Octree
-**Goal**: Pave the way for out-of-core massive datasets.
-- Prepare format for future chunked octree storage (no implementation yet, just layout readiness).
-- Design directory so multiple `octree_chunk_X.bin` nodes are supported.
-
-## Phase 15: Compression
-**Goal**: Reduce footprint.
-- Design API and implement support for `None`, `Reserve`, `LZ4`, `ZSTD`.
-- Compression flag exists now; implementation follows later.
-
-## Phase 16: Checksums
-**Goal**: Data integrity.
-- Compute and store `CRC32` per directory entry.
-- Validate while opening to detect corruption.
-
-## Phase 17: Recovery
-**Goal**: Fail-safe generation.
-- Design format to allow: Atomic Save, Recovery after crash, Directory duplication, Rollback.
-
-## Phase 18: Encryption
-**Goal**: Data security.
-- Reserve package flags for `AES` (no encryption implementation yet).
-
-## Phase 19: Virtual File System
-**Goal**: Fully hierarchical container.
-- Package should behave like a filesystem (`/`, `metadata`, `clouds/`, `images/`, `annotations/`, `plugins/`, `project/`) rather than exposing only four files.
+**Goal**: Cloud-native access via HTTP Range Requests.
+- **Research & Implementation**: 
+  - The `.vxpc` layout (Header -> Data -> Directory) is already streaming-friendly.
+  - Implementation: Modify `PackageReader` to accept a `URL` instead of a local file path.
+  - Use `libcurl` or Windows HTTP APIs to fetch the last 4KB (to read the directory offset), then fetch the directory, then fulfill `PackageReader::Read(offset, size)` with HTTP `Range: bytes=offset-(offset+size-1)` requests.
+  - Needs a caching layer to coalesce small byte reads.
 
 ## Phase 20: Documentation
 **Goal**: Formal specification.
-- Create/finalize `docs/vxpc.md`.
-- Include binary layout, header, directory, versioning, upgrade strategy, examples, future reserved fields, memory mapping, and streaming workflow.
+- **Research & Implementation**: 
+  - Create a formal RFC-style Markdown document for `.vxpc`.
+  - Document the magic bytes, versioning, compression enum maps, endianness (Little Endian), and memory alignment guarantees.
+
+---
+
+# Long-Term / High Complexity Phases (Keep at Last)
+
+> **Note**: The following phases require massive architectural shifts, multi-month development, or significant refactoring. They are deferred to the end of the roadmap and should not be implemented at this moment.
+
+## Phase 10: Multi Cloud
+**Goal**: Store entire project scenes inside a single `.vxpc`.
+- **Why it's kept at last**: PointForge's core rendering and octree structures assume 1 root per package. Supporting N roots means rewriting the indexer to merge bounds, offset point coordinates, and maintain a Scene Graph inside the `.vxpc`.
+
+## Phase 14: Chunked Octree
+**Goal**: Pave the way for out-of-core massive datasets exceeding 1TB.
+- **Why it's kept at last**: Requires splitting `octree.bin` into `octree_chunk_X.bin`. The viewer's `OctreeStore` would need a virtualized LRU cache for chunk files, which significantly complicates the currently elegant memory-mapped streaming parser.
+
+## Phase 17: Recovery & Atomic Saves
+**Goal**: Fail-safe generation and crash recovery.
+- **Why it's kept at last**: Requires a journaling system inside the `.vxpc`. Modifying a 100GB package safely means either full file duplication (too slow) or append-only block chains (requires a garbage collection phase and complicates read offsets).
+
+## Phase 18: Encryption
+**Goal**: Data security via AES.
+- **Why it's kept at last**: Streaming decryption of AES-CTR or AES-GCM requires strict block-aligned reads. Random access point-picking would have to read block boundaries, decrypt, and then extract the point. Significant performance penalty.
+
+## Phase 19: Virtual File System
+**Goal**: Fully hierarchical container acting like a ZIP tree.
+- **Why it's kept at last**: Right now `VXPCDirectoryEntry` is a flat array. Implementing true hierarchy means building a Trie or nested directory tables, matching path resolution logic, and handling relative paths—overkill for our current flat list needs.
 
 ---
 
