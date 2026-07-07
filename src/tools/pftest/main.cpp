@@ -17,6 +17,7 @@
 #include "common/OctreeFormat.h"
 #include "common/Log.h"
 #include "viewer/OctreeStore.h"
+#include "io/PackageFormat.h"
 
 #include <chrono>
 #include <atomic>
@@ -194,8 +195,8 @@ int main(int argc, char** argv) {
     fs::remove_all(work, ec);
     fs::create_directories(work, ec);
     const std::string xyz = work + "/synthetic.xyz";
-    const std::string seqDir = work + "/seq";
-    const std::string parDir = work + "/par";
+    const std::string seqFile = work + "/seq.vxpc";
+    const std::string parFile = work + "/par.vxpc";
 
     std::printf("pftest: generating %llu synthetic points...\n", (unsigned long long)nPoints);
     if (!writeSyntheticXyz(xyz, nPoints)) {
@@ -206,27 +207,27 @@ int main(int argc, char** argv) {
     // Both compressed and uncompressed paths, sequential vs parallel.
     for (bool compress : {false, true}) {
         std::printf("pftest: [compress=%d] sequential convert...\n", (int)compress);
-        double tSeq = convert(xyz, seqDir, 1, compress);
+        double tSeq = convert(xyz, seqFile, 1, compress);
         std::printf("pftest: [compress=%d] parallel convert (threads=%d)...\n",
                     (int)compress, threads);
-        double tPar = convert(xyz, parDir, threads, compress);
+        double tPar = convert(xyz, parFile, threads, compress);
         std::printf("pftest: [compress=%d] sequential %.2fs, parallel %.2fs (%.2fx)\n",
                     (int)compress, tSeq, tPar, tPar > 0 ? tSeq / tPar : 0.0);
 
-        CHECK(filesEqual(seqDir + "/hierarchy.bin", parDir + "/hierarchy.bin"),
-              "hierarchy.bin differs between sequential and parallel");
-        CHECK(filesEqual(seqDir + "/octree.bin", parDir + "/octree.bin"),
-              "octree.bin differs between sequential and parallel");
-        CHECK(filesEqual(seqDir + "/meta.bin", parDir + "/meta.bin"),
-              "meta.bin differs between sequential and parallel");
+        CHECK(filesEqual(seqFile, parFile),
+              "vxpc file differs between sequential and parallel");
 
         pf::OctreeStore store;
-        CHECK(store.load(parDir), "OctreeStore failed to load parallel output");
-        uint64_t payloadSize = (uint64_t)fs::file_size(parDir + "/octree.bin", ec);
+        CHECK(store.load(parFile), "OctreeStore failed to load parallel output");
+        
+        pf::PackageReader pkg;
+        CHECK(pkg.Open(parFile), "PackageReader failed to open vxpc");
+        uint64_t payloadSize = pkg.GetSize("octree.bin");
+        
         verifyStructure(store, nPoints, payloadSize);
 
-        fs::remove_all(seqDir, ec);
-        fs::remove_all(parDir, ec);
+        fs::remove(seqFile, ec);
+        fs::remove(parFile, ec);
     }
 
     if (!keep) fs::remove_all(work, ec);

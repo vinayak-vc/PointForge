@@ -5,8 +5,10 @@
 
 namespace pf {
 
-bool writeMetaBin(const std::string& outDir, const FileMetadata& meta);
-bool writeMetadataJson(const std::string& outDir, const FileMetadata& meta);
-bool writeHierarchy(const std::string& outDir, const std::vector<NodeRecord>& nodes);
+class PackageWriter;
+
+bool writeMetaBin(const std::string& outDir, const FileMetadata& meta, PackageWriter* pkg = nullptr);
+bool writeMetadataJson(const std::string& outDir, const FileMetadata& meta, PackageWriter* pkg = nullptr);
+bool writeHierarchy(const std::string& outDir, const std::vector<NodeRecord>& nodes, PackageWriter* pkg = nullptr);
 
 } // namespace pf

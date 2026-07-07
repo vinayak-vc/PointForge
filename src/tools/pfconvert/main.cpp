@@ -56,6 +56,11 @@ int main(int argc, char** argv) {
     if (outDir.empty()) { logError("--out is required"); usage(); return 1; }
     if (opts.gridDepth < 0 || opts.gridDepth > 10) { logError("--chunk-depth must be 0..10"); return 1; }
 
+    if (outDir.length() < 5 || outDir.substr(outDir.length() - 5) != ".vxpc") {
+        if (outDir.back() != '/' && outDir.back() != '\\') outDir += "/";
+        outDir += "scan.vxpc";
+    }
+
     logInfo("pfconvert: " + input + " -> " + outDir);
     if (!buildOctree(input, outDir, opts)) {
         logError("pfconvert: conversion failed");

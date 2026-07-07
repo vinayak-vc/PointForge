@@ -237,6 +237,7 @@ add_library(pfcore STATIC
     src/indexer/OctreeIndexer.cpp
     src/indexer/MetadataWriter.cpp
     src/common/FileDialog.cpp
+    src/io/PackageFormat.cpp
 )
 target_include_directories(pfcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(pfcore PRIVATE ${PF_OPTIONAL_INCS})
@@ -256,6 +257,7 @@ if(PF_BUILD_UNITY_PLUGIN)
         src/library/unity/PointForgeC.cpp
         src/viewer/OctreeStore.cpp
         src/common/Log.cpp
+        src/io/PackageFormat.cpp
     )
     target_include_directories(pfunity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(pfunity PRIVATE glm::glm Threads::Threads)

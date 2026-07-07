@@ -17,6 +17,36 @@ docs/{tasks,decisions}.md
 
 # AI Handoff - PointForge (C++ repo)
 
+## Latest Session (2026-07-07, cont.) - Single File Storage Format (.vxpc) DONE
+
+### What was built
+- **PackageFormat (`PackageWriter` and `PackageReader`)**: Added a highly streamable, zero-extraction container (`.vxpc`) to replace the multiple loose files in the `outDir`.
+- **Conversion Integration**: Integrated `PackageWriter` into `pfconvert` and `OctreeIndexer::buildOctree` when outputting `.vxpc` files. Data blocks are dynamically piped, and metadata formats (`meta.bin`, `hierarchy.bin`, `metadata.json`) are seamlessly appended without holding entire streams in RAM.
+- **Runtime Streaming**: Updated `OctreeStore` to transparently load from `PackageReader` with an absolute `octreePackageOffset_`. Fallbacks for backwards compatibility on folder trees (`outDir/octree.bin`) still exist.
+- **Test Coverage**: Added validation in `src/tools/pftest/main.cpp` using the `.vxpc` suffix for generated sequential and parallel test targets.
+
+### Validation
+- Checked `.vxpc` file parsing and offset lookups natively using `PackageReader::GetOffset()`.
+- Successfully validated byte-for-byte reproducibility inside the parallel worker pool conversion check.
+- Passed `pftest.exe` natively on the newly configured `build-static`.
+
+### Modified files
+- `src/io/PackageFormat.h`
+- `src/io/PackageFormat.cpp`
+- `src/tools/pfconvert/main.cpp`
+- `src/indexer/OctreeIndexer.cpp`
+- `src/viewer/OctreeStore.h`
+- `src/viewer/OctreeStore.cpp`
+- `src/tools/pftest/main.cpp`
+- `CMakeLists.txt`
+- `docs/vxpc.md` (New documentation)
+- `docs/tasks.md`
+
+### Next Recommended Task
+- Move on to integrating `PackageWriter`/`PackageReader` into unity extensions or other dependent toolchains.
+- The next scheduled feature from `docs/tasks.md` can be implemented.
+
+
 ## Latest Session (2026-07-07, cont.) - Phone annotations DONE (newdev.md #5, branch `annotations-from-phone`)
 
 Task #5 is **DONE**. Implementation landed on `annotations-from-phone`, React

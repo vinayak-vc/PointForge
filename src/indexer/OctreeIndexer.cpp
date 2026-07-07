@@ -4,6 +4,7 @@
 #include "common/OctreeFormat.h"
 #include "common/PointFormat.h"
 #include "common/Log.h"
+#include "io/PackageFormat.h"
 
 #include <chrono>
 #include <cstdio>
@@ -223,6 +224,7 @@ struct ChunkResult {
 struct CoarseCtx {
     const Quantization* q;
     FILE* payload;
+    PackageWriter* pkg;
     uint64_t* offset;
     std::vector<NodeRecord>* hierarchy;
     const std::unordered_map<uint32_t, uint32_t>* chunkRoots; // chunkIndex -> node index
@@ -289,18 +291,21 @@ uint32_t buildCoarse(std::vector<PackedPoint>&& pts, const CoarseCtx& ctx,
             size_t cSize = ZSTD_compress(cbuf.data(), bound,
                                          retained.data(), rawBytes, 3);
             if (!ZSTD_isError(cSize) && cSize < rawBytes) {
-                std::fwrite(cbuf.data(), 1, cSize, ctx.payload);
+                if (ctx.pkg) ctx.pkg->Write(cbuf.data(), cSize);
+                else std::fwrite(cbuf.data(), 1, cSize, ctx.payload);
                 rec.byteSize = (uint32_t)cSize;
                 *ctx.offset += cSize;
             } else {
-                std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
+                if (ctx.pkg) ctx.pkg->Write(retained.data(), count * sizeof(PackedPoint));
+                else std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
                 rec.byteSize = (uint32_t)rawBytes;
                 *ctx.offset += rawBytes;
             }
         } else
 #endif
         {
-            std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
+            if (ctx.pkg) ctx.pkg->Write(retained.data(), count * sizeof(PackedPoint));
+            else std::fwrite(retained.data(), sizeof(PackedPoint), count, ctx.payload);
             rec.byteSize = (uint32_t)rawBytes;
             *ctx.offset += rawBytes;
         }
@@ -332,8 +337,11 @@ bool buildOctree(const std::string& inputPath,
                  const std::string& outDir,
                  const IndexOptions& opts) {
     std::error_code ec;
-    fs::create_directories(outDir, ec);
-    const std::string chunkDir = outDir + "/chunks";
+    bool isPackage = (outDir.length() >= 5 && outDir.substr(outDir.length() - 5) == ".vxpc");
+    std::string workDir = isPackage ? fs::path(outDir).parent_path().string() : outDir;
+    
+    fs::create_directories(workDir, ec);
+    const std::string chunkDir = workDir + "/chunks";
     fs::create_directories(chunkDir, ec);
 
     // ---- phase A+B: chunking ---------------------------------------------
@@ -352,8 +360,16 @@ bool buildOctree(const std::string& inputPath,
     const double spacingAtL  = rootSpacing / std::pow(2.0, L);
 
     // ---- phase C: per-chunk subtrees -------------------------------------
-    FILE* payload = std::fopen((outDir + "/octree.bin").c_str(), "wb");
-    if (!payload) { logError("buildOctree: cannot open octree.bin"); return false; }
+    std::unique_ptr<PackageWriter> pkg;
+    FILE* payload = nullptr;
+    if (isPackage) {
+        pkg = std::make_unique<PackageWriter>(outDir);
+        if (!pkg->isValid()) { logError("buildOctree: cannot create package " + outDir); return false; }
+        pkg->BeginFile("octree.bin");
+    } else {
+        payload = std::fopen((outDir + "/octree.bin").c_str(), "wb");
+        if (!payload) { logError("buildOctree: cannot open octree.bin"); return false; }
+    }
 
     std::vector<NodeRecord> hierarchy;
     uint64_t offset = 0;
@@ -487,10 +503,13 @@ bool buildOctree(const std::string& inputPath,
                         if (rec.children[o] != kNoChild) rec.children[o] += base;
                     rec.byteOffset += offset;
                 }
-                if (!res.blob.empty() &&
-                    std::fwrite(res.blob.data(), 1, res.blob.size(), payload) != res.blob.size()) {
-                    signalAbort("octree.bin write failed (disk full?)");
-                    break;
+                if (!res.blob.empty()) {
+                    if (isPackage) {
+                        if (!pkg->Write(res.blob.data(), res.blob.size()))
+                            signalAbort("octree.bin package write failed");
+                    } else if (std::fwrite(res.blob.data(), 1, res.blob.size(), payload) != res.blob.size()) {
+                        signalAbort("octree.bin write failed (disk full?)");
+                    }
                 }
                 offset += res.blob.size();
                 hierarchy.insert(hierarchy.end(), res.records.begin(), res.records.end());
@@ -516,8 +535,10 @@ bool buildOctree(const std::string& inputPath,
     }
 
     for (auto& w : workers) w.join();
+
     if (aborted) {
-        std::fclose(payload);
+        if (isPackage) pkg->EndFile();
+        else if (payload) std::fclose(payload);
         if (failed) logError("buildOctree: failed — " + failReason);
         else        logWarn("buildOctree: cancelled by user");
         return false;
@@ -539,6 +560,7 @@ bool buildOctree(const std::string& inputPath,
         CoarseCtx ctx;
         ctx.q = &cs.quant;
         ctx.payload = payload;
+        ctx.pkg = pkg.get();
         ctx.offset = &offset;
         ctx.hierarchy = &hierarchy;
         ctx.chunkRoots = &chunkRoots;
@@ -553,7 +575,8 @@ bool buildOctree(const std::string& inputPath,
         rootNodeIndex = buildCoarse(std::move(coarse), ctx, rMin, cs.cubeSize, 0, rootSpacing);
     }
 
-    std::fclose(payload);
+    if (isPackage) pkg->EndFile();
+    else if (payload) std::fclose(payload);
 
     // ---- metadata ---------------------------------------------------------
     FileMetadata meta{};
@@ -574,9 +597,16 @@ bool buildOctree(const std::string& inputPath,
     meta.hasClassification = cs.hasClassification ? 1u : 0u;
     meta.compressionType = opts.compress ? 1u : 0u;
 
-    bool ok = writeMetaBin(outDir, meta) &&
-              writeMetadataJson(outDir, meta) &&
-              writeHierarchy(outDir, hierarchy);
+    bool ok = writeMetaBin(outDir, meta, pkg.get()) &&
+              writeMetadataJson(outDir, meta, pkg.get()) &&
+              writeHierarchy(outDir, hierarchy, pkg.get());
+
+    if (isPackage && pkg) {
+        if (!pkg->Finalize()) {
+            logError("buildOctree: failed to finalize package");
+            ok = false;
+        }
+    }
 
     // ---- cleanup ----------------------------------------------------------
     if (!opts.keepChunks) fs::remove_all(chunkDir, ec);

@@ -3,16 +3,30 @@
 #include <cstdio>
 #include <fstream>
 
+#include "io/PackageFormat.h"
+
 namespace pf {
 
-bool writeMetaBin(const std::string& outDir, const FileMetadata& meta) {
+bool writeMetaBin(const std::string& outDir, const FileMetadata& meta, PackageWriter* pkg) {
+    if (pkg) {
+        if (!pkg->BeginFile("meta.bin")) return false;
+        if (!pkg->Write(&meta, sizeof(meta))) return false;
+        return pkg->EndFile();
+    }
     std::ofstream f(outDir + "/meta.bin", std::ios::binary);
     if (!f) { logError("writeMetaBin: cannot open meta.bin"); return false; }
     f.write(reinterpret_cast<const char*>(&meta), sizeof(meta));
     return f.good();
 }
 
-bool writeHierarchy(const std::string& outDir, const std::vector<NodeRecord>& nodes) {
+bool writeHierarchy(const std::string& outDir, const std::vector<NodeRecord>& nodes, PackageWriter* pkg) {
+    if (pkg) {
+        if (!pkg->BeginFile("hierarchy.bin")) return false;
+        if (!nodes.empty()) {
+            if (!pkg->Write(nodes.data(), nodes.size() * sizeof(NodeRecord))) return false;
+        }
+        return pkg->EndFile();
+    }
     std::ofstream f(outDir + "/hierarchy.bin", std::ios::binary);
     if (!f) { logError("writeHierarchy: cannot open hierarchy.bin"); return false; }
     f.write(reinterpret_cast<const char*>(nodes.data()),
@@ -20,10 +34,9 @@ bool writeHierarchy(const std::string& outDir, const std::vector<NodeRecord>& no
     return f.good();
 }
 
-bool writeMetadataJson(const std::string& outDir, const FileMetadata& m) {
-    FILE* f = std::fopen((outDir + "/metadata.json").c_str(), "wb");
-    if (!f) { logError("writeMetadataJson: cannot open metadata.json"); return false; }
-    std::fprintf(f,
+bool writeMetadataJson(const std::string& outDir, const FileMetadata& m, PackageWriter* pkg) {
+    char buf[1024];
+    int len = std::snprintf(buf, sizeof(buf),
         "{\n"
         "  \"version\": %u,\n"
         "  \"pointCount\": %llu,\n"
@@ -48,6 +61,18 @@ bool writeMetadataJson(const std::string& outDir, const FileMetadata& m) {
         m.rootSpacing,
         m.bytesPerPoint, m.hasColor, m.nodeCount, m.rootNodeIndex,
         m.hasClassification, m.compressionType);
+
+    if (pkg) {
+        if (!pkg->BeginFile("metadata.json")) return false;
+        if (len > 0) {
+            if (!pkg->Write(buf, len)) return false;
+        }
+        return pkg->EndFile();
+    }
+    
+    FILE* f = std::fopen((outDir + "/metadata.json").c_str(), "wb");
+    if (!f) { logError("writeMetadataJson: cannot open metadata.json"); return false; }
+    std::fwrite(buf, 1, len, f);
     std::fclose(f);
     return true;
 }

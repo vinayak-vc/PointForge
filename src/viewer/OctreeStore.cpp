@@ -1,5 +1,6 @@
 #include "viewer/OctreeStore.h"
 #include "common/Log.h"
+#include "io/PackageFormat.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -31,40 +32,75 @@ void OctreeStore::clear() {
     ready_.clear();
     nodes_.clear();
     octreePath_.clear();
+    octreePackageOffset_ = 0;
+    pkgReader_.reset();
     stop_ = false; // Reset for next load
 }
 
 bool OctreeStore::load(const std::string& dir) {
-    // meta.bin
-    {
-        std::ifstream f(dir + "/meta.bin", std::ios::binary | std::ios::ate);
-        if (!f) { logError("OctreeStore: missing meta.bin in " + dir); return false; }
-        std::streamsize len = f.tellg();
-        f.seekg(0);
-        if (len < 104 || len > sizeof(meta_)) {
-            logError("OctreeStore: bad meta.bin size"); return false;
+    bool isPackage = (dir.length() >= 5 && dir.substr(dir.length() - 5) == ".vxpc");
+    if (isPackage) {
+        pkgReader_ = std::make_unique<PackageReader>();
+        if (!pkgReader_->Open(dir)) {
+            logError("OctreeStore: cannot open package " + dir);
+            return false;
         }
-        std::memset(&meta_, 0, sizeof(meta_)); // zero init for v1
-        f.read(reinterpret_cast<char*>(&meta_), len);
-        if (!f || std::memcmp(meta_.magic, "PFO1", 4) != 0) {
-            logError("OctreeStore: bad meta.bin magic/size"); return false;
+        
+        // meta.bin
+        auto metaData = pkgReader_->Read("meta.bin");
+        if (metaData.size() < 104 || metaData.size() > sizeof(meta_)) {
+            logError("OctreeStore: bad meta.bin size in package"); return false;
         }
-    }
-    // hierarchy.bin
-    {
-        std::ifstream f(dir + "/hierarchy.bin", std::ios::binary | std::ios::ate);
-        if (!f) { logError("OctreeStore: missing hierarchy.bin"); return false; }
-        std::streamsize bytes = f.tellg();
-        f.seekg(0);
-        nodes_.resize((size_t)bytes / sizeof(NodeRecord));
-        f.read(reinterpret_cast<char*>(nodes_.data()), bytes);
-        if (nodes_.size() != meta_.nodeCount)
-            logWarn("OctreeStore: nodeCount mismatch (meta " +
-                    std::to_string(meta_.nodeCount) + " vs file " +
-                    std::to_string(nodes_.size()) + ")");
-    }
+        std::memset(&meta_, 0, sizeof(meta_));
+        std::memcpy(&meta_, metaData.data(), metaData.size());
+        if (std::memcmp(meta_.magic, "PFO1", 4) != 0) {
+            logError("OctreeStore: bad meta.bin magic in package"); return false;
+        }
+        
+        // hierarchy.bin
+        auto hierData = pkgReader_->Read("hierarchy.bin");
+        if (hierData.empty()) { logError("OctreeStore: missing hierarchy.bin in package"); return false; }
+        nodes_.resize(hierData.size() / sizeof(NodeRecord));
+        std::memcpy(nodes_.data(), hierData.data(), hierData.size());
+        if (nodes_.size() != meta_.nodeCount) {
+            logWarn("OctreeStore: nodeCount mismatch");
+        }
+        
+        octreePath_ = dir;
+        octreePackageOffset_ = pkgReader_->GetOffset("octree.bin");
+    } else {
+        // meta.bin
+        {
+            std::ifstream f(dir + "/meta.bin", std::ios::binary | std::ios::ate);
+            if (!f) { logError("OctreeStore: missing meta.bin in " + dir); return false; }
+            std::streamsize len = f.tellg();
+            f.seekg(0);
+            if (len < 104 || len > sizeof(meta_)) {
+                logError("OctreeStore: bad meta.bin size"); return false;
+            }
+            std::memset(&meta_, 0, sizeof(meta_)); // zero init for v1
+            f.read(reinterpret_cast<char*>(&meta_), len);
+            if (!f || std::memcmp(meta_.magic, "PFO1", 4) != 0) {
+                logError("OctreeStore: bad meta.bin magic/size"); return false;
+            }
+        }
+        // hierarchy.bin
+        {
+            std::ifstream f(dir + "/hierarchy.bin", std::ios::binary | std::ios::ate);
+            if (!f) { logError("OctreeStore: missing hierarchy.bin"); return false; }
+            std::streamsize bytes = f.tellg();
+            f.seekg(0);
+            nodes_.resize((size_t)bytes / sizeof(NodeRecord));
+            f.read(reinterpret_cast<char*>(nodes_.data()), bytes);
+            if (nodes_.size() != meta_.nodeCount)
+                logWarn("OctreeStore: nodeCount mismatch (meta " +
+                        std::to_string(meta_.nodeCount) + " vs file " +
+                        std::to_string(nodes_.size()) + ")");
+        }
 
-    octreePath_ = dir + "/octree.bin";
+        octreePath_ = dir + "/octree.bin";
+        octreePackageOffset_ = 0;
+    }
     quant_.scale  = { meta_.scale[0],  meta_.scale[1],  meta_.scale[2]  };
     quant_.offset = { meta_.offset[0], meta_.offset[1], meta_.offset[2] };
     hasColor_ = meta_.hasColor != 0;
@@ -213,7 +249,7 @@ bool OctreeStore::readNodeInto(std::ifstream& in, const NodeRecord& rec,
     if (!rec.pointCount) return true;
 
     const size_t expectedRawBytes = rec.pointCount * sizeof(PackedPoint);
-    in.seekg((std::streamoff)rec.byteOffset);
+    in.seekg((std::streamoff)(rec.byteOffset + octreePackageOffset_));
     if (rec.byteSize < expectedRawBytes) {
 #ifdef PF_WITH_ZSTD
         std::vector<uint8_t> cbuf(rec.byteSize);
