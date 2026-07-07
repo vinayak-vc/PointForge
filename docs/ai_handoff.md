@@ -1,5 +1,29 @@
-## Previous Session (2026-07-07) - Multi-Cloud Scene Refactor
+## Latest Session (2026-07-07) - VXPC Phases 5, 12, 15 (Thumbnails, Custom Meta, ZSTD)
 
+### What was built
+- **ZSTD Payload Compression** (Phase 15): Embedded ZSTD payload compression natively into `PackageWriter::AddMemory`. Modified `PackageReader::Read` to detect compressed entries and decompress on the fly.
+- **Custom Metadata** (Phase 12): Added `PackageWriter::AddCustomMeta` API. It serializes a dynamically populated key/value list to `custom_meta.json` during the `Finalize()` step.
+- **Thumbnails** (Phase 5): The `pfconvert` CLI now accepts a `--thumbnail <path>` argument. If omitted, `OctreeIndexer` generates a synthetic 256x256 RGB projection and embeds it into the package as `thumbnail.raw`.
+
+### Validation
+- Compiled `pfcore.lib` and `pftest.exe`.
+- Successfully ran `pftest.exe`, passing sequential and parallel tests, validating CRC32 hashes on compressed payload sizes, and deserializing the custom metadata payloads.
+
+### Modified files
+- `docs/tasks.md`
+- `docs/vxpc_feature.md`
+- `docs/decisions.md`
+- `src/io/PackageFormat.h`
+- `src/io/PackageFormat.cpp`
+- `src/indexer/OctreeIndexer.h`
+- `src/indexer/OctreeIndexer.cpp`
+- `src/indexer/MetadataWriter.cpp`
+- `src/tools/pfconvert/main.cpp`
+
+### Next Recommended Task
+- Move on to Phase 14 (Chunked Octree) or Phase 13 (Streaming Support) from the `.vxpc` roadmap.
+
+## Previous Session (2026-07-07) - Multi-Cloud Scene Refactor
 ### What was built / Fixed
 - **Multi-Cloud Scene Architecture**: Transitioned the global `OctreeStore` and `PointRenderer` instances in `main.cpp` into a `std::vector<SceneCloud> scene` to support loading and rendering multiple point clouds simultaneously.
 - **Render & Interaction Loop Updates**: The `renderPass` now iterates through all `SceneCloud` objects. Picking, cursor hover (`worldUnderCursor`), camera focus, and `frameAll` logic were updated to handle multiple point clouds relative to a shared scene origin (the first loaded cloud's center).

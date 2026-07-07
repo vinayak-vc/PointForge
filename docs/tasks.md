@@ -188,6 +188,10 @@
                 and a clean desktop-like app shell (Toolbar, Workspace, Status Bar).
                 Replaced native inputs with styled sliders, segmented controls, and
                 iOS-style toggles.
+        - `[x]` Phase 9: Virtual File System (`.vxpc`) Architecture — Designed and
+                implemented the primary `.vxpc` PointForge native archive format.
+                (Phases 1-6, 12, 15, 16 completed: ZSTD compression, CRC32 checksums,
+                Thumbnail generation, JSON Custom Metadata, PackageWriter APIs).
 
 ## Planned — medium features (see docs/newdev.md for the full living plan)
 Recommended order; update newdev.md status board as these move:

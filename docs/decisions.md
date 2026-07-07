@@ -99,6 +99,14 @@ This document records major design decisions.
 - **Reason**: libdatachannel matches local tracks to remote m-lines strictly by mid (`populateLocalDescription` → `mTracks.find(remoteMedia->mid())`). The original hardcoded mid `"video"`/PT 96 never matched Chrome's offer (mid `"0"`, dynamic PT), so the answer marked the video line removed (port 0) and no media could ever flow — black screen on every browser.
 - **Consequence**: If the offer carries no H264 codec at all, the server logs an error and stays on JPEG instead of negotiating a dead connection. Client-side companions to this fix: `useWebSocket` forwards the server's `webrtc_candidate` trickle-ICE messages (previously dropped — only `webrtc_ice` was handled), `useWebRTC` queues remote candidates until `setRemoteDescription` resolves, and the `onWebRTC` handler is wired through a ref (a `let` placeholder captured a stale no-op in the options object, silently discarding the answer).
 
+## Virtual File System (`.vxpc` Container)
+- **Decision**: PointForge output files (`octree.bin`, `hierarchy.bin`, `meta.bin`, `metadata.json`) are now packaged into a single binary container format (`.vxpc`) instead of a traditional directory folder.
+- **Reason**: Millions of tiny files or multi-file directory structures are painful for enterprise customers to copy, share, and backup. A single container acts identically to Unity AssetBundles or Unreal `.pak` files.
+- **Consequence**: 
+  - `PackageWriter` creates the container with zero-copy streamable `AddFile` and memory-mapped `AddMemory`.
+  - `PackageReader` fulfills the new `VirtualFileSystem` interface so `OctreeStore` functions identically whether loading from a folder or `.vxpc` package.
+  - Payloads can optionally be individually compressed with `ZSTD` (`PackageWriter::Compression::ZSTD`), verified safely via CRC32 validation during `PackageReader::Read`, and embedded with dynamic custom JSON metadata (`custom_meta.json`) and synthetic visual thumbnails (`thumbnail.raw` / `thumbnail.jpg`).
+
 ## WebRTC Encoder: Hardware-First, Quality VBR, Never-Crash Fallback
 - **Decision**: The encode thread selects a hardware H.264 MFT (`MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE` — NVENC/QuickSync/VCE) before falling back to the software `CLSID_CMSH264EncoderMFT`. Rate control is quality-based VBR (`eAVEncCommonRateControlMode_Quality`, quality 78) with a 12 Mbps `MF_MT_AVG_BITRATE` hint (up from a hardcoded 2 Mbps CBR).
 - **Reason**: Point-cloud frames are dense fields of high-contrast dots — worst-case content for H.264 inter prediction, so 2 Mbps CBR smeared badly versus the JPEG stream's effective 12–18 Mbps. The software encoder also burned CPU (plus CPU RGB→NV12) competing with the renderer; hardware encode moves that to the GPU.
