@@ -114,6 +114,16 @@
         bump, mobile toolbar dedup (`.toolbar-group--dup`), connect-screen
         scroll fix, `--text-3` contrast bump, typeable PIN input, lucide icons
         replacing emoji in the pinch-mode toggle
+- `[x]` Cross-section / slice export (branch `cross-section-slice-export`):
+        current clip box exports as DXF, PNG, or CSV. Implemented
+        `OctreeStore::forEachPointInBox` + `estimatePointsInBox`, a pfcore
+        ASCII DXF R12 writer, CSV streaming writer, Clip-panel "Export
+        slice..." dialog, Jobs-panel progress/cancel/reveal, PNG export
+        through the existing offscreen render + EDL path, and permanent
+        `--export-slice <prefix>` smoke hook. Real-model validation:
+        `C:\UnrealProject\model\PointForgeCache_direct` exported DXF/CSV/PNG;
+        CSV rows and DXF POINT entities both 871,420; PNG valid 1920×2160 and
+        visually verified.
 
 ## In Progress
 - `[x]` Web remote controller (branch `webapp-controller`) — phone browser drives
@@ -213,8 +223,10 @@ Recommended order; update newdev.md status board as these move:
         cmds + CameraTab card; streaming suspended during export; toast
         with Explorer [Show] reveal; `--export-video` smoke hook.
         Smoke-verified: Tikal-13 → 1080p30, 121 frames, ffprobe-clean H.264.
-- `[ ]` 4. Cross-section / slice export (forEachPointInBox bulk query; own
-        DXF R12 writer in pfcore; PNG + CSV)
+- `[x]` 4. Cross-section / slice export (branch `cross-section-slice-export`):
+        `forEachPointInBox`, own DXF R12 writer in pfcore, Clip-panel
+        DXF/PNG/CSV export, pftest boxed-query coverage, and real-model smoke
+        validation are complete.
 - `[ ]` 5. Annotations from phone (generalise tap-to-measure; JSON per-cloud
         persistence; GL pins + labels visible in the stream)
 - `[ ]` 6. Multi-cloud scene (SceneCloud vector, per-cloud renderer, scene

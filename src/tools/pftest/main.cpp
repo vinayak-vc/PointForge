@@ -19,6 +19,7 @@
 #include "viewer/OctreeStore.h"
 
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -150,6 +151,28 @@ static void verifyStructure(const pf::OctreeStore& store, uint64_t inputPoints,
         CHECK(hit.z > 9.0 && hit.z < 13.0,
               "picked point height is outside the cluster range");
     }
+
+    pf::AABB query;
+    query.min = pf::Vec3d(24.0, 49.0, 9.0);
+    query.max = pf::Vec3d(28.0, 53.0, 13.0);
+    std::atomic<bool> cancel{false};
+    uint64_t exact = 0;
+    uint64_t delivered = store.forEachPointInBox(
+        query, -1, &cancel,
+        [&](const pf::Point& point) -> bool {
+            CHECK(point.position.x >= query.min.x && point.position.x <= query.max.x,
+                  "forEachPointInBox delivered x outside query");
+            CHECK(point.position.y >= query.min.y && point.position.y <= query.max.y,
+                  "forEachPointInBox delivered y outside query");
+            CHECK(point.position.z >= query.min.z && point.position.z <= query.max.z,
+                  "forEachPointInBox delivered z outside query");
+            ++exact;
+            return true;
+        });
+    CHECK(delivered == exact, "forEachPointInBox return count mismatch");
+    CHECK(delivered > 0, "forEachPointInBox found no points in known cluster");
+    CHECK(store.estimatePointsInBox(query, -1) >= delivered,
+          "estimatePointsInBox is lower than exact boxed query");
 }
 
 int main(int argc, char** argv) {

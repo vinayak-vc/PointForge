@@ -237,7 +237,31 @@ click already uses — no separate remote ray-casting implementation, and the
 video stream is guaranteed to share the local window's aspect ratio (it's a
 downscaled copy of the same rendered frame), so the mapping is exact.
 
-## 9. Extension points (deliberate TODOs)
+## 9. Cross-section / slice export
+
+Clip export uses the same clip box the point shader applies, but performs its
+own CPU-side extraction because the GPU discard path cannot recover the source
+points. `OctreeStore::forEachPointInBox` is the bulk-query companion to
+`pickPoint`: it walks the hierarchy, skips node cubes outside the WORLD-space
+box, decodes each intersecting node with `readNodeInto`, exact-tests unpacked
+points against the box, and streams matches to a callback. It accepts a max
+depth cap so the export dialog can trade density for file size, and a cancel
+flag so large exports can stop through the Jobs panel.
+
+DXF and CSV export run on a worker and stream directly to file. DXF is a
+dependency-free ASCII R12 writer (`src/io/DxfWriter.{h,cpp}`) that emits
+`POINT` entities by classification layer plus a R12 `POLYLINE` slice outline;
+coordinates are source WORLD coordinates, projected onto the thinnest-axis
+plane of the current clip box. CSV writes `x,y,z,r,g,b,intensity,classification`.
+
+PNG export remains on the render thread because it uses OpenGL. It temporarily
+aligns an orthographic camera to the slice normal, applies the clip box, renders
+through the existing offscreen FBO and EDL post-process path, waits for visible
+nodes to settle, writes PNG via the existing encoder, and restores camera/clip
+state. The permanent `--export-slice <prefix>` smoke hook validates all three
+formats against a real octree without manual UI clicks.
+
+## 10. Extension points (deliberate TODOs)
 
 * **LAZ via PDAL**: `laszip_api` covers LAS/LAZ directly; swap to PDAL if you need
   exotic formats.

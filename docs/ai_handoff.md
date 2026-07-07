@@ -1,5 +1,97 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Latest Session (2026-07-07, cont.) - Cross-section / slice export DONE (newdev.md #4, branch `cross-section-slice-export`)
+
+Task #4 is **DONE**. Implementation landed, tests pass, and real-model
+DXF/CSV/PNG export was smoke-verified against
+`C:\UnrealProject\model\PointForgeCache_direct`.
+
+### What was built
+- **CPU boxed point traversal** (`src/viewer/OctreeStore.{h,cpp}`):
+  `forEachPointInBox(AABB, maxDepth, cancel, visitor)` reuses the existing
+  `readNodeInto` decode path (zstd/uncompressed), unpacks points into WORLD
+  coordinates, exact-tests each point against the requested clip box, and
+  streams matches to a callback. `estimatePointsInBox` provides a cheap
+  intersecting-node payload estimate for the UI.
+- **DXF writer** (`src/io/DxfWriter.{h,cpp}`, added to pfcore): minimal ASCII
+  DXF R12, `POINT` entities grouped by classification layer, plus a R12
+  `POLYLINE` outline of the slice box. Projection uses the current clip box's
+  thinnest axis; output coordinates are source WORLD coordinates, not centered
+  render-space coordinates.
+- **Clip-panel export UI** (`src/viewer/main.cpp`): Properties > Clip now has
+  "Export slice..." with DXF / PNG / CSV formats. DXF/CSV run as cancellable
+  Jobs-panel entries on a background worker and stream directly to file. CSV
+  columns are `x,y,z,r,g,b,intensity,classification`.
+- **PNG export path**: represented as a Jobs-panel item but executed on the
+  render thread because it uses OpenGL. It temporarily aligns an orthographic
+  camera to the slice normal, applies the clip box, renders into the existing
+  export-sized FBO path, waits for LOD settle up to 240 attempts, EDL-posts,
+  encodes PNG with the existing `encodePNG`, then restores camera and clip
+  state.
+- **Jobs integration**: slice jobs show progress/cancel/reveal in the Jobs
+  panel and produce completion/failure/cancel toasts. Running slice exports
+  are canceled/joined before loading a different cloud and at shutdown.
+- **Smoke hook** (`src/viewer/main.cpp`): `--export-slice <prefix>` loads the
+  first positional octree, picks a central metadata slice, exports
+  `<prefix>.dxf`, `<prefix>.csv`, and `<prefix>.png`, and exits when all three
+  complete. This validates CPU writers and the main-thread GL PNG path without
+  manual UI clicks.
+- **Test coverage** (`src/tools/pftest/main.cpp`): synthetic cluster test now
+  exercises `forEachPointInBox`, verifies all delivered points are inside the
+  query box, verifies the returned count, and checks `estimatePointsInBox`
+  never undercounts the exact visitor result.
+
+### Verified
+- `cmake --build build-static --config Release --target pfview` succeeds and
+  produced `build-static/Release/ViitorXPCViewer_v1022.exe` after the smoke
+  hook was added.
+- `cmake --build build-static --config Release --target pftest` succeeds.
+- Focused test run:
+  `build-static\Release\pftest.exe --points 200000 --threads 4 --dir build-static\slice_pftest_work`
+  PASS.
+- Registered CTest:
+  `ctest --test-dir build-static -C Release --output-on-failure -R octree_roundtrip`
+  PASS.
+- Real-model smoke:
+  `ViitorXPCViewer_v1022.exe C:\UnrealProject\model\PointForgeCache_direct --export-slice scratch\slice_smoke\PointForgeCache_direct_slice`
+  produced:
+  - `scratch\slice_smoke\PointForgeCache_direct_slice.dxf` (67,971,198 bytes)
+  - `scratch\slice_smoke\PointForgeCache_direct_slice.csv` (42,916,968 bytes)
+  - `scratch\slice_smoke\PointForgeCache_direct_slice.png` (497,778 bytes)
+- Output validation:
+  - PNG signature valid, dimensions **1920×2160**, visually populated with the
+    clipped top-down slice.
+  - CSV rows: **871,420**.
+  - DXF `POINT` entities: **871,420**; header reports `AC1009` (R12) and file
+    ends with `EOF`.
+  - CSV world coordinate range stayed inside the selected thin slice:
+    x `220880..221066`, y `1905890..1906140`, z `314.847..318.784`.
+
+### Modified files
+- `CMakeLists.txt`
+- `src/io/DxfWriter.{h,cpp}`
+- `src/viewer/OctreeStore.{h,cpp}`
+- `src/viewer/main.cpp`
+- `src/tools/pftest/main.cpp`
+- `docs/newdev.md`
+- `docs/tasks.md`
+- `docs/roadmap.md`
+- `docs/project-overview.md`
+- `docs/architecture.md`
+- `docs/decisions.md`
+- `docs/ai_handoff.md`
+- `VERSION` was auto-bumped by the normal build-stamp target during the
+  `pfview` build.
+
+Pre-existing local modifications still present and not touched intentionally:
+`.claude/settings.local.json`, `AGENTS.md`.
+
+### Next Recommended Task
+Start newdev.md **#5 Annotations from phone** on a new branch after #4 is
+reviewed. Useful #4 follow-ups: add a remote command for slice export if phone
+control needs it, and optionally add a true CAD-viewer screenshot check to the
+release QA checklist.
+
 ## Latest Session (2026-07-07, cont.) - Camera path + MP4 export DONE (newdev.md #3, branch `camera-path-export`)
 
 Two-session feature: previous session implemented it (and its review workflow

@@ -136,6 +136,18 @@ GpuVertex OctreeStore::convert(const PackedPoint& p) const {
     return v;
 }
 
+Point OctreeStore::unpackPoint(const PackedPoint& p) const {
+    Point point;
+    point.position = quant_.unpack(p);
+    point.r = p.r;
+    point.g = p.g;
+    point.b = p.b;
+    point.intensity = p.intensity;
+    point.classification = p.classification;
+    point.hasColor = hasColor_;
+    return point;
+}
+
 void OctreeStore::requestLoad(uint32_t nodeIndex, uint64_t frame) {
     std::lock_guard<std::mutex> lk(mtx_);
     requestFrame_[nodeIndex] = frame; // refresh "last wanted" even if already queued
@@ -275,6 +287,22 @@ static bool rayAabb(const glm::dvec3& O, const glm::dvec3& D,
     return true;
 }
 
+static bool nodeIntersectsBox(const NodeCube& node, const AABB& box) {
+    const double maxX = node.min[0] + node.size;
+    const double maxY = node.min[1] + node.size;
+    const double maxZ = node.min[2] + node.size;
+    if (maxX < box.min.x || node.min[0] > box.max.x) return false;
+    if (maxY < box.min.y || node.min[1] > box.max.y) return false;
+    if (maxZ < box.min.z || node.min[2] > box.max.z) return false;
+    return true;
+}
+
+static bool pointInsideBox(const Vec3d& point, const AABB& box) {
+    return point.x >= box.min.x && point.x <= box.max.x &&
+           point.y >= box.min.y && point.y <= box.max.y &&
+           point.z >= box.min.z && point.z <= box.max.z;
+}
+
 bool OctreeStore::pickPoint(const glm::vec3& rayOriginCentered, const glm::vec3& rayDir,
                             double tolPerDist, glm::dvec3& hitWorld,
                             uint64_t maxScanPoints) const {
@@ -327,6 +355,82 @@ bool OctreeStore::pickPoint(const glm::vec3& rayOriginCentered, const glm::vec3&
             if (rec.children[o] != kNoChild) stack.push_back(rec.children[o]);
     }
     return found;
+}
+
+uint64_t OctreeStore::forEachPointInBox(const AABB& box, int maxDepth,
+                                        const std::atomic<bool>* cancel,
+                                        const PointVisitor& visitor) const {
+    if (nodes_.empty() || octreePath_.empty() || !box.valid() || !visitor) return 0;
+
+    std::ifstream in(octreePath_, std::ios::binary);
+    if (!in) {
+        logError("OctreeStore::forEachPointInBox: cannot open " + octreePath_);
+        return 0;
+    }
+
+    std::vector<PackedPoint> raw;
+    std::vector<uint32_t> stack;
+    stack.push_back(rootIndex());
+    uint64_t delivered = 0;
+
+    while (!stack.empty()) {
+        if (cancel && cancel->load()) break;
+
+        const uint32_t idx = stack.back();
+        stack.pop_back();
+        if (idx >= nodes_.size()) continue;
+
+        const NodeRecord& rec = nodes_[idx];
+        if (maxDepth >= 0 && rec.level > maxDepth) continue;
+        const NodeCube& nc = cubes_[idx];
+        if (!nodeIntersectsBox(nc, box)) continue;
+
+        if (rec.pointCount && readNodeInto(in, rec, raw)) {
+            for (uint32_t i = 0; i < rec.pointCount; ++i) {
+                if (cancel && cancel->load()) return delivered;
+
+                Point point = unpackPoint(raw[i]);
+                if (!pointInsideBox(point.position, box)) continue;
+                if (!visitor(point)) return delivered;
+                ++delivered;
+            }
+        }
+
+        if (maxDepth >= 0 && rec.level >= maxDepth) continue;
+        for (int o = 0; o < 8; ++o) {
+            if (rec.children[o] != kNoChild) stack.push_back(rec.children[o]);
+        }
+    }
+
+    return delivered;
+}
+
+uint64_t OctreeStore::estimatePointsInBox(const AABB& box, int maxDepth) const {
+    if (nodes_.empty() || !box.valid()) return 0;
+
+    std::vector<uint32_t> stack;
+    stack.push_back(rootIndex());
+    uint64_t estimated = 0;
+
+    while (!stack.empty()) {
+        const uint32_t idx = stack.back();
+        stack.pop_back();
+        if (idx >= nodes_.size()) continue;
+
+        const NodeRecord& rec = nodes_[idx];
+        if (maxDepth >= 0 && rec.level > maxDepth) continue;
+        const NodeCube& nc = cubes_[idx];
+        if (!nodeIntersectsBox(nc, box)) continue;
+
+        estimated += rec.pointCount;
+
+        if (maxDepth >= 0 && rec.level >= maxDepth) continue;
+        for (int o = 0; o < 8; ++o) {
+            if (rec.children[o] != kNoChild) stack.push_back(rec.children[o]);
+        }
+    }
+
+    return estimated;
 }
 
 } // namespace pf
