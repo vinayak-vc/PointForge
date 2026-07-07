@@ -105,6 +105,29 @@ export default function CameraTab({ cfg, setValue, send }: CameraTabProps) {
         </div>
       </Card>
 
+      <Card title="Camera Path">
+        {(cfg.pathKeys ?? 0) >= 2 ? (
+          <>
+            <p className="dim">
+              {cfg.pathKeys} keys · {(cfg.pathDuration ?? 0).toFixed(1)} s
+            </p>
+            <div className="btn-grid">
+              {cfg.pathPlaying ? (
+                <button type="button" onClick={cmd('path_stop')}>
+                  Stop
+                </button>
+              ) : (
+                <button type="button" onClick={cmd('path_play')}>
+                  Play
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <p className="dim">No camera path for this cloud. Author one on the PC (Properties → Camera Path).</p>
+        )}
+      </Card>
+
       <Card title="Stereo 3D">
         <Toggle
           label="Stereo (side-by-side)"

@@ -1,6 +1,69 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-07) - Multi-client roles (newdev.md #2, branch `multi-client-roles`)
+## Latest Session (2026-07-07, cont.) - Camera path + MP4 export DONE (newdev.md #3, branch `camera-path-export`)
+
+Two-session feature: previous session implemented it (and its review workflow
+died mid-run on a model limit); this session verified completion, re-ran the
+smoke, and closed the docs loop. newdev.md #3 = **DONE**.
+
+### What was built (previous session, verified this session)
+- **`src/viewer/CamPath.h`** (new): `CamKey{t, px/py/pz, yaw, pitch, ortho,
+  orthoSize}` + `CamPath::sample` — non-uniform Catmull-Rom (finite-difference
+  tangents; uneven key spacing doesn't overshoot), yaw unwrapped shortest-way,
+  pitch clamped ±89, ortho as a step channel. Persisted per-cloud in AppData
+  `campaths.txt` (TSV, `# pf-campath 1` header, bookmark-style keying).
+- **`src/viewer/VideoExporter.{h,cpp}`** (new): IMFSinkWriter H.264 High MP4
+  (hardware transforms enabled, NV12 input, frame-index timestamps so rounding
+  never drifts). Owns COM/MFStartup lifecycle; `abort()` skips Finalize and
+  deletes the partial file. Non-Windows stub.
+- **`src/viewer/Nv12.h`** (new): `rgbToNv12BottomUp` lifted from
+  RemoteServer.cpp — shared by the WebRTC stream and the exporter (identical
+  BT.601 colour). RemoteServer.cpp now calls the shared helper.
+- **main.cpp**: incremental in-frame export loop (export-sized FBO pair +
+  EDL post pass; a frame is written only after LOD settle — all frustum
+  visible nodes resident, 240-retry cap with warn; 30 ms/frame budget keeps
+  the UI live; extra 512-result absorb loop during export); progress modal
+  with Cancel, Esc cancels; camera saved/restored; `wantFrame()` suspended
+  during export. Properties > "Camera Path" section: key list (DragFloat
+  time, re-sort on edit-end, Go/Set/delete), Add Key at Current View, Clear,
+  Scrub slider, Preview play/stop, Export MP4 dialog (720p–4K, 24/30/60 fps,
+  5–100 Mbps, Browse via new `pf::saveFileDialog`). Toast with [Show]
+  Explorer-reveal button (`Toast.revealPath`) + MessageBeep.
+  `--export-video <out.mp4>` smoke hook (3-key orbit path, exact dialog
+  code path, auto-quit).
+- **FileDialog.{h,cpp}**: new `saveFileDialog` (IFileSaveDialog).
+- **Remote**: `RemoteConfig` gains `pathKeys/pathDuration/pathPlaying`;
+  cmds `path_play`/`path_stop`; webremote CameraTab "Camera Path" card
+  (Play/Stop, or author-on-PC hint), `cfg.ts` keys. Export stays PC-only.
+
+### Verified this session
+- Build current: v1020 exe postdates all sources; the earlier fprintf format
+  warnings (main.cpp campaths save/load) were already fixed — last build log
+  clean.
+- Re-ran the smoke against v1020: Tikal-13 (912 nodes / 12.4M pts) →
+  `--export-video` completed, exit 0, and **ffprobe confirms h264 High
+  1920x1080 30 fps nb_frames=121** — a structurally valid, playable MP4.
+- Code-reviewed the full diff vs origin/main (VideoExporter lifecycle/error
+  paths, Nv12 math, export loop state save/restore, UI guards) — no defects
+  found. NOTE: the previous session's adversarial review WORKFLOW died on a
+  model limit before reporting; this was a single-lens manual review instead.
+- Not exercised live (code-verified only): Cancel/Esc mid-export (abort +
+  partial-file delete), phone Play/Stop card, non-ASCII output paths
+  (DeleteFileA on abort is ANSI — worst case an orphaned partial file).
+
+### Docs updated (per AGENTS.md loop)
+docs/newdev.md (#3 checkboxes + status board DONE + acceptance results),
+docs/tasks.md (#3 shipped entry), docs/decisions.md (SinkWriter-not-WebRTC,
+in-frame incremental export, LOD settle, Catmull-Rom choices), this file.
+
+### Next Recommended Task
+User raises the `camera-path-export` PR. Then newdev.md **#4 Cross-section /
+slice export** (branch off main): start with
+`OctreeStore::forEachPointInBox` + the DXF R12 writer in pfcore (no GL deps),
+then the Clip-panel UI. Optional #3 follow-ups: live-test export Cancel, GPU
+NV12 conversion for 4K/60, wide-char DeleteFileW on abort.
+
+## Previous Session (2026-07-07) - Multi-client roles (newdev.md #2, branch `multi-client-roles`)
 
 `parallel-indexer` PR merged; #2 implemented and live-verified.
 

@@ -63,6 +63,12 @@ export type Cfg = {
   /** Camera bookmark names for the loaded cloud; recall/save/delete via
    *  cmds bookmark_goto/bookmark_add/bookmark_del (v = index). */
   bookmarks: string[];
+  /** Camera path (keyframed fly-through) for the loaded cloud. Preview
+   *  transport via cmds path_play/path_stop; authoring + MP4 export are
+   *  PC-only. */
+  pathKeys: number;
+  pathDuration: number;
+  pathPlaying: boolean;
 };
 
 // Keys the client may write back with {"t":"set",...}. (tool/fullscreen and

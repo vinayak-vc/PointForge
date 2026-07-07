@@ -309,6 +309,7 @@ add_executable(pfview WIN32
     src/viewer/Controller.cpp
     src/viewer/SerialController.cpp
     src/viewer/RemoteServer.cpp
+    src/viewer/VideoExporter.cpp
     src/viewer/qrcodegen.cpp
     src/viewer/app.rc
 )

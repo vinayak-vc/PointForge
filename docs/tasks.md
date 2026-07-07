@@ -199,8 +199,20 @@ Recommended order; update newdev.md status board as these move:
         webremote read-only mode (View-only badge, video+status only).
         Live-verified: concurrent driver+viewer, forged viewer input ignored,
         frames flowing to the viewer client.
-- `[ ]` 3. Camera path animation + MP4 export (CamPath keyframes over the
-        bookmark pose struct; IMFSinkWriter; offline FBO render loop)
+- `[x]` 3. Camera path animation + MP4 export (branch `camera-path-export`):
+        `CamPath.h` keyframes (non-uniform Catmull-Rom, shortest-way yaw,
+        ortho step channel) persisted per-cloud in AppData `campaths.txt`;
+        `VideoExporter.{h,cpp}` IMFSinkWriter H.264 MP4 (hardware transforms,
+        abort deletes partial file); NV12 conversion lifted to shared
+        `Nv12.h`; incremental offline export loop (export-sized FBO + EDL
+        pass, LOD-settle before each frame, 30 ms/frame budget keeps UI
+        live, progress modal + Cancel/Esc, camera restored); Properties >
+        Camera Path UI (key list Go/Set/delete, scrub, preview, export
+        dialog 720p–4K / 24–60 fps / bitrate, save-file dialog); remote
+        cfg `pathKeys/pathDuration/pathPlaying` + `path_play`/`path_stop`
+        cmds + CameraTab card; streaming suspended during export; toast
+        with Explorer [Show] reveal; `--export-video` smoke hook.
+        Smoke-verified: Tikal-13 → 1080p30, 121 frames, ffprobe-clean H.264.
 - `[ ]` 4. Cross-section / slice export (forEachPointInBox bulk query; own
         DXF R12 writer in pfcore; PNG + CSV)
 - `[ ]` 5. Annotations from phone (generalise tap-to-measure; JSON per-cloud
