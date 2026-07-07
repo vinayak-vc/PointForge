@@ -284,11 +284,17 @@ int main(int argc, char** argv) {
     std::string initialDir = "";
     // Runtime flags
     bool remoteForceDiskWeb = false; // default: use embedded web assets when available
+    // --convert <scan>: enqueue a conversion at startup through the exact
+    // Convert-dialog path (JobQueue + Jobs panel + toasts + load-when-done).
+    // Smoke-test hook for the in-app conversion pipeline.
+    std::string convertOnStart;
     // Simple argument parsing
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (strcmp(a, "--use-disk-web") == 0) {
             remoteForceDiskWeb = true;
+        } else if (strcmp(a, "--convert") == 0 && i + 1 < argc) {
+            convertOnStart = argv[++i];
         } else if (i == 1) {
             // First positional argument interpreted as initial directory
             initialDir = a;
@@ -923,6 +929,13 @@ int main(int argc, char** argv) {
         if (!firstJobRevealed) { firstJobRevealed = true; showJobsPanel = true; }
         showConvertDialog = false;
     };
+
+    // --convert smoke hook: drive the exact dialog enqueue path at startup.
+    if (!convertOnStart.empty()) {
+        openConvertDialog(convertOnStart);   // fills convInputs + default output
+        logInfo("--convert: enqueueing " + convertOnStart + " -> " + convOutput);
+        enqueueConvert();
+    }
 
     // View presets work in CENTRED space (cube centre = origin) like frameAll —
     // adding store.cubeCenter() here teleported the camera by the cloud's world

@@ -18,7 +18,7 @@ tree on 2026-07-06.
 
 | # | Feature                              | Status  | Owner | Notes |
 |---|--------------------------------------|---------|-------|-------|
-| 1 | Parallel indexer (Phase C)           | DONE (pending live viewer smoke) | branch `parallel-indexer` | 2.9× real-scan phase C; byte-identical output; pftest added |
+| 1 | Parallel indexer (Phase C)           | DONE | branch `parallel-indexer` | 2.9× real-scan phase C; byte-identical output; pftest added; in-app JobQueue smoke ✔ (`--convert` hook) |
 | 2 | Multi-client roles (view-only mode)  | PLANNED |       |       |
 | 3 | Camera path animation + MP4 export   | PLANNED |       |       |
 | 4 | Cross-section / slice export         | PLANNED |       |       |
@@ -100,8 +100,10 @@ I/O, not thread count.
 **Acceptance:** ✔ same cloud → byte-identical loadable octree; ✔ 2.9× on a
 real scan at compressed preset settings (≥3× target expected to hold on
 ≥100M-pt scans where subtree CPU dominates further); ✔ cancel aborts within
-one chunk; ✔ docs updated. **Live pfview convert-dialog run still pending on
-a big scan — do one Jobs-panel conversion before merging.**
+one chunk; ✔ docs updated; ✔ in-app JobQueue path smoked live via the new
+`ViitorXPCViewer --convert <scan>` hook (drives the dialog's own
+enqueueConvert at startup): Tikal-13.las converted on 16 threads inside the
+running viewer, job completed, cloud auto-loaded (912 nodes / 12.4M pts).
 
 ---
 

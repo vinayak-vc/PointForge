@@ -60,10 +60,18 @@ along with test-harness bugs the reviewers spotted:
   correct payloads from consistently-corrupt ones).
 pftest PASS after all fixes.
 
+### In-app smoke (same session) — DONE
+Added a permanent smoke hook: `ViitorXPCViewer --convert <scan>` drives the
+Convert dialog's own openConvertDialog+enqueueConvert at startup (same
+JobQueue, options, toasts, load-when-done). Live run: Tikal-13.las converted
+INSIDE the running viewer on 16 threads (phase C 1.50s, 912 nodes, 12.4M
+pts), job succeeded, cloud auto-loaded, process healthy. newdev.md #1 = DONE.
+Note: the built exe is version-stamped (`ViitorXPCViewer_v<NNN>.exe`) — glob
+for it when scripting.
+
 ### Next Recommended Task
-One live conversion through the viewer's Convert dialog (Jobs panel) on a big
-scan to smoke the UI path, then commit + PR `parallel-indexer`, flip newdev.md
-#1 to DONE, and start newdev.md **#2 Multi-client roles**.
+User raises the `parallel-indexer` PR. Then branch `multi-client-roles` off
+main and start newdev.md **#2 Multi-client roles** (view-only viewer PIN).
 
 ## Previous Session (2026-07-06, cont.) - Medium-Feature Implementation Plan (docs/newdev.md)
 
