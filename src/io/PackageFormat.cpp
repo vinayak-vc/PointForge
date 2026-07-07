@@ -10,6 +10,29 @@ namespace pf {
 static_assert(sizeof(VXPCHeader) == 128, "VXPCHeader size mismatch");
 static_assert(sizeof(VXPCDirectoryEntry) == 104, "VXPCDirectoryEntry size mismatch");
 
+static uint32_t computeCrc32(uint32_t crc, const void* buf, size_t size) {
+    static uint32_t table[256];
+    static bool initialized = false;
+    if (!initialized) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int j = 0; j < 8; j++) {
+                if (c & 1) c = 0xedb88320 ^ (c >> 1);
+                else c = c >> 1;
+            }
+            table[i] = c;
+        }
+        initialized = true;
+    }
+
+    const uint8_t* p = (const uint8_t*)buf;
+    crc = crc ^ ~0U;
+    while (size--) {
+        crc = table[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+    }
+    return crc ^ ~0U;
+}
+
 // --- PackageStream Implementation (Phase 1) ---
 class FileReaderStream : public PackageStream {
 public:
@@ -168,6 +191,7 @@ bool PackageWriter::Write(const void* data, size_t size) {
 
     currentEntry_.originalSize += size;
     currentEntry_.compressedSize += size; // Phase 2: No compression yet
+    currentEntry_.crc32 = computeCrc32(currentEntry_.crc32, data, size);
     return true;
 }
 
@@ -331,6 +355,13 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
     if (entry.originalSize > 0) {
         if (std::fread(buffer.data(), 1, entry.originalSize, f) != entry.originalSize) {
             buffer.clear();
+        } else {
+            // Validate CRC32
+            uint32_t checksum = computeCrc32(0, buffer.data(), buffer.size());
+            if (checksum != entry.crc32) {
+                logError("PackageReader: CRC32 mismatch for " + name);
+                buffer.clear();
+            }
         }
     }
 

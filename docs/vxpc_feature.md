@@ -22,7 +22,7 @@
 | 13 | Streaming Support | PLANNED | Range-request friendly layout |
 | 14 | Chunked Octree | PLANNED | Multi-chunk octree layout support |
 | 15 | Compression | PLANNED | LZ4/ZSTD integration per file |
-| 16 | Checksums | PLANNED | CRC32 per entry validation |
+| 16 | Checksums | DONE | Implemented CRC32 computation per-file, computed by Writer, validated by Reader on Read() |
 | 17 | Recovery | PLANNED | Crash recovery, rollback, atomic saves |
 | 18 | Encryption | PLANNED | AES reserved flags |
 | 19 | Virtual File System | PLANNED | True VFS hierarchy (`/clouds/`, `/images/`, `/plugins/`) |
