@@ -12,7 +12,7 @@
 | 3 | Package Reader | DONE | Implemented Open, Validate, OpenStream, GetOffset, GetSize |
 | 4 | Loader Integration | DONE | OctreeStore transparently routes paths to folder or .vxpc PackageReader |
 | 5 | Thumbnails | PLANNED | Embedded previews |
-| 6 | Project Metadata | PLANNED | Structured binary metadata (UUID, CRS, EPSG) |
+| 6 | Project Metadata | DONE | ProjectMetadata struct implemented in OctreeFormat.h and embedded inside the .vxpc container via MetadataWriter |
 | 7 | Camera Data | PLANNED | Bookmarks, Views, Paths, Animation |
 | 8 | Measurements | PLANNED | Distance, Area, Volume, Polyline |
 | 9 | Annotations | PLANNED | Text, Image, Audio, Pins |

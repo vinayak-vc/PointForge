@@ -16,6 +16,27 @@ namespace pf {
 
 #pragma pack(push, 1)
 
+// Phase 6: Structured Project Metadata
+struct ProjectMetadata {
+    char     projectName[128];
+    char     author[64];
+    char     company[64];
+    char     description[256];
+    char     tags[256];
+    char     units[32];           // e.g., "Meters"
+    char     coordinateSystem[64];
+    char     epsg[32];            // e.g., "EPSG:32633"
+    char     sourceFile[256];
+    
+    uint64_t creationDate;
+    uint64_t modifiedDate;
+    uint32_t converterVersion;
+    uint32_t buildVersion;
+    uint8_t  uuid[16];
+    
+    uint32_t reserved[32]; // Padding for future fields
+};
+
 struct FileMetadata {
     char     magic[4];        // "PFO1"
     uint32_t version;         // = 2
