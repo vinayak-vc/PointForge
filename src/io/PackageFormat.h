@@ -3,16 +3,55 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <memory>
 
 namespace pf {
 
-struct PackageEntry {
-    char     filename[64];
-    uint64_t offset;
-    uint64_t size;
-    uint64_t originalSize;
-    uint32_t compressionType;
-    uint32_t flags;
+// Phase 1: VXPC Core Structures
+
+struct VXPCHeader {
+    char     magic[4] = {'V','X','P','C'};
+    uint32_t version = 1;
+    uint64_t directoryOffset = 0;
+    uint64_t directorySize = 0;
+    uint32_t entryCount = 0;
+    uint32_t packageFlags = 0;
+    uint8_t  uuid[16] = {0};
+    uint64_t createdTime = 0;
+    uint64_t modifiedTime = 0;
+    uint32_t converterVersion = 0;
+    uint32_t reserved[15] = {0}; // Padding for future use to reach 128 bytes
+};
+
+struct VXPCDirectoryEntry {
+    char     filename[64] = {0};
+    uint64_t offset = 0;
+    uint64_t compressedSize = 0;
+    uint64_t originalSize = 0;
+    uint32_t compression = 0;
+    uint32_t crc32 = 0;
+    uint32_t flags = 0;
+    uint32_t userFlags = 0;
+};
+
+// Abstract Stream Interface for VFS
+class PackageStream {
+public:
+    virtual ~PackageStream() = default;
+    virtual uint64_t Read(void* buffer, uint64_t size) = 0;
+    virtual uint64_t GetSize() const = 0;
+    virtual uint64_t GetOffset() const = 0;
+    virtual void Seek(uint64_t offset) = 0;
+};
+
+// Abstract VFS Interface
+class VirtualFileSystem {
+public:
+    virtual ~VirtualFileSystem() = default;
+    virtual bool Open(const std::string& path) = 0;
+    virtual bool Contains(const std::string& name) const = 0;
+    virtual std::unique_ptr<PackageStream> OpenStream(const std::string& name) const = 0;
+    virtual std::vector<uint8_t> Read(const std::string& name) const = 0;
 };
 
 class PackageWriter {
@@ -22,51 +61,45 @@ public:
 
     bool isValid() const { return valid_; }
 
-    // Begin writing a new file entry. The previous file must be finished.
+    // Phase 2 Writer APIs
     bool BeginFile(const std::string& filename);
-
-    // Write chunk to the currently open file.
     bool Write(const void* data, size_t size);
-
-    // End current file.
     bool EndFile();
-
-    // Writes the directory table and finalizes the package.
     bool Finalize();
 
 private:
     std::string path_;
-    void* file_ = nullptr; // FILE* opaque to avoid leaking <cstdio>
+    void* file_ = nullptr; // FILE*
     bool valid_ = false;
 
-    PackageEntry currentEntry_{};
+    VXPCDirectoryEntry currentEntry_{};
     bool writingFile_ = false;
 
-    std::vector<PackageEntry> directory_;
+    std::vector<VXPCDirectoryEntry> directory_;
+    VXPCHeader header_{};
 };
 
-class PackageReader {
+class PackageReader : public VirtualFileSystem {
 public:
     PackageReader();
-    ~PackageReader();
+    ~PackageReader() override;
 
-    bool Open(const std::string& path);
-    bool Contains(const std::string& name) const;
+    // VFS Implementation
+    bool Open(const std::string& path) override;
+    bool Contains(const std::string& name) const override;
+    std::unique_ptr<PackageStream> OpenStream(const std::string& name) const override;
+    std::vector<uint8_t> Read(const std::string& name) const override;
 
-    PackageEntry GetEntry(const std::string& name) const;
-    
-    // Returns offset to the start of the file data inside the package
+    // Phase 3 Reader APIs
+    bool Validate() const;
+    VXPCDirectoryEntry GetEntry(const std::string& name) const;
     uint64_t GetOffset(const std::string& name) const;
-    
-    // Returns the size of the file data
     uint64_t GetSize(const std::string& name) const;
-
-    // Reads the entire file into a buffer
-    std::vector<uint8_t> Read(const std::string& name) const;
 
 private:
     std::string path_;
-    std::vector<PackageEntry> directory_;
+    std::vector<VXPCDirectoryEntry> directory_;
+    VXPCHeader header_{};
     bool valid_ = false;
 };
 
