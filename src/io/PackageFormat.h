@@ -56,18 +56,27 @@ public:
 
 class PackageWriter {
 public:
-    explicit PackageWriter(const std::string& path);
+    PackageWriter();
     ~PackageWriter();
 
+    // Phase 2 Writer APIs
+    bool Create(const std::string& path);
     bool isValid() const { return valid_; }
 
-    // Phase 2 Writer APIs
     bool BeginFile(const std::string& filename);
     bool Write(const void* data, size_t size);
     bool EndFile();
+
+    // High level Add APIs
+    bool AddFile(const std::string& filename, const std::string& sourcePath);
+    bool AddMemory(const std::string& filename, const void* data, size_t size);
+
     bool Finalize();
 
 private:
+    bool WriteHeader();
+    bool WriteDirectory();
+
     std::string path_;
     void* file_ = nullptr; // FILE*
     bool valid_ = false;

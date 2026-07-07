@@ -64,33 +64,74 @@ private:
 
 // --- PackageWriter ---
 
-PackageWriter::PackageWriter(const std::string& path) : path_(path) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) {
-        logError("PackageWriter: cannot open file " + path);
-        return;
-    }
-
-    std::memset(&header_, 0, sizeof(header_));
-    std::memcpy(header_.magic, "VXPC", 4);
-    header_.version = 1;
-    // Leave the rest as 0 for now. Finalize will update them.
-
-    if (std::fwrite(&header_, sizeof(header_), 1, f) != 1) {
-        logError("PackageWriter: failed to write header to " + path);
-        std::fclose(f);
-        return;
-    }
-
-    file_ = f;
-    valid_ = true;
-}
+PackageWriter::PackageWriter() {}
 
 PackageWriter::~PackageWriter() {
     if (file_) {
         std::fclose((FILE*)file_);
         file_ = nullptr;
     }
+}
+
+bool PackageWriter::Create(const std::string& path) {
+    if (valid_) return false;
+    path_ = path;
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        logError("PackageWriter: cannot open file " + path);
+        return false;
+    }
+
+    std::memset(&header_, 0, sizeof(header_));
+    std::memcpy(header_.magic, "VXPC", 4);
+    header_.version = 1;
+
+    file_ = f;
+    valid_ = true;
+
+    return WriteHeader();
+}
+
+bool PackageWriter::WriteHeader() {
+    if (!valid_ || !file_) return false;
+    FILE* f = (FILE*)file_;
+    
+#ifdef _WIN32
+    _fseeki64(f, 0, SEEK_SET);
+#else
+    fseeko(f, 0, SEEK_SET);
+#endif
+
+    if (std::fwrite(&header_, sizeof(header_), 1, f) != 1) {
+        logError("PackageWriter: failed to write header");
+        return false;
+    }
+    return true;
+}
+
+bool PackageWriter::WriteDirectory() {
+    if (!valid_ || !file_) return false;
+    FILE* f = (FILE*)file_;
+    
+#ifdef _WIN32
+    uint64_t directoryOffset = (uint64_t)_ftelli64(f);
+#else
+    uint64_t directoryOffset = (uint64_t)ftello(f);
+#endif
+    uint64_t directorySize = directory_.size() * sizeof(VXPCDirectoryEntry);
+    
+    if (directorySize > 0) {
+        if (std::fwrite(directory_.data(), sizeof(VXPCDirectoryEntry), directory_.size(), f) != directory_.size()) {
+            logError("PackageWriter: failed to write directory table");
+            return false;
+        }
+    }
+
+    header_.directoryOffset = directoryOffset;
+    header_.directorySize = directorySize;
+    header_.entryCount = (uint32_t)directory_.size();
+
+    return WriteHeader();
 }
 
 bool PackageWriter::BeginFile(const std::string& filename) {
@@ -103,8 +144,11 @@ bool PackageWriter::BeginFile(const std::string& filename) {
     currentEntry_.filename[sizeof(currentEntry_.filename) - 1] = '\0';
     
 #ifdef _WIN32
+    // Move to end of file to append
+    _fseeki64(f, 0, SEEK_END);
     currentEntry_.offset = (uint64_t)_ftelli64(f);
 #else
+    fseeko(f, 0, SEEK_END);
     currentEntry_.offset = (uint64_t)ftello(f);
 #endif
 
@@ -135,37 +179,50 @@ bool PackageWriter::EndFile() {
     return true;
 }
 
-bool PackageWriter::Finalize() {
-    if (!valid_) return false;
-    if (writingFile_) EndFile();
+bool PackageWriter::AddFile(const std::string& filename, const std::string& sourcePath) {
+    if (!valid_ || writingFile_) return false;
 
-    FILE* f = (FILE*)file_;
-    
-#ifdef _WIN32
-    uint64_t directoryOffset = (uint64_t)_ftelli64(f);
-#else
-    uint64_t directoryOffset = (uint64_t)ftello(f);
-#endif
-    uint64_t directorySize = directory_.size() * sizeof(VXPCDirectoryEntry);
-    
-    if (directorySize > 0) {
-        if (std::fwrite(directory_.data(), sizeof(VXPCDirectoryEntry), directory_.size(), f) != directory_.size()) {
-            logError("PackageWriter: failed to write directory table");
+    FILE* in = std::fopen(sourcePath.c_str(), "rb");
+    if (!in) {
+        logError("PackageWriter: failed to read source file " + sourcePath);
+        return false;
+    }
+
+    if (!BeginFile(filename)) {
+        std::fclose(in);
+        return false;
+    }
+
+    char buffer[8192];
+    size_t bytesRead;
+    while ((bytesRead = std::fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if (!Write(buffer, bytesRead)) {
+            std::fclose(in);
+            EndFile();
             return false;
         }
     }
 
-    std::fseek(f, 0, SEEK_SET);
+    std::fclose(in);
+    return EndFile();
+}
 
-    header_.directoryOffset = directoryOffset;
-    header_.directorySize = directorySize;
-    header_.entryCount = (uint32_t)directory_.size();
-
-    if (std::fwrite(&header_, sizeof(header_), 1, f) != 1) {
-        logError("PackageWriter: failed to update header");
+bool PackageWriter::AddMemory(const std::string& filename, const void* data, size_t size) {
+    if (!BeginFile(filename)) return false;
+    if (!Write(data, size)) {
+        EndFile();
         return false;
     }
+    return EndFile();
+}
 
+bool PackageWriter::Finalize() {
+    if (!valid_) return false;
+    if (writingFile_) EndFile();
+
+    if (!WriteDirectory()) return false;
+
+    FILE* f = (FILE*)file_;
     std::fclose(f);
     file_ = nullptr;
     valid_ = false; // Finalized

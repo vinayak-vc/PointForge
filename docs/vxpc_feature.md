@@ -8,9 +8,9 @@
 | Phase | Feature | Status | Notes |
 |---|---|---|---|
 | 1 | VXPC Core | DONE | Defined extended Header and Directory structures |
-| 2 | Package Writer | PLANNED | Create, AddFile, AddMemory, Finalize |
-| 3 | Package Reader | PLANNED | Open, Validate, Contains, Read, GetOffset, GetSize |
-| 4 | Loader Integration | PLANNED | Transparent folder vs .vxpc fallback |
+| 2 | Package Writer | DONE | Implemented Create, AddFile, AddMemory, WriteHeader, WriteDirectory |
+| 3 | Package Reader | DONE | Implemented Open, Validate, OpenStream, GetOffset, GetSize |
+| 4 | Loader Integration | DONE | OctreeStore transparently routes paths to folder or .vxpc PackageReader |
 | 5 | Thumbnails | PLANNED | Embedded previews |
 | 6 | Project Metadata | PLANNED | Structured binary metadata (UUID, CRS, EPSG) |
 | 7 | Camera Data | PLANNED | Bookmarks, Views, Paths, Animation |
