@@ -8,10 +8,8 @@
 namespace pf {
 
 bool writeMetaBin(const std::string& outDir, const FileMetadata& meta, PackageWriter* pkg) {
-    if (pkg) {
-        if (!pkg->BeginFile("meta.bin")) return false;
-        if (!pkg->Write(&meta, sizeof(meta))) return false;
-        return pkg->EndFile();
+    if (pkg && pkg->isValid()) {
+        return pkg->AddMemory("meta.bin", &meta, sizeof(meta), PackageWriter::Compression::ZSTD);
     }
     std::ofstream f(outDir + "/meta.bin", std::ios::binary);
     if (!f) { logError("writeMetaBin: cannot open meta.bin"); return false; }
@@ -20,12 +18,11 @@ bool writeMetaBin(const std::string& outDir, const FileMetadata& meta, PackageWr
 }
 
 bool writeHierarchy(const std::string& outDir, const std::vector<NodeRecord>& nodes, PackageWriter* pkg) {
-    if (pkg) {
-        if (!pkg->BeginFile("hierarchy.bin")) return false;
+    if (pkg && pkg->isValid()) {
         if (!nodes.empty()) {
-            if (!pkg->Write(nodes.data(), nodes.size() * sizeof(NodeRecord))) return false;
+            return pkg->AddMemory("hierarchy.bin", nodes.data(), nodes.size() * sizeof(NodeRecord), PackageWriter::Compression::ZSTD);
         }
-        return pkg->EndFile();
+        return pkg->AddMemory("hierarchy.bin", nullptr, 0, PackageWriter::Compression::ZSTD);
     }
     std::ofstream f(outDir + "/hierarchy.bin", std::ios::binary);
     if (!f) { logError("writeHierarchy: cannot open hierarchy.bin"); return false; }
@@ -62,12 +59,11 @@ bool writeMetadataJson(const std::string& outDir, const FileMetadata& m, Package
         m.bytesPerPoint, m.hasColor, m.nodeCount, m.rootNodeIndex,
         m.hasClassification, m.compressionType);
 
-    if (pkg) {
-        if (!pkg->BeginFile("metadata.json")) return false;
+    if (pkg && pkg->isValid()) {
         if (len > 0) {
-            if (!pkg->Write(buf, len)) return false;
+            return pkg->AddMemory("metadata.json", buf, len, PackageWriter::Compression::ZSTD);
         }
-        return pkg->EndFile();
+        return pkg->AddMemory("metadata.json", nullptr, 0, PackageWriter::Compression::ZSTD);
     }
     
     FILE* f = std::fopen((outDir + "/metadata.json").c_str(), "wb");
@@ -79,9 +75,7 @@ bool writeMetadataJson(const std::string& outDir, const FileMetadata& m, Package
 
 bool writeProjectMetadataBin(const std::string& outDir, const ProjectMetadata& meta, PackageWriter* pkg) {
     if (pkg && pkg->isValid()) {
-        if (!pkg->BeginFile("project.bin")) return false;
-        if (!pkg->Write(&meta, sizeof(meta))) return false;
-        return pkg->EndFile();
+        return pkg->AddMemory("project.bin", &meta, sizeof(meta), PackageWriter::Compression::ZSTD);
     }
 
     std::string path = outDir + "/project.bin";

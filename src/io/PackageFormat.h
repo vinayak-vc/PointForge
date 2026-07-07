@@ -63,13 +63,15 @@ public:
     bool Create(const std::string& path);
     bool isValid() const { return valid_; }
 
+    // Low level API (used internally or for streaming large files chunk-by-chunk)
     bool BeginFile(const std::string& filename);
     bool Write(const void* data, size_t size);
     bool EndFile();
 
     // High level Add APIs
-    bool AddFile(const std::string& filename, const std::string& sourcePath);
-    bool AddMemory(const std::string& filename, const void* data, size_t size);
+    enum class Compression { None = 0, ZSTD = 1 };
+    bool AddFile(const std::string& filename, const std::string& sourcePath, Compression comp = Compression::None);
+    bool AddMemory(const std::string& filename, const void* data, size_t size, Compression comp = Compression::None);
 
     bool Finalize();
 

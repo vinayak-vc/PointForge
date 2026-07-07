@@ -21,7 +21,7 @@
 | 12 | Custom Metadata | PLANNED | Arbitrary Key/Value pairs |
 | 13 | Streaming Support | PLANNED | Range-request friendly layout |
 | 14 | Chunked Octree | PLANNED | Multi-chunk octree layout support |
-| 15 | Compression | PLANNED | LZ4/ZSTD integration per file |
+| 15 | Compression | DONE | ZSTD compression added to PackageWriter AddMemory/AddFile APIs |
 | 16 | Checksums | DONE | Implemented CRC32 computation per-file, computed by Writer, validated by Reader on Read() |
 | 17 | Recovery | PLANNED | Crash recovery, rollback, atomic saves |
 | 18 | Encryption | PLANNED | AES reserved flags |

@@ -5,6 +5,10 @@
 #include <cstring>
 #include <stdexcept>
 
+#ifdef PF_WITH_ZSTD
+#include <zstd.h>
+#endif
+
 namespace pf {
 
 static_assert(sizeof(VXPCHeader) == 128, "VXPCHeader size mismatch");
@@ -203,7 +207,7 @@ bool PackageWriter::EndFile() {
     return true;
 }
 
-bool PackageWriter::AddFile(const std::string& filename, const std::string& sourcePath) {
+bool PackageWriter::AddFile(const std::string& filename, const std::string& sourcePath, Compression comp) {
     if (!valid_ || writingFile_) return false;
 
     FILE* in = std::fopen(sourcePath.c_str(), "rb");
@@ -212,27 +216,49 @@ bool PackageWriter::AddFile(const std::string& filename, const std::string& sour
         return false;
     }
 
-    if (!BeginFile(filename)) {
+    std::fseek(in, 0, SEEK_END);
+    size_t size = std::ftell(in);
+    std::fseek(in, 0, SEEK_SET);
+
+    std::vector<uint8_t> buffer(size);
+    if (size > 0 && std::fread(buffer.data(), 1, size, in) != size) {
         std::fclose(in);
         return false;
     }
-
-    char buffer[8192];
-    size_t bytesRead;
-    while ((bytesRead = std::fread(buffer, 1, sizeof(buffer), in)) > 0) {
-        if (!Write(buffer, bytesRead)) {
-            std::fclose(in);
-            EndFile();
-            return false;
-        }
-    }
-
     std::fclose(in);
-    return EndFile();
+
+    return AddMemory(filename, buffer.data(), size, comp);
 }
 
-bool PackageWriter::AddMemory(const std::string& filename, const void* data, size_t size) {
+bool PackageWriter::AddMemory(const std::string& filename, const void* data, size_t size, Compression comp) {
     if (!BeginFile(filename)) return false;
+    
+    currentEntry_.compression = (uint32_t)comp;
+
+    if (comp == Compression::ZSTD && size > 0) {
+#ifdef PF_WITH_ZSTD
+        size_t bound = ZSTD_compressBound(size);
+        std::vector<uint8_t> cbuf(bound);
+        size_t cSize = ZSTD_compress(cbuf.data(), bound, data, size, 3);
+        if (!ZSTD_isError(cSize) && cSize < size) {
+            if (!Write(cbuf.data(), cSize)) {
+                EndFile();
+                return false;
+            }
+            // Fix original size since Write() increments both originalSize and compressedSize
+            currentEntry_.originalSize = size;
+            return EndFile();
+        } else {
+            // Fallback to uncompressed if ZSTD error or incompressible
+            currentEntry_.compression = (uint32_t)Compression::None;
+        }
+#else
+        logError("PackageWriter: ZSTD not compiled in, falling back to None");
+        currentEntry_.compression = (uint32_t)Compression::None;
+#endif
+    }
+    
+    // Uncompressed path
     if (!Write(data, size)) {
         EndFile();
         return false;
@@ -350,22 +376,41 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
 #else
     fseeko(f, entry.offset, SEEK_SET);
 #endif
-    buffer.resize(entry.originalSize);
 
-    if (entry.originalSize > 0) {
-        if (std::fread(buffer.data(), 1, entry.originalSize, f) != entry.originalSize) {
-            buffer.clear();
+    uint64_t readSize = (entry.compression == 1) ? entry.compressedSize : entry.originalSize;
+    std::vector<uint8_t> diskBuffer(readSize);
+
+    if (readSize > 0) {
+        if (std::fread(diskBuffer.data(), 1, readSize, f) != readSize) {
+            diskBuffer.clear();
         } else {
-            // Validate CRC32
-            uint32_t checksum = computeCrc32(0, buffer.data(), buffer.size());
+            // Validate CRC32 of payload ON DISK
+            uint32_t checksum = computeCrc32(0, diskBuffer.data(), diskBuffer.size());
             if (checksum != entry.crc32) {
                 logError("PackageReader: CRC32 mismatch for " + name);
-                buffer.clear();
+                diskBuffer.clear();
             }
         }
     }
-
     std::fclose(f);
+
+    if (diskBuffer.empty()) return buffer;
+
+    if (entry.compression == 1) { // ZSTD
+#ifdef PF_WITH_ZSTD
+        buffer.resize(entry.originalSize);
+        size_t dSize = ZSTD_decompress(buffer.data(), entry.originalSize, diskBuffer.data(), diskBuffer.size());
+        if (ZSTD_isError(dSize) || dSize != entry.originalSize) {
+            logError("PackageReader: ZSTD decompression failed for " + name);
+            buffer.clear();
+        }
+#else
+        logError("PackageReader: Cannot decompress ZSTD because PF_WITH_ZSTD is not defined.");
+#endif
+    } else {
+        buffer = std::move(diskBuffer);
+    }
+
     return buffer;
 }
 
