@@ -23,7 +23,8 @@
       "WebFetch(domain:issues.unrealengine.com)",
       "WebFetch(domain:web.archive.org)",
       "WebFetch(domain:dq8iqaixvew1d.cloudfront.net)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Read(//c/Users/Vinayak Lakhani/AppData/Local/Temp/claude/C--UnrealProject-PointForge/b2a4c4d9-31e6-4acc-a769-80422c6e168c/**)"
     ]
   }
 }

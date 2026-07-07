@@ -23,7 +23,7 @@ tree on 2026-07-06.
 | 3 | Camera path animation + MP4 export   | DONE | branch `camera-path-export` | CamPath spline + IMFSinkWriter MP4; smoke-verified 1080p30 export (121 frames) via `--export-video` hook |
 | 4 | Cross-section / slice export         | DONE | branch `cross-section-slice-export` | real-model smoke: DXF/CSV/PNG exported from `PointForgeCache_direct`; 871,420 pts; PNG visually verified |
 | 5 | Annotations from phone               | DONE | branch `annotations-from-phone` | remote/local annotate mode, JSON persistence, synced PC/phone UI |
-| 6 | Multi-cloud scene                    | PLANNED |       |       |
+| 6 | Multi-cloud scene                    | IN PROGRESS | branch `multi-cloud-scene` | engine backend complete, Scene panel UI pending |
 
 **Recommended order = table order.** Rationale: 1–2 are low-coupling and ship
 user-visible value fast (1 touches only pfcore, 2 touches only RemoteServer +
@@ -370,26 +370,26 @@ clouds with visibility toggles; side-by-side comparison workflows.
 
 **Plan**
 - Week 1 — core refactor:
-  - [ ] `struct SceneCloud { std::unique_ptr<OctreeStore> store;
+  - [x] `struct SceneCloud { std::unique_ptr<OctreeStore> store;
         std::unique_ptr<PointRenderer> renderer; std::string dir; bool
         visible; glm::dvec3 worldOffset; }` + `std::vector<SceneCloud>
         scene;` — one renderer per cloud (sidesteps node-index collision
         entirely; simpler than composite keys and matches the proven C API
         shape).
-  - [ ] World space becomes the shared frame: pick the FIRST loaded cloud's
+  - [x] World space becomes the shared frame: pick the FIRST loaded cloud's
         cube centre as scene origin; each cloud renders with
         `uCubeCenter_i - sceneOrigin` offset added to its model transform
         (positions stay float-relative to their own cube centre on the GPU —
         precision preserved; only the per-cloud offset is double→float once
         per frame, small by construction for co-located survey scans; warn if
         clouds are >100 km apart).
-  - [ ] Render loop: for each visible cloud → traversal + draw. GPU budget:
+  - [x] Render loop: for each visible cloud → traversal + draw. GPU budget:
         keep per-renderer budgets v1 = total/N (decisions.md note; unified
         LRU heap is a follow-up).
-  - [ ] `loadOctree` → `addCloud` (File > Open adds; new "Close cloud" in
+  - [x] `loadOctree` → `addCloud` (File > Open adds; new "Close cloud" in
         Scene panel; "Open" with none loaded behaves exactly as today —
         single-cloud UX unchanged).
-  - [ ] Camera/pivot/frame-all: frame-all unions all visible cloud AABBs
+  - [x] Camera/pivot/frame-all: frame-all unions all visible cloud AABBs
         (in scene space); presets likewise; bookmarks/measure/clip stay
         scene-space (bookmark file keying: keep per-dir for single cloud;
         multi-cloud sessions key bookmarks by first cloud — document).
@@ -397,11 +397,11 @@ clouds with visibility toggles; side-by-side comparison workflows.
   - [ ] Left "Scene" dock (architecture.md §7 pattern): cloud rows (name,
         point count, visibility eye, remove, per-cloud point-size scale
         optional), selection drives Cloud Info section.
-  - [ ] Convert-job completion "Load" adds to scene instead of replacing
+  - [x] Convert-job completion "Load" adds to scene instead of replacing
         (prompt: replace / add).
   - [ ] Remote cfg: `clouds:[{name,pts,visible}]` + `cloud_vis{i,on}` cmd;
         webremote Tools card.
-  - [ ] Stats/status bar: total points/nodes across clouds; per-cloud in
+  - [x] Stats/status bar: total points/nodes across clouds; per-cloud in
         Scene panel tooltips.
 
 **Risks:** biggest-blast-radius change — schedule after 1–5 land.

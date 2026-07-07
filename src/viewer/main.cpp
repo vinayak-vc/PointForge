@@ -469,8 +469,29 @@ int main(int argc, char** argv) {
     };
 
     // ---- assets -----------------------------------------------------------
-    OctreeStore store;
+    struct SceneCloud {
+        std::unique_ptr<OctreeStore> store;
+        std::unique_ptr<PointRenderer> renderer;
+        std::string dir;
+        bool visible = true;
+        glm::dvec3 worldOffset = glm::dvec3(0.0);
+    };
+    std::vector<SceneCloud> scene;
+    int activeCloudIndex = -1;
+    glm::dvec3 sceneOrigin = glm::dvec3(0.0);
     bool octreeLoaded = false;
+    auto activeCloud = [&]() -> SceneCloud& {
+        return scene[(size_t)activeCloudIndex];
+    };
+    auto activeStore = [&]() -> OctreeStore& {
+        return *activeCloud().store;
+    };
+    auto activeRenderer = [&]() -> PointRenderer& {
+        return *activeCloud().renderer;
+    };
+    auto refreshActiveCloudState = [&]() {
+        octreeLoaded = activeCloudIndex >= 0 && activeCloudIndex < (int)scene.size();
+    };
     // (initial / auto-load happens after settings + helpers are set up below)
 
     // Shaders are embedded in the binary (EmbeddedShaders.h) so the viewer is a
@@ -481,7 +502,6 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    PointRenderer renderer;
     GLuint watermarkTex = loadTextureBMP(SDL_RWFromConstMem(kVxBmp, (int)kVxBmpLen), 1);
 
     // ---- post-process (offscreen FBO + EDL fullscreen pass) ---------------
@@ -610,7 +630,7 @@ int main(int argc, char** argv) {
     // ---- camera initial framing ------------------------------------------
     Camera cam;
     auto setupCamera = [&]() {
-        const double cubeSize = store.meta().cubeSize;
+        const double cubeSize = activeStore().meta().cubeSize;
         cam.position = glm::vec3(0.0f, -(float)cubeSize, 0.0f);
         cam.yaw = 0.0f; cam.pitch = 0.0f;
         cam.nearZ = (float)std::max(0.01, cubeSize / 5000.0);
@@ -1055,7 +1075,7 @@ int main(int argc, char** argv) {
         out << root.dump(2);
     };
     auto gotoAnnotation = [&](const Annotation& a) {
-        pivot = glm::vec3(a.pos - store.cubeCenter());
+        pivot = glm::vec3(a.pos - activeStore().cubeCenter());
         float dist = glm::length(cam.position - pivot);
         if (dist < 1.0f) dist = 10.0f;
         cam.position = pivot - cam.front() * dist;
@@ -1094,19 +1114,38 @@ int main(int argc, char** argv) {
     if (remoteEnabled && RemoteServer::available()) remote.start(remotePort, remoteWebRoot);
     if (stereoSBS) stereoHintT = 5.0f;   // booted straight into stereo -> show the exit hint
 
+    auto setActiveCloud = [&](int index) {
+        if (index < 0 || index >= (int)scene.size()) return;
+        activeCloudIndex = index;
+        refreshActiveCloudState();
+        loadedDir = activeCloud().dir;
+        SDL_SetWindowTitle(window, (baseName(loadedDir) + " - ViitorX PointCloud Viewer").c_str());
+    };
+
     // Load an octree directory, reset view, record it as recent.
     auto loadOctree = [&](const std::string& dir) -> bool {
         cancelActiveSliceExports();
-        store.clear();
-        renderer.clear();
-        if (store.load(dir)) {
-            octreeLoaded = true;
-            loadedDir = dir;
-            setupCamera();
+        SceneCloud cloud;
+        cloud.store = std::make_unique<OctreeStore>();
+        cloud.renderer = std::make_unique<PointRenderer>();
+        cloud.dir = dir;
+        cloud.visible = true;
+        if (cloud.store->load(dir)) {
+            if (scene.empty()) {
+                sceneOrigin = cloud.store->cubeCenter();
+            }
+            cloud.worldOffset = cloud.store->cubeCenter() - sceneOrigin;
+            double offsetMeters = glm::length(cloud.worldOffset);
+            if (offsetMeters > 100000.0) {
+                pf::logWarn("Cloud is more than 100 km from the scene origin; precision may be reduced");
+            }
+            scene.push_back(std::move(cloud));
+            setActiveCloud((int)scene.size() - 1);
+            if (scene.size() == 1) setupCamera();
+            else frameAllReq = true;
             addRecent(dir);
             saveSettings();
             navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
-            SDL_SetWindowTitle(window, (baseName(dir) + " - ViitorX PointCloud Viewer").c_str());
 #ifdef _WIN32
             MessageBeep(MB_ICONINFORMATION);
 #endif
@@ -1116,19 +1155,52 @@ int main(int argc, char** argv) {
         return false;
     };
 
+    auto closeCloud = [&](int index) {
+        if (index < 0 || index >= (int)scene.size()) return;
+        cancelActiveSliceExports();
+        scene.erase(scene.begin() + index);
+        if (scene.empty()) {
+            activeCloudIndex = -1;
+            loadedDir.clear();
+            refreshActiveCloudState();
+            SDL_SetWindowTitle(window, "ViitorX PointCloud Viewer");
+            return;
+        }
+        if (activeCloudIndex >= (int)scene.size()) activeCloudIndex = (int)scene.size() - 1;
+        if (index <= activeCloudIndex && activeCloudIndex > 0) --activeCloudIndex;
+        setActiveCloud(activeCloudIndex);
+        frameAllReq = true;
+    };
+
     // Initial cloud: CLI arg wins, else auto-load the most recent if enabled.
     if (!initialDir.empty()) loadOctree(initialDir);
     else if (autoLoadLast && !recentDirs.empty()) loadOctree(recentDirs.front());
 
     // Fit the whole cloud in view (keeps current orientation, centres on pivot).
     auto frameAll = [&]() {
-        if (!octreeLoaded) return;
-        double cs = store.cube(store.rootIndex()).size;
-        float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
-        pivot = glm::vec3(0.0f);                 // cube centre in centred space
+        if (!octreeLoaded || scene.empty()) return;
+        Vec3d minB( 1e30,  1e30,  1e30);
+        Vec3d maxB(-1e30, -1e30, -1e30);
+        for (const auto& cloud : scene) {
+            if (!cloud.visible || !cloud.store) continue;
+            double cs = cloud.store->cube(cloud.store->rootIndex()).size;
+            glm::dvec3 ctr = cloud.worldOffset;
+            minB.x = std::min(minB.x, ctr.x - cs * 0.5);
+            minB.y = std::min(minB.y, ctr.y - cs * 0.5);
+            minB.z = std::min(minB.z, ctr.z - cs * 0.5);
+            maxB.x = std::max(maxB.x, ctr.x + cs * 0.5);
+            maxB.y = std::max(maxB.y, ctr.y + cs * 0.5);
+            maxB.z = std::max(maxB.z, ctr.z + cs * 0.5);
+        }
+        if (minB.x > maxB.x) return;
+        
+        double sx = maxB.x - minB.x, sy = maxB.y - minB.y, sz = maxB.z - minB.z;
+        double maxDim = std::max({sx, sy, sz});
+        float dist = (float)(maxDim * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
+        pivot = glm::vec3((minB.x + maxB.x)*0.5, (minB.y + maxB.y)*0.5, (minB.z + maxB.z)*0.5);
         cam.position = pivot - cam.front() * dist;
         cam.lookAt(pivot);
-        cam.orthoSize = (float)(cs * 0.6);
+        cam.orthoSize = (float)(maxDim * 0.6);
     };
 
     bool running = true;
@@ -1142,10 +1214,12 @@ int main(int argc, char** argv) {
     std::string convOutput;            // Convert dialog: output octree dir (N>1: parent dir)
     int  convPreset = 1;               // 0 Draft, 1 Balanced, 2 High, 3 Custom
     bool convLoadWhenDone = true;
+    std::string pendingLoadDir;
     pf::IndexOptions customOpts;
 
     // ---- UI state -----------------------------------------------------------
     bool showUI = true;                // F5 / Shift+Space zen toggle (hides everything)
+    bool showScenePanel = true;
     bool showProperties = true;
     bool showJobsPanel = false;        // bottom dock tabs start closed
     bool showConsole = false;
@@ -1185,8 +1259,9 @@ int main(int argc, char** argv) {
         job->setMessage("Starting...");
         sliceJobs.push_back(job);
         showJobsPanel = true;
+        OctreeStore* sliceStore = &activeStore();
 
-        job->worker = std::thread([job, &store, box, maxDepth]() {
+        job->worker = std::thread([job, sliceStore, box, maxDepth]() {
             try {
                 const int axis = sliceAxisForBox(box);
                 const uint64_t denominator = std::max<uint64_t>(job->estimated, 1);
@@ -1198,7 +1273,7 @@ int main(int argc, char** argv) {
                         return;
                     }
                     writer.writeOutline(box);
-                    uint64_t delivered = store.forEachPointInBox(
+                    uint64_t delivered = sliceStore->forEachPointInBox(
                         box, maxDepth, &job->cancelFlag,
                         [&](const Point& point) -> bool {
                             writer.writePoint(point);
@@ -1231,7 +1306,7 @@ int main(int argc, char** argv) {
                         return;
                     }
                     out << "x,y,z,r,g,b,intensity,classification\n";
-                    uint64_t delivered = store.forEachPointInBox(
+                    uint64_t delivered = sliceStore->forEachPointInBox(
                         box, maxDepth, &job->cancelFlag,
                         [&](const Point& point) -> bool {
                             out << point.position.x << ',' << point.position.y << ',' << point.position.z << ','
@@ -1292,7 +1367,7 @@ int main(int argc, char** argv) {
 
     auto currentSliceBox = [&]() -> AABB {
         AABB box;
-        const glm::dvec3 center = store.cubeCenter();
+        const glm::dvec3 center = activeStore().cubeCenter();
         const double x0 = center.x + std::min((double)clipMin[0], (double)clipMax[0]);
         const double y0 = center.y + std::min((double)clipMin[1], (double)clipMax[1]);
         const double z0 = center.z + std::min((double)clipMin[2], (double)clipMax[2]);
@@ -1307,8 +1382,8 @@ int main(int argc, char** argv) {
     bool sliceHookArmed = false;
     if (!exportSliceOnStart.empty() && octreeLoaded) {
         AABB hookBox;
-        hookBox.min = Vec3d(store.meta().bbMin[0], store.meta().bbMin[1], store.meta().bbMin[2]);
-        hookBox.max = Vec3d(store.meta().bbMax[0], store.meta().bbMax[1], store.meta().bbMax[2]);
+        hookBox.min = Vec3d(activeStore().meta().bbMin[0], activeStore().meta().bbMin[1], activeStore().meta().bbMin[2]);
+        hookBox.max = Vec3d(activeStore().meta().bbMax[0], activeStore().meta().bbMax[1], activeStore().meta().bbMax[2]);
         Vec3d hookSize = hookBox.size();
         const int hookAxis = sliceAxisForBox(hookBox);
         const double thickness = std::max(0.1, hookSize[hookAxis] * 0.08);
@@ -1316,7 +1391,7 @@ int main(int argc, char** argv) {
         hookBox.min[hookAxis] = mid - thickness * 0.5;
         hookBox.max[hookAxis] = mid + thickness * 0.5;
 
-        const glm::dvec3 center = store.cubeCenter();
+        const glm::dvec3 center = activeStore().cubeCenter();
         enableClipping = true;
         clipMin[0] = (float)(hookBox.min.x - center.x);
         clipMin[1] = (float)(hookBox.min.y - center.y);
@@ -1326,9 +1401,9 @@ int main(int argc, char** argv) {
         clipMax[2] = (float)(hookBox.max.z - center.z);
 
         int maxNodeDepth = 0;
-        for (const NodeRecord& rec : store.nodes()) maxNodeDepth = std::max(maxNodeDepth, (int)rec.level);
+        for (const NodeRecord& rec : activeStore().nodes()) maxNodeDepth = std::max(maxNodeDepth, (int)rec.level);
         const int smokeDepth = std::min(maxNodeDepth, 8);
-        const uint64_t estimate = store.estimatePointsInBox(hookBox, smokeDepth);
+        const uint64_t estimate = activeStore().estimatePointsInBox(hookBox, smokeDepth);
         startSliceCpuExport(exportSliceOnStart + ".dxf", SliceExportFormat::Dxf, hookBox, smokeDepth, estimate);
         startSliceCpuExport(exportSliceOnStart + ".csv", SliceExportFormat::Csv, hookBox, smokeDepth, estimate);
 
@@ -1478,7 +1553,7 @@ int main(int argc, char** argv) {
         } else {
             CamPath& cp = allCamPaths[loadedDir];
             cp.keys.clear();
-            const double cs = store.cube(store.rootIndex()).size;
+            const double cs = activeStore().cube(activeStore().rootIndex()).size;
             const float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
             const Camera savedCam = cam;
             for (int i = 0; i < 3; ++i) {
@@ -1502,11 +1577,11 @@ int main(int argc, char** argv) {
     }
 
     // View presets work in CENTRED space (cube centre = origin) like frameAll —
-    // adding store.cubeCenter() here teleported the camera by the cloud's world
+    // adding activeStore().cubeCenter() here teleported the camera by the cloud's world
     // offset (km for georeferenced scans), losing the model until 'F' recovered.
     auto presetView = [&](const glm::vec3& dir) {
         if (!octreeLoaded) return;
-        double cs = store.cube(store.rootIndex()).size;
+        double cs = activeStore().cube(activeStore().rootIndex()).size;
         float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
         pivot = glm::vec3(0.0f);
         cam.position = pivot + dir * dist;
@@ -1876,7 +1951,7 @@ int main(int argc, char** argv) {
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
                 else if (rc.name == "measure_clear") measurePts.clear();
                 else if (rc.name == "clip_reset" && octreeLoaded) {
-                    float ext = (float)store.cube(store.rootIndex()).size * 2.0f;
+                    float ext = (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f;
                     clipMin[0] = clipMin[1] = clipMin[2] = -ext;
                     clipMax[0] = clipMax[1] = clipMax[2] =  ext;
                 }
@@ -1915,7 +1990,7 @@ int main(int argc, char** argv) {
             // Status back to the phone HUD (throttled to ~5 Hz inside).
             float posv[3] = { (float)cam.position.x, (float)cam.position.y, (float)cam.position.z };
             remote.publishState(dt > 0 ? 1.0f / dt : 0.0f,
-                                octreeLoaded ? store.meta().pointCount : 0,
+                                octreeLoaded ? activeStore().meta().pointCount : 0,
                                 posv, showUI, baseName(loadedDir));
 
             // Full config sync: ~1 Hz heartbeat + instant echo after changes.
@@ -1939,7 +2014,7 @@ int main(int argc, char** argv) {
                 rc.stereo = stereoSBS; rc.eyeSep = eyeSeparation; rc.focalDist = focalDistance;
                 rc.toolMode = (toolMode == TOOL_MEASURE) ? 1 : (toolMode == TOOL_CLIP) ? 2 : (toolMode == TOOL_ANNOTATE) ? 3 : 0;
                 rc.clipEnabled = enableClipping;
-                rc.clipExt = octreeLoaded ? (float)store.cube(store.rootIndex()).size * 2.0f : 0.0f;
+                rc.clipExt = octreeLoaded ? (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f : 0.0f;
                 rc.measurePts.reserve(measurePts.size());
                 for (const auto& p : measurePts) rc.measurePts.push_back({p.x, p.y, p.z});
                 rc.measureTotal = measureTotal();
@@ -1957,10 +2032,10 @@ int main(int argc, char** argv) {
                 rc.recentDirs = recentDirs;
                 rc.loadedFile = baseName(loadedDir);
                 if (octreeLoaded) {
-                    rc.pointCount = store.meta().pointCount;
-                    rc.nodeCount  = store.meta().nodeCount;
-                    rc.cubeSize   = (float)store.meta().cubeSize;
-                    rc.zMin       = (float)store.cube(store.rootIndex()).min[2];
+                    rc.pointCount = activeStore().meta().pointCount;
+                    rc.nodeCount  = activeStore().meta().nodeCount;
+                    rc.cubeSize   = (float)activeStore().meta().cubeSize;
+                    rc.zMin       = (float)activeStore().cube(activeStore().rootIndex()).min[2];
                 }
                 rc.streamAvailable = RemoteServer::streamAvailable();
                 rc.webrtcAvailable = RemoteServer::webrtcAvailable();
@@ -2027,10 +2102,13 @@ int main(int argc, char** argv) {
 
         // ---- absorb finished async loads ---------------------------------
         if (octreeLoaded) {
-            for (int i = 0; i < uploadsPerFrame; ++i) {
-                LoadResult res;
-                if (!store.popResult(res)) break;
-                renderer.upload(res.nodeIndex, res.verts);
+            for (auto& cloud : scene) {
+                if (!cloud.store || !cloud.renderer) continue;
+                for (int i = 0; i < uploadsPerFrame; ++i) {
+                    LoadResult res;
+                    if (!cloud.store->popResult(res)) break;
+                    cloud.renderer->upload(res.nodeIndex, res.verts);
+                }
             }
         }
 
@@ -2055,8 +2133,8 @@ int main(int argc, char** argv) {
                 glm::vec3 originalPos = cam.position;
                 cam.position += eyeOffset;
 
-                glm::mat4 vp = cam.viewProj();
-                Frustum frustum = extractFrustum(vp);
+                glm::mat4 viewProj = cam.viewProj();
+                Frustum frustum = extractFrustum(viewProj);
 
                 if (stereoSBS) {
                     // Shift the view projection horizontally to create convergence at focalDistance
@@ -2065,65 +2143,74 @@ int main(int argc, char** argv) {
                     float shift = -eyeOffset.x / focalDistance;
                     glm::mat4 shear(1.0f);
                     shear[2][0] = shift;
-                    vp = vp * shear;
-                    frustum = extractFrustum(vp);
+                    viewProj = viewProj * shear;
+                    frustum = extractFrustum(viewProj);
                 }
 
-                const glm::dvec3 center = store.cubeCenter();
                 const double ssFactor = (vpH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
 
-                shader.use();
-                shader.setMat4("uMVP", glm::value_ptr(vp));
-                shader.setFloat("uPointSize", pointSize);
-                shader.setFloat("uAttenuation", attenuate ? 1.0f : 0.0f);
-                shader.setFloat("uViewportH", (float)vpH);
-                shader.setInt("uRound", roundPoints ? 1 : 0);
+                for (SceneCloud& cloud : scene) {
+                    if (!cloud.visible || !cloud.store || !cloud.renderer) continue;
 
-                shader.setInt("uColorMode", colorMode);
-                shader.setVec3("uSolidColor", solidColor[0], solidColor[1], solidColor[2]);
+                    glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(cloud.worldOffset));
+                    glm::mat4 vp = viewProj * model;
+                    Frustum localFrustum = extractFrustum(vp);
 
-                float minZ = (float)store.cube(store.rootIndex()).min[2] - (float)center.z;
-                float maxZ = minZ + (float)store.cube(store.rootIndex()).size;
-                shader.setVec2("uZBounds", minZ, maxZ);
+                    const glm::dvec3 center = cloud.store->cubeCenter();
 
-                if (enableClipping) {
-                    shader.setVec3("uClipMin", clipMin[0], clipMin[1], clipMin[2]);
-                    shader.setVec3("uClipMax", clipMax[0], clipMax[1], clipMax[2]);
-                } else {
-                    shader.setVec3("uClipMin", -1e9f, -1e9f, -1e9f);
-                    shader.setVec3("uClipMax", 1e9f, 1e9f, 1e9f);
-                }
+                    shader.use();
+                    shader.setMat4("uMVP", glm::value_ptr(vp));
+                    shader.setFloat("uPointSize", pointSize);
+                    shader.setFloat("uAttenuation", attenuate ? 1.0f : 0.0f);
+                    shader.setFloat("uViewportH", (float)vpH);
+                    shader.setInt("uRound", roundPoints ? 1 : 0);
 
-                std::function<void(uint32_t)> visit = [&](uint32_t idx) {
-                    const NodeRecord& rec = store.nodes()[idx];
-                    const NodeCube& nc = store.cube(idx);
-                    glm::vec3 mn((float)(nc.min[0] - center.x),
-                                 (float)(nc.min[1] - center.y),
-                                 (float)(nc.min[2] - center.z));
-                    glm::vec3 mx = mn + glm::vec3((float)nc.size);
-                    if (!aabbVisible(frustum, mn, mx)) return;
+                    shader.setInt("uColorMode", colorMode);
+                    shader.setVec3("uSolidColor", solidColor[0], solidColor[1], solidColor[2]);
 
-                    ++totalVisibleNodes;
-                    if (renderer.isResident(idx)) {
-                        renderer.draw(idx, frame);
-                        ++totalDrawnNodes;
-                        totalDrawnPoints += rec.pointCount;
+                    float minZ = (float)cloud.store->cube(cloud.store->rootIndex()).min[2] - (float)center.z;
+                    float maxZ = minZ + (float)cloud.store->cube(cloud.store->rootIndex()).size;
+                    shader.setVec2("uZBounds", minZ, maxZ);
+
+                    if (enableClipping) {
+                        shader.setVec3("uClipMin", clipMin[0] - (float)cloud.worldOffset.x, clipMin[1] - (float)cloud.worldOffset.y, clipMin[2] - (float)cloud.worldOffset.z);
+                        shader.setVec3("uClipMax", clipMax[0] - (float)cloud.worldOffset.x, clipMax[1] - (float)cloud.worldOffset.y, clipMax[2] - (float)cloud.worldOffset.z);
                     } else {
-                        store.requestLoad(idx, frame);
+                        shader.setVec3("uClipMin", -1e9f, -1e9f, -1e9f);
+                        shader.setVec3("uClipMax", 1e9f, 1e9f, 1e9f);
                     }
 
-                    glm::vec3 nodeCenter = (mn + mx) * 0.5f;
-                    float dist = glm::length(nodeCenter - cam.position);
-                    if (dist < 1e-3f) dist = 1e-3f;
-                    double spacing = store.nodeSpacing(rec.level);
-                    double pixels = spacing * ssFactor / dist;
+                    std::function<void(uint32_t)> visit = [&](uint32_t idx) {
+                        const NodeRecord& rec = cloud.store->nodes()[idx];
+                        const NodeCube& nc = cloud.store->cube(idx);
+                        glm::vec3 mn((float)(nc.min[0] - center.x),
+                                     (float)(nc.min[1] - center.y),
+                                     (float)(nc.min[2] - center.z));
+                        glm::vec3 mx = mn + glm::vec3((float)nc.size);
+                        if (!aabbVisible(localFrustum, mn, mx)) return;
 
-                    if (pixels > sseBudget && rec.childMask != 0) {
-                        for (int o = 0; o < 8; ++o)
-                            if (rec.children[o] != kNoChild) visit(rec.children[o]);
-                    }
-                };
-                visit(store.rootIndex());
+                        ++totalVisibleNodes;
+                        if (cloud.renderer->isResident(idx)) {
+                            cloud.renderer->draw(idx, frame);
+                            ++totalDrawnNodes;
+                            totalDrawnPoints += rec.pointCount;
+                        } else {
+                            cloud.store->requestLoad(idx, frame);
+                        }
+
+                        glm::vec3 nodeCenterScene = (mn + mx) * 0.5f + glm::vec3(cloud.worldOffset);
+                        float dist = glm::length(nodeCenterScene - cam.position);
+                        if (dist < 1e-3f) dist = 1e-3f;
+                        double spacing = cloud.store->nodeSpacing(rec.level);
+                        double pixels = spacing * ssFactor / dist;
+
+                        if (pixels > sseBudget && rec.childMask != 0) {
+                            for (int o = 0; o < 8; ++o)
+                                if (rec.children[o] != kNoChild) visit(rec.children[o]);
+                        }
+                    };
+                    visit(cloud.store->rootIndex());
+                } // end per-cloud loop
 
                 // ---- measurement polyline (real geometry, not an ImGui overlay) --
                 // Drawn here (inside renderPass) so it's projected with this exact
@@ -2132,12 +2219,12 @@ int main(int argc, char** argv) {
                 if (!measurePts.empty()) {
                     std::vector<glm::vec3> verts;
                     verts.reserve(measurePts.size());
-                    for (const auto& p : measurePts) verts.push_back(glm::vec3(p - center));
+                    for (const auto& p : measurePts) verts.push_back(glm::vec3(p - sceneOrigin));
                     glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
                     glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(glm::vec3), verts.data(), GL_DYNAMIC_DRAW);
                     glBindVertexArray(lineVao);
                     lineShader.use();
-                    lineShader.setMat4("uMVP", glm::value_ptr(vp));
+                    lineShader.setMat4("uMVP", glm::value_ptr(viewProj));
                     lineShader.setVec3("uColor", 1.0f, 0.86f, 0.16f); // matches the old ImGui marker/line hue
                     glDisable(GL_DEPTH_TEST); // always-on-top, matching the previous ImGui overlay
                     if (verts.size() >= 2) {
@@ -2159,16 +2246,16 @@ int main(int argc, char** argv) {
                     std::vector<glm::vec3> pointVerts;
                     leaderVerts.reserve(annotations.size() * 2);
                     pointVerts.reserve(annotations.size());
-                    double leader = std::max(0.10, store.meta().cubeSize * 0.01);
+                    double leader = std::max(0.10, activeStore().meta().cubeSize * 0.01);
                     for (const Annotation& a : annotations) {
-                        glm::vec3 p = glm::vec3(a.pos - center);
+                        glm::vec3 p = glm::vec3(a.pos - sceneOrigin);
                         leaderVerts.push_back(p);
                         leaderVerts.push_back(p + glm::vec3(0.0f, 0.0f, (float)leader));
                         pointVerts.push_back(p);
                     }
                     glBindVertexArray(lineVao);
                     lineShader.use();
-                    lineShader.setMat4("uMVP", glm::value_ptr(vp));
+                    lineShader.setMat4("uMVP", glm::value_ptr(viewProj));
                     lineShader.setVec3("uColor", 1.0f, 0.30f, 0.12f);
                     glDisable(GL_DEPTH_TEST);
                     glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
@@ -2207,11 +2294,15 @@ int main(int argc, char** argv) {
                 drawnPoints = totalDrawnPoints;
             }
 
-            renderer.evictToBudget((size_t)gpuBudgetMB * 1024u * 1024u, frame, store);
-
-            // Drop load requests the camera moved past (>120 frames ≈ 2s @60fps)
-            // and cap buffered uploads so the streaming queues don't grow unbounded.
-            store.purgeStale(frame, 120, (size_t)uploadsPerFrame * 8);
+            size_t perCloudBudget = (size_t)gpuBudgetMB * 1024u * 1024u / std::max((size_t)1, scene.size());
+            for (auto& cloud : scene) {
+                if (!cloud.store || !cloud.renderer) continue;
+                cloud.renderer->evictToBudget(perCloudBudget, frame, *cloud.store);
+                
+                // Drop load requests the camera moved past (>120 frames ≈ 2s @60fps)
+                // and cap buffered uploads so the streaming queues don't grow unbounded.
+                cloud.store->purgeStale(frame, 120, (size_t)uploadsPerFrame * 8);
+            }
 
             // ---- resolve a pending measurement pick ---------------------------
             if (pendingPick) {
@@ -2221,10 +2312,20 @@ int main(int argc, char** argv) {
                 cam.screenRay((float)pickX, (float)pickY, winW, winH, ro, rd);
                 double ssF = (winH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
                 double tolPerDist = (ssF > 0.0) ? (6.0 / ssF) : 0.01; // ~6px pick disc
-                glm::dvec3 hit;
-                if (store.pickPoint(ro, rd, tolPerDist, hit)) {
-                    measurePts.push_back(hit);   // append vertex to the polyline
+                
+                glm::dvec3 bestHit;
+                double bestDist = 1e30;
+                bool hitAnything = false;
+                for (const auto& cloud : scene) {
+                    if (!cloud.visible || !cloud.store) continue;
+                    glm::vec3 localRo = ro - glm::vec3(cloud.worldOffset);
+                    glm::dvec3 hit;
+                    if (cloud.store->pickPoint(localRo, rd, tolPerDist, hit)) {
+                        double d = glm::length(hit - (glm::dvec3(ro) + sceneOrigin));
+                        if (d < bestDist) { bestDist = d; bestHit = hit; hitAnything = true; }
+                    }
                 }
+                if (hitAnything) measurePts.push_back(bestHit);
             }
             if (pendingAnnotationPick) {
                 pendingAnnotationPick = false;
@@ -2233,11 +2334,23 @@ int main(int argc, char** argv) {
                 cam.screenRay((float)annotationPickX, (float)annotationPickY, winW, winH, ro, rd);
                 double ssF = (winH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
                 double tolPerDist = (ssF > 0.0) ? (6.0 / ssF) : 0.01;
-                glm::dvec3 hit;
-                if (store.pickPoint(ro, rd, tolPerDist, hit)) {
+
+                glm::dvec3 bestHit;
+                double bestDist = 1e30;
+                bool hitAnything = false;
+                for (const auto& cloud : scene) {
+                    if (!cloud.visible || !cloud.store) continue;
+                    glm::vec3 localRo = ro - glm::vec3(cloud.worldOffset);
+                    glm::dvec3 hit;
+                    if (cloud.store->pickPoint(localRo, rd, tolPerDist, hit)) {
+                        double d = glm::length(hit - (glm::dvec3(ro) + sceneOrigin));
+                        if (d < bestDist) { bestDist = d; bestHit = hit; hitAnything = true; }
+                    }
+                }
+                if (hitAnything) {
                     std::vector<Annotation>& annotations = allAnnotations[loadedDir];
                     Annotation a;
-                    a.pos = hit;
+                    a.pos = bestHit;
                     a.label = "Pin " + std::to_string(annotations.size() + 1);
                     annotations.push_back(a);
                     saveAnnotations();
@@ -2245,57 +2358,6 @@ int main(int argc, char** argv) {
                     addToast("Annotation added: " + a.label);
                 }
             }
-
-            // ---- depth-buffer cursor query (cheap; reuses this frame's depth) --
-            // Returns the world-space surface point under pixel (mx,my), or false
-            // if the cursor is over empty background. Used for focus + zoom.
-            auto worldUnderCursor = [&](int mx, int my, glm::dvec3& outWorld) -> bool {
-                if (mx < 0 || my < 0 || mx >= winW || my >= winH) return false;
-                float depth = 1.0f;
-                glReadPixels(mx, winH - 1 - my, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
-                if (depth >= 1.0f) return false; // background
-                cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
-                float ndcX = 2.0f * mx / (float)winW - 1.0f;
-                float ndcY = 1.0f - 2.0f * my / (float)winH;
-                float ndcZ = 2.0f * depth - 1.0f;
-                glm::vec4 p = glm::inverse(cam.viewProj()) * glm::vec4(ndcX, ndcY, ndcZ, 1.0f);
-                if (std::fabs(p.w) < 1e-9f) return false;
-                outWorld = glm::dvec3(glm::vec3(p) / p.w) + store.cubeCenter();
-                return true;
-            };
-
-            if (pendingFocus) {
-                pendingFocus = false;
-                glm::dvec3 w;
-                if (worldUnderCursor(focusX, focusY, w)) {
-                    pivot = glm::vec3(w - store.cubeCenter());
-                    float d = glm::length(cam.position - pivot);
-                    cam.position = pivot - cam.front() * d; // centre the pivot, keep distance
-                }
-            }
-            if (pendingZoom) {
-                pendingZoom = false;
-                glm::dvec3 w;
-                glm::vec3 tgt = worldUnderCursor(zoomX, zoomY, w)
-                                  ? glm::vec3(w - store.cubeCenter())
-                                  : cam.position + cam.front();
-                pivot = tgt;                                  // future orbit centres here
-                float factor = (zoomDelta > 0.0f) ? 0.8f : 1.25f; // wheel up = closer
-                cam.position = tgt + (cam.position - tgt) * factor;
-                if (cam.isOrtho) cam.orthoSize = std::max(0.01f, cam.orthoSize * factor);
-            }
-            if (frameAllReq) { frameAllReq = false; frameAll(); }
-
-            // Live world coordinate under the cursor (for the status bar).
-            {
-                int mxp = 0, myp = 0; SDL_GetMouseState(&mxp, &myp);
-                hoverValid = !ImGui::GetIO().WantCaptureMouse &&
-                             worldUnderCursor(mxp, myp, hoverWorld);
-            }
-
-            // ---- post-process pass: FBO -> screen (copy, or EDL shading) -----
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            glViewport(0, 0, winW, winH);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glDisable(GL_DEPTH_TEST);
             edlShader.use();
@@ -2325,8 +2387,8 @@ int main(int argc, char** argv) {
                 // settling wants loads on the GPU as fast as they decode.
                 for (int i = 0; i < 512; ++i) {
                     LoadResult res;
-                    if (!store.popResult(res)) break;
-                    renderer.upload(res.nodeIndex, res.verts);
+                    if (!activeStore().popResult(res)) break;
+                    activeRenderer().upload(res.nodeIndex, res.verts);
                 }
                 ensureExportFbo(vex.cfg.width, vex.cfg.height);
                 const Uint64 stepStart = SDL_GetPerformanceCounter();
@@ -2421,8 +2483,8 @@ int main(int argc, char** argv) {
                 } else {
                     for (int i = 0; i < 512; ++i) {
                         LoadResult res;
-                        if (!store.popResult(res)) break;
-                        renderer.upload(res.nodeIndex, res.verts);
+                        if (!activeStore().popResult(res)) break;
+                        activeRenderer().upload(res.nodeIndex, res.verts);
                     }
 
                     ensureExportFbo(pendingSlicePngW, pendingSlicePngH);
@@ -2438,7 +2500,7 @@ int main(int argc, char** argv) {
                     float savedClipMin[3] = { clipMin[0], clipMin[1], clipMin[2] };
                     float savedClipMax[3] = { clipMax[0], clipMax[1], clipMax[2] };
 
-                    const glm::dvec3 center = store.cubeCenter();
+                    const glm::dvec3 center = activeStore().cubeCenter();
                     const Vec3d boxCenter = pendingSlicePngBox.center();
                     const glm::vec3 target((float)(boxCenter.x - center.x),
                                            (float)(boxCenter.y - center.y),
@@ -2447,7 +2509,7 @@ int main(int argc, char** argv) {
                     const double vExtent = std::max(1e-6, sliceExtentV(pendingSlicePngBox, pendingSlicePngAxis));
                     const float aspect = pendingSlicePngH > 0 ? (float)pendingSlicePngW / (float)pendingSlicePngH : 1.0f;
                     const float halfHeight = (float)(std::max(vExtent, uExtent / std::max(0.001f, aspect)) * 0.55);
-                    const float dist = (float)std::max(store.meta().cubeSize * 2.0, 1.0);
+                    const float dist = (float)std::max(activeStore().meta().cubeSize * 2.0, 1.0);
                     glm::vec3 normal(0.0f, 0.0f, 1.0f);
                     if (pendingSlicePngAxis == 0) normal = glm::vec3(1.0f, 0.0f, 0.0f);
                     else if (pendingSlicePngAxis == 1) normal = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -2566,11 +2628,7 @@ int main(int argc, char** argv) {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, streamFbo);
             glBlitFramebuffer(0, 0, winW, winH, 0, 0, sw, sh,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, streamFbo);
-            streamPixels.resize((size_t)sw * sh * 3);
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, streamPixels.data());
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                        glBindFramebuffer(GL_FRAMEBUFFER, 0);
             remote.publishFrame(streamPixels.data(), sw, sh);
         }
 
@@ -2578,6 +2636,32 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+
+        if (!pendingLoadDir.empty()) {
+            ImGui::OpenPopup("Load Converted Cloud");
+        }
+        if (ImGui::BeginPopupModal("Load Converted Cloud", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Conversion complete: %s\nDo you want to replace the current scene or add it?", baseName(pendingLoadDir).c_str());
+            ImGui::Separator();
+            if (ImGui::Button("Replace", ImVec2(120, 0))) {
+                while (!scene.empty()) closeCloud(0);
+                loadOctree(pendingLoadDir);
+                pendingLoadDir.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Add", ImVec2(120, 0))) {
+                loadOctree(pendingLoadDir);
+                pendingLoadDir.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                pendingLoadDir.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
 
         // Stereoscopic SBS: the viewer is being looked at through a stereoscope —
         // no chrome may reach the screen. All UI is suppressed; hotkeys still work.
@@ -2614,7 +2698,7 @@ int main(int argc, char** argv) {
             (!measurePts.empty() || !overlayAnnotations.empty() || toolMode == TOOL_MEASURE || toolMode == TOOL_ANNOTATE)) {
             cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
             glm::mat4 mvp = cam.viewProj();
-            glm::dvec3 ctr = store.cubeCenter();
+            glm::dvec3 ctr = activeStore().cubeCenter();
             auto project = [&](const glm::dvec3& world, ImVec2& out) -> bool {
                 glm::vec4 clip = mvp * glm::vec4(glm::vec3(world - ctr), 1.0f);
                 if (clip.w <= 0.0f) return false; // behind the camera
@@ -2660,7 +2744,6 @@ int main(int argc, char** argv) {
                 if (project(hoverWorld, s)) dl->AddCircle(s, 7.0f, cSnap, 0, 2.0f);
             }
         }
-
         // ---- colour legend (elevation / intensity) --------------------------
         // The ramp is scene information, not chrome: it stays visible in zen
         // (hide-UI) mode and in stereoscopic SBS it is drawn once per eye.
@@ -2675,8 +2758,8 @@ int main(int argc, char** argv) {
             };
             char hi[32], lo[32]; const char* title;
             if (colorMode == 1) {
-                double zmin = store.cube(store.rootIndex()).min[2];
-                double zmax = zmin + store.cube(store.rootIndex()).size;
+                double zmin = activeStore().cube(activeStore().rootIndex()).min[2];
+                double zmax = zmin + activeStore().cube(activeStore().rootIndex()).size;
                 snprintf(hi, sizeof(hi), "%.1f", zmax);
                 snprintf(lo, sizeof(lo), "%.1f", zmin);
                 title = "Z (m)";
@@ -2688,7 +2771,7 @@ int main(int argc, char** argv) {
             const float labelW = std::max(ImGui::CalcTextSize(hi).x, ImGui::CalcTextSize(lo).x);
             const float titleW = ImGui::CalcTextSize(title).x;
             // Reserve whichever is wider: bar+labels, or the title (which is
-            // left-anchored at bx-2, so it can overshoot rightEdge otherwise —
+            // left-anchored at bx-2, so it can overshoot rightEdge otherwise ÔÇö
             // e.g. "Intensity" at default font is wider than "max"/"0" labels).
             const float legendW = std::max(bw + 6.0f + labelW, titleW + 2.0f);
             // Bar + right-side labels laid out so nothing crosses rightEdge.
@@ -2743,8 +2826,12 @@ int main(int argc, char** argv) {
             switch (job->state.load()) {
                 case ConvertJob::State::Succeeded:
                     if (job->loadWhenDone) {
-                        loadOctree(job->output);
-                        addToast("Converted and loaded: " + job->name);
+                        if (scene.empty()) {
+                            loadOctree(job->output);
+                            addToast("Converted and loaded: " + job->name);
+                        } else {
+                            pendingLoadDir = job->output;
+                        }
                     } else {
                         addToast("Converted: " + job->name, job->output);
                     }
@@ -2835,6 +2922,7 @@ int main(int argc, char** argv) {
                     ImGui::EndMenu();
                 }
                 if (ImGui::BeginMenu("Window")) {
+                    ImGui::MenuItem("Scene", nullptr, &showScenePanel);
                     ImGui::MenuItem("Properties", nullptr, &showProperties);
                     ImGui::MenuItem("Jobs", nullptr, &showJobsPanel);
                     {
@@ -2848,7 +2936,7 @@ int main(int argc, char** argv) {
                     ImGui::Separator();
                     ImGui::MenuItem("Status Bar", nullptr, &showStatusBar);
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Reset Layout")) { resetDockLayout = true; showProperties = true; }
+                    if (ImGui::MenuItem("Reset Layout")) { resetDockLayout = true; showScenePanel = true; showProperties = true; }
                     ImGui::EndMenu();
                 }
                 if (ImGui::BeginMenu("Help")) {
@@ -2955,8 +3043,10 @@ int main(int argc, char** argv) {
                 ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
                 ImGui::DockBuilderSetNodeSize(dockspaceId, hostSize);
                 ImGuiID centerId = dockspaceId;
+                ImGuiID leftId   = ImGui::DockBuilderSplitNode(centerId, ImGuiDir_Left, 0.18f, nullptr, &centerId);
                 ImGuiID rightId  = ImGui::DockBuilderSplitNode(centerId, ImGuiDir_Right, 0.25f, nullptr, &centerId);
                 ImGuiID bottomId = ImGui::DockBuilderSplitNode(centerId, ImGuiDir_Down, 0.30f, nullptr, &centerId);
+                ImGui::DockBuilderDockWindow("Scene", leftId);
                 ImGui::DockBuilderDockWindow("Properties", rightId);
                 ImGui::DockBuilderDockWindow("Jobs", bottomId);
                 ImGui::DockBuilderDockWindow("Console", bottomId);
@@ -2973,6 +3063,47 @@ int main(int argc, char** argv) {
                 ImGui::SetItemTooltip("%s", desc);
             };
 
+            // ---- Scene panel (left dock) --------------------------------------
+            if (showScenePanel) {
+                if (ImGui::Begin("Scene", &showScenePanel)) {
+                    if (scene.empty()) {
+                        ImGui::TextDisabled("No clouds loaded.");
+                        if (ImGui::Button("Open Cloud...")) browseAndLoad();
+                    } else {
+                        ImGui::Text("%d cloud%s", (int)scene.size(), scene.size() == 1 ? "" : "s");
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("+")) browseAndLoad();
+                        ImGui::SetItemTooltip("Add another converted octree or scan");
+                        ImGui::Separator();
+                        int closeIndex = -1;
+                        for (int i = 0; i < (int)scene.size(); ++i) {
+                            SceneCloud& cloud = scene[(size_t)i];
+                            ImGui::PushID(i);
+                            bool visible = cloud.visible;
+                            if (ImGui::Checkbox("##vis", &visible)) cloud.visible = visible;
+                            ImGui::SetItemTooltip("Visible when multi-cloud rendering is enabled");
+                            ImGui::SameLine();
+                            bool selected = i == activeCloudIndex;
+                            std::string label = baseName(cloud.dir) + "##cloud";
+                            if (ImGui::Selectable(label.c_str(), selected)) {
+                                setActiveCloud(i);
+                            }
+                            ImGui::SetItemTooltip("%s", cloud.dir.c_str());
+                            ImGui::TextDisabled("%s pts", prettyCount(cloud.store->meta().pointCount).c_str());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Close")) closeIndex = i;
+                            ImGui::Separator();
+                            ImGui::PopID();
+                        }
+                        if (closeIndex >= 0) closeCloud(closeIndex);
+                        if (scene.size() > 1) {
+                            ImGui::TextWrapped("This first slice keeps rendering and tools on the active cloud while the scene model is generalized.");
+                        }
+                    }
+                }
+                ImGui::End();
+            }
+
             // ---- Properties panel (right dock) --------------------------------
             if (showProperties) {
                 if (ImGui::Begin("Properties", &showProperties)) {
@@ -2982,9 +3113,9 @@ int main(int argc, char** argv) {
                             ImGui::Text("%s", baseName(loadedDir).c_str());
                             ImGui::SetItemTooltip("%s", loadedDir.c_str());
                             ImGui::Text("%s points, %s nodes",
-                                        prettyCount(store.meta().pointCount).c_str(),
-                                        prettyCount(store.meta().nodeCount).c_str());
-                            ImGui::Text("Cube size: %.1f m", store.meta().cubeSize);
+                                        prettyCount(activeStore().meta().pointCount).c_str(),
+                                        prettyCount(activeStore().meta().nodeCount).c_str());
+                            ImGui::Text("Cube size: %.1f m", activeStore().meta().cubeSize);
                         } else {
                             ImGui::TextDisabled("No cloud loaded.");
                             ImGui::TextWrapped("Open a converted octree or convert a scan to begin.");
@@ -3240,7 +3371,7 @@ int main(int argc, char** argv) {
                         if (ImGui::CollapsingHeader("Clip")) {
                             if (ImGui::Checkbox("Enable Clipping", &enableClipping)) settingsChanged = true;
                             if (enableClipping && octreeLoaded) {
-                                float ext = (float)store.cube(store.rootIndex()).size * 2.0f;
+                                float ext = (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f;
                                 if (ImGui::SliderFloat3("Min", clipMin, -ext, ext)) settingsChanged = true;
                                 if (ImGui::SliderFloat3("Max", clipMax, -ext, ext)) settingsChanged = true;
                                 if (ImGui::Button("Reset Planes")) {
@@ -3436,9 +3567,9 @@ int main(int argc, char** argv) {
                         ImGui::Text("Visible nodes:  %zu", visibleNodes);
                         ImGui::Text("Drawn nodes:    %zu", drawnNodes);
                         ImGui::Text("Drawn points:   %s", prettyCount(drawnPoints).c_str());
-                        ImGui::Text("Points on GPU:  %s", prettyCount(renderer.pointsOnGpu()).c_str());
-                        ImGui::Text("Load queue:     %zu", store.pendingRequests());
-                        float residentMB = (float)(renderer.residentBytes() / (1024.0 * 1024.0));
+                        ImGui::Text("Points on GPU:  %s", prettyCount(activeRenderer().pointsOnGpu()).c_str());
+                        ImGui::Text("Load queue:     %zu", activeStore().pendingRequests());
+                        float residentMB = (float)(activeRenderer().residentBytes() / (1024.0 * 1024.0));
                         char budgetOv[48];
                         snprintf(budgetOv, sizeof(budgetOv), "%.0f / %d MB GPU", residentMB, gpuBudgetMB);
                         ImGui::ProgressBar(gpuBudgetMB > 0 ? residentMB / (float)gpuBudgetMB : 0.0f,
@@ -3663,7 +3794,7 @@ int main(int argc, char** argv) {
                     const AABB box = currentSliceBox();
                     const int axis = sliceAxisForBox(box);
                     int maxNodeDepth = 0;
-                    for (const NodeRecord& rec : store.nodes()) maxNodeDepth = std::max(maxNodeDepth, (int)rec.level);
+                    for (const NodeRecord& rec : activeStore().nodes()) maxNodeDepth = std::max(maxNodeDepth, (int)rec.level);
                     sliceDepth = std::clamp(sliceDepth, 0, std::max(0, maxNodeDepth));
                     if (sliceFormatIdx != (int)SliceExportFormat::Png) {
                         ImGui::SetNextItemWidth(180.0f * S);
@@ -3677,7 +3808,7 @@ int main(int argc, char** argv) {
 
                     const uint64_t estimate = (sliceFormatIdx == (int)SliceExportFormat::Png)
                                             ? 0
-                                            : store.estimatePointsInBox(box, sliceDepth);
+                                            : activeStore().estimatePointsInBox(box, sliceDepth);
                     ImGui::TextDisabled("Slice plane: %c  -  %.3f x %.3f world units",
                                         axis == 0 ? 'X' : axis == 1 ? 'Y' : 'Z',
                                         sliceExtentU(box, axis), sliceExtentV(box, axis));
@@ -4142,10 +4273,10 @@ int main(int argc, char** argv) {
                     ImGui::Text("Nodes %zu vis / %zu drawn", visibleNodes, drawnNodes);
                     ImGui::Text("Points %s drawn / %s GPU",
                                 prettyCount(drawnPoints).c_str(),
-                                prettyCount(renderer.pointsOnGpu()).c_str());
+                                prettyCount(activeRenderer().pointsOnGpu()).c_str());
                     ImGui::Text("GPU %.0f / %d MB",
-                                renderer.residentBytes() / (1024.0 * 1024.0), gpuBudgetMB);
-                    ImGui::Text("Queue %zu", store.pendingRequests());
+                                activeRenderer().residentBytes() / (1024.0 * 1024.0), gpuBudgetMB);
+                    ImGui::Text("Queue %zu", activeStore().pendingRequests());
                 }
                 ImGui::End();
             }
@@ -4198,10 +4329,18 @@ int main(int argc, char** argv) {
                         ImGui::SetItemTooltip("Click to open the Jobs panel");
                     }
                     if (octreeLoaded) {
-                        size_t pend = store.pendingRequests();
-                        if (pend > 0) {
+                        double totalMB = 0;
+                        uint64_t totalPts = 0;
+                        size_t totalPend = 0;
+                        for (auto& s : scene) {
+                            totalMB += s.renderer.residentBytes() / 1048576.0;
+                            totalPts += s.store.meta().pointCount;
+                            totalPend += s.store.pendingRequests();
+                        }
+                        
+                        if (totalPend > 0) {
                             ImGui::SameLine(0, 18);
-                            ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", pend);
+                            ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", totalPend);
                         }
                     }
                     if (padEnabled && pad.connected()) {
@@ -4217,9 +4356,9 @@ int main(int argc, char** argv) {
                     char stats[128];
                     if (octreeLoaded) {
                         snprintf(stats, sizeof(stats), "GPU %.0f MB   %s / %s pts   %.0f FPS   v" PF_VERSION_STRING,
-                                 renderer.residentBytes() / 1048576.0,
+                                 activeRenderer().residentBytes() / 1048576.0,
                                  prettyCount(drawnPoints).c_str(),
-                                 prettyCount(store.meta().pointCount).c_str(),
+                                 prettyCount(activeStore().meta().pointCount).c_str(),
                                  dt > 0 ? 1.0f / dt : 0.0f);
                     } else {
                         snprintf(stats, sizeof(stats), "%.0f FPS   v" PF_VERSION_STRING, dt > 0 ? 1.0f / dt : 0.0f);
@@ -4370,3 +4509,4 @@ int main(int argc, char** argv) {
     SDL_Quit();
     return 0;
 }
+
