@@ -77,4 +77,19 @@ bool writeMetadataJson(const std::string& outDir, const FileMetadata& m, Package
     return true;
 }
 
+bool writeProjectMetadataBin(const std::string& outDir, const ProjectMetadata& meta, PackageWriter* pkg) {
+    if (pkg && pkg->isValid()) {
+        if (!pkg->BeginFile("project.bin")) return false;
+        if (!pkg->Write(&meta, sizeof(meta))) return false;
+        return pkg->EndFile();
+    }
+
+    std::string path = outDir + "/project.bin";
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    std::fwrite(&meta, sizeof(meta), 1, f);
+    std::fclose(f);
+    return true;
+}
+
 } // namespace pf

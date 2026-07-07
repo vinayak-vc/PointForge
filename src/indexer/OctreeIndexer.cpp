@@ -597,7 +597,18 @@ bool buildOctree(const std::string& inputPath,
     meta.hasClassification = cs.hasClassification ? 1u : 0u;
     meta.compressionType = opts.compress ? 1u : 0u;
 
+    ProjectMetadata pmeta{};
+    std::strncpy(pmeta.projectName, "PointForge Project", sizeof(pmeta.projectName) - 1);
+    std::strncpy(pmeta.author, "Unknown", sizeof(pmeta.author) - 1);
+    std::strncpy(pmeta.company, "Unknown", sizeof(pmeta.company) - 1);
+    std::strncpy(pmeta.description, "Converted by PointForge", sizeof(pmeta.description) - 1);
+    std::strncpy(pmeta.units, "Meters", sizeof(pmeta.units) - 1);
+    std::strncpy(pmeta.coordinateSystem, "Local", sizeof(pmeta.coordinateSystem) - 1);
+    pmeta.converterVersion = 1;
+    pmeta.buildVersion = 1;
+
     bool ok = writeMetaBin(outDir, meta, pkg.get()) &&
+              writeProjectMetadataBin(outDir, pmeta, pkg.get()) &&
               writeMetadataJson(outDir, meta, pkg.get()) &&
               writeHierarchy(outDir, hierarchy, pkg.get());
 
