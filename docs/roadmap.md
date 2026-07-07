@@ -43,13 +43,21 @@
   alongside each recent path.
 
 ## Mid-term Goals
-- **Animation Paths**: Allow users to keyframe camera paths and render out video frames.
-- **Cross-section / Slicing Export**: Export clipped cross-sections to standard CAD or image formats.
+> Six of these now have a detailed, code-anchored implementation plan with a
+> recommended order in **docs/newdev.md** (living doc — keep its status board
+> current): parallel indexer, multi-client roles, camera path + MP4 export,
+> cross-section export, phone annotations, multi-cloud scene.
+- **Animation Paths**: Allow users to keyframe camera paths and render out video frames. *(planned — newdev.md #3)*
+- **Cross-section / Slicing Export**: Export clipped cross-sections to standard CAD or image formats. *(planned — newdev.md #4)*
+- **Parallel indexer**: Phase C chunk worker pool, 4–8× conversion speedup. *(planned — newdev.md #1)*
+- **Web Remote roles**: view-only clients with a separate viewer PIN. *(planned — newdev.md #2)*
+- **Phone annotations**: tap video → labelled 3D pin, synced + persisted. *(planned — newdev.md #5)*
 - **EDL quality**: linearised-depth response, configurable neighbour kernel.
 - **Scene panel (multi-cloud)**: left dock listing loaded clouds + future
   annotations/segments/streams as child items — deliberately deferred until
   `OctreeStore`/`PointRenderer` support more than one resident cloud, so it
   ships once instead of being bolted on twice (see `architecture.md` §7).
+  *(planned — newdev.md #6, scheduled last)*
 - **Point/measurement tool suite growth**: area, angle, profile tools alongside
   the existing distance measure, using the same tool-mode + Properties-section
   pattern (toolbar mode button + docked options, never a modal).

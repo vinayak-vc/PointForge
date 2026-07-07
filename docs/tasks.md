@@ -179,6 +179,28 @@
                 Replaced native inputs with styled sliders, segmented controls, and
                 iOS-style toggles.
 
+## Planned — medium features (see docs/newdev.md for the full living plan)
+Recommended order; update newdev.md status board as these move:
+- `[x]` 1. Parallel indexer (branch `parallel-indexer`): Phase C worker pool
+        with pure-function chunk builds + in-chunk-order coordinator →
+        output byte-identical to sequential (sha256-verified on a real
+        12.4M-pt LAS); FlatCellSet replaces unordered_set in subsample
+        (heap-lock contention fix, helps sequential too); `--threads` CLI +
+        IndexOptions::threads + Convert-dialog control; `pftest` round-trip
+        test target (first automated test; CTest `octree_roundtrip`).
+        Bench: phase C 4.02s → 1.37s (2.9×) on Tikal-13.las at compressed
+        preset settings. Pending: one live convert via the viewer Jobs panel.
+- `[ ]` 2. Multi-client roles (view-only role, second viewer PIN, webremote
+        read-only mode)
+- `[ ]` 3. Camera path animation + MP4 export (CamPath keyframes over the
+        bookmark pose struct; IMFSinkWriter; offline FBO render loop)
+- `[ ]` 4. Cross-section / slice export (forEachPointInBox bulk query; own
+        DXF R12 writer in pfcore; PNG + CSV)
+- `[ ]` 5. Annotations from phone (generalise tap-to-measure; JSON per-cloud
+        persistence; GL pins + labels visible in the stream)
+- `[ ]` 6. Multi-cloud scene (SceneCloud vector, per-cloud renderer, scene
+        origin = first cloud's cube centre, Scene panel per architecture §7)
+
 ## To Do
 - `[ ]` Orthographic screen-space-error variant in the C API (Unity scene
         cameras can be ortho; streaming currently pauses in ortho views)

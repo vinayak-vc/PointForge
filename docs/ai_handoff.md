@@ -1,6 +1,126 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-06, cont.) - Look-Speed Slider Had No Effect (Server-Side Clamp Bug)
+## Latest Session (2026-07-06, cont.) - Parallel Indexer implemented (newdev.md #1, branch `parallel-indexer`)
+
+First medium feature from docs/newdev.md landed. Test-first, per the plan.
+
+### What was built
+1. **pftest** (`src/tools/pftest/main.cpp`, CMake target under `PF_BUILD_TESTS`,
+   CTest `octree_roundtrip`) — the repo's first automated test. Deterministic
+   synthetic .xyz (fixed LCG), converts sequential (threads=1) vs parallel,
+   asserts hierarchy/octree/meta **byte-identity** for compress on+off, plus
+   DFS invariants (reachability, childMask, payload ranges, point counts) via
+   OctreeStore (GL-free, pfunity link pattern).
+2. **Parallel Phase C** (`OctreeIndexer.cpp`): workers build pure
+   `ChunkResult`s (`serializeLocal` + `appendPayloadToBlob` → chunk-local
+   records + payload blob + coarse samples); a coordinator drains them **in
+   chunk order**, rebases indices/byteOffsets, and owns all global mutation —
+   output byte-identical to sequential by construction. In-flight cap
+   threads+2; cancel checked by workers + coordinator (old cancel path's
+   FILE* leak fixed); "phase C took Xs" timing log added.
+3. **FlatCellSet**: `subsample`'s per-insert-allocating `unordered_set`
+   serialized workers on the Windows heap lock (threads=16 was SLOWER than
+   1). Replaced with a flat open-addressing set — parallel now scales and
+   sequential got ~20% faster too.
+4. **Config surface**: `IndexOptions::threads` (0=auto), pfconvert
+   `--threads`, Convert dialog Advanced "Indexer threads" (0 → "auto").
+
+### Verified
+- pftest PASS at 1M/2M/4M/8M points (both compression modes).
+- Real scan (Tikal-13.las, 12.4M pts): sha256 of all three output files
+  identical between threads=1 and threads=16 at multiple settings.
+- Bench: phase C **4.02s → 1.37s (2.9×)** at chunk-depth 3 + compress
+  (the Balanced/High preset shape). Finding: uncompressed configs are
+  bounded by the serial payload fwrite (disk), not CPU — documented in
+  decisions.md.
+
+### Modified files
+- src/indexer/OctreeIndexer.{h,cpp} (threads option; parallel Phase C;
+  FlatCellSet; serializeLocal/appendPayloadToBlob; ChunkResult)
+- src/tools/pfconvert/main.cpp (--threads)
+- src/tools/pftest/main.cpp (new)
+- src/viewer/main.cpp (Convert dialog "Indexer threads")
+- CMakeLists.txt (pftest target, PF_BUILD_TESTS, enable_testing)
+- docs/{newdev,tasks,decisions,ai_handoff}.md
+
+### Review round (same session)
+Adversarial review (3 lenses, refute pass) confirmed one major defect, fixed
+along with test-harness bugs the reviewers spotted:
+- **Worker exception → std::terminate**: buildOne allocates heavily (chunk
+  load + subtree + blob + zstd bound buffers); a bad_alloc escaping the
+  std::thread callable would kill the whole viewer mid-convert (conversion is
+  in-process via JobQueue, whose try/catch can't see worker threads). Workers
+  and the coordinator drain loop are now wrapped; any failure sets a
+  failed/failReason flag, wakes everyone, joins, closes octree.bin and fails
+  the job with a logError. fwrite short-writes (disk full) also detected.
+- pftest hardening: DFS cycle no longer infinite-loops, child indices
+  bounds-checked before dereference, level check de-tautologised (strictly
+  increasing), parallel leg fixed at threads=8, and a pickPoint decode check
+  through a known synthetic cluster (byte-identity alone can't distinguish
+  correct payloads from consistently-corrupt ones).
+pftest PASS after all fixes.
+
+### In-app smoke (same session) — DONE
+Added a permanent smoke hook: `ViitorXPCViewer --convert <scan>` drives the
+Convert dialog's own openConvertDialog+enqueueConvert at startup (same
+JobQueue, options, toasts, load-when-done). Live run: Tikal-13.las converted
+INSIDE the running viewer on 16 threads (phase C 1.50s, 912 nodes, 12.4M
+pts), job succeeded, cloud auto-loaded, process healthy. newdev.md #1 = DONE.
+Note: the built exe is version-stamped (`ViitorXPCViewer_v<NNN>.exe`) — glob
+for it when scripting.
+
+### Next Recommended Task
+User raises the `parallel-indexer` PR. Then branch `multi-client-roles` off
+main and start newdev.md **#2 Multi-client roles** (view-only viewer PIN).
+
+## Previous Session (2026-07-06, cont.) - Medium-Feature Implementation Plan (docs/newdev.md)
+
+Planning session — no code changes. Created **docs/newdev.md**: a living,
+code-anchored implementation plan for the six mid-term ("1–2 weeks each")
+features, with a status board to keep updated as tasks move
+(PLANNED/IN PROGRESS/DONE/BLOCKED).
+
+### How the plan was built
+A parallel codebase survey (7 scout agents, one per feature area + docs/build
+state, each claim then adversarially re-verified against the tree) gathered
+file/line anchors, reusable infra, gaps, and risks per feature. Three drifted
+anchors were corrected (EmbeddedShaders line refs; EmbeddedWeb.h actually
+generates into `build-static/generated/`, not `src/viewer/`).
+
+### Plan contents (docs/newdev.md)
+Recommended order + per-feature phased checklists, verified starting points,
+risks, and acceptance criteria:
+1. **Parallel indexer** — Phase C worker pool; pure-function chunk builds +
+   single-writer coordinator; adds the repo's first automated test
+   (synthetic .xyz round-trip vs sequential indexer).
+2. **Multi-client roles** — view-only role via a second (viewer) PIN;
+   server ignores move/cmd/set from viewers; webremote read-only mode.
+3. **Camera path + MP4 export** — CamPath keyframes on the bookmark pose,
+   Catmull-Rom interpolation, offline FBO render loop, IMFSinkWriter MP4;
+   NV12 helper lifted out of RemoteServer.
+4. **Cross-section export** — OctreeStore::forEachPointInBox bulk query,
+   own DXF R12 writer in pfcore, PNG + CSV, world-coordinate output.
+5. **Phone annotations** — generalises the existing tap-to-measure pipeline
+   (measure_pick → screenRay → pickPoint); JSON per-cloud persistence;
+   GL pins/labels rendered in-pass so they appear in the stream.
+6. **Multi-cloud scene** — SceneCloud{store,renderer} vector, scene origin =
+   first cloud's cube centre, Scene panel per architecture.md §7; LAST
+   because of blast radius.
+
+### Docs updated per AGENTS.md
+- docs/newdev.md (new — the plan itself; keep its status board current)
+- docs/tasks.md (new "Planned — medium features" section pointing at newdev.md)
+- docs/roadmap.md (mid-term goals annotated with newdev.md plan numbers)
+- docs/decisions.md (ordering rationale + key approach choices recorded)
+- docs/ai_handoff.md (this entry)
+
+### Next Recommended Task
+Start newdev.md **#1 Parallel indexer** (lowest coupling, biggest felt win):
+begin with the synthetic .xyz generator + sequential round-trip test so the
+parallel refactor has a safety net before any threading lands. Update the
+newdev.md status board when picking it up.
+
+## Previous Session (2026-07-06, cont.) - Look-Speed Slider Had No Effect (Server-Side Clamp Bug)
 
 User reported the web app's Look sensitivity slider did nothing regardless
 of value. Root cause was NOT in the slider or the client's scaling math —

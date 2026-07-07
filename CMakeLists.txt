@@ -275,6 +275,29 @@ add_executable(pfconvert src/tools/pfconvert/main.cpp)
 target_link_libraries(pfconvert PRIVATE pfcore)
 
 # ---------------------------------------------------------------------------
+# pftest — synthetic .xyz round-trip test of the indexer (sequential vs
+# parallel byte-identity + hierarchy invariants). Uses OctreeStore for the
+# read-back; OctreeStore is GL-free (same pattern as pfunity).
+# ---------------------------------------------------------------------------
+option(PF_BUILD_TESTS "Build the pftest round-trip test executable" ON)
+if(PF_BUILD_TESTS)
+    add_executable(pftest
+        src/tools/pftest/main.cpp
+        src/viewer/OctreeStore.cpp
+    )
+    target_link_libraries(pftest PRIVATE pfcore Threads::Threads)
+    if(PF_ZSTD_LIB)
+        target_link_libraries(pftest PRIVATE ${PF_ZSTD_LIB})
+        target_compile_definitions(pftest PRIVATE PF_WITH_ZSTD)
+        if(PF_ZSTD_INC)
+            target_include_directories(pftest PRIVATE ${PF_ZSTD_INC})
+        endif()
+    endif()
+    enable_testing()
+    add_test(NAME octree_roundtrip COMMAND pftest --points 500000)
+endif()
+
+# ---------------------------------------------------------------------------
 # pfview — the streaming viewer
 # ---------------------------------------------------------------------------
 add_executable(pfview WIN32
