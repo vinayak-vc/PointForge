@@ -18,7 +18,7 @@
 | 9 | Annotations | PLANNED | Text, Image, Audio, Pins |
 | 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
 | 11 | Plugin Data | PLANNED | Namespaced arbitrary binary blobs |
-| 12 | Custom Metadata | PLANNED | Arbitrary Key/Value pairs |
+| 12 | Custom Metadata | DONE | PackageWriter supports dynamic Key/Value addition serialized as custom_meta.json |
 | 13 | Streaming Support | PLANNED | Range-request friendly layout |
 | 14 | Chunked Octree | PLANNED | Multi-chunk octree layout support |
 | 15 | Compression | DONE | ZSTD compression added to PackageWriter AddMemory/AddFile APIs |

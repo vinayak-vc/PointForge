@@ -613,6 +613,8 @@ bool buildOctree(const std::string& inputPath,
               writeHierarchy(outDir, hierarchy, pkg.get());
 
     if (isPackage && pkg) {
+        pkg->AddCustomMeta("Generator", "PointForge 1.0");
+        pkg->AddCustomMeta("Platform", "Windows");
         if (!pkg->Finalize()) {
             logError("buildOctree: failed to finalize package");
             ok = false;

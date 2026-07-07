@@ -265,10 +265,24 @@ bool PackageWriter::AddMemory(const std::string& filename, const void* data, siz
     }
     return EndFile();
 }
+void PackageWriter::AddCustomMeta(const std::string& key, const std::string& value) {
+    customMetadata_.push_back({key, value});
+}
 
 bool PackageWriter::Finalize() {
     if (!valid_) return false;
     if (writingFile_) EndFile();
+
+    if (!customMetadata_.empty()) {
+        std::string json = "{\n";
+        for (size_t i = 0; i < customMetadata_.size(); ++i) {
+            json += "  \"" + customMetadata_[i].first + "\": \"" + customMetadata_[i].second + "\"";
+            if (i < customMetadata_.size() - 1) json += ",\n";
+            else json += "\n";
+        }
+        json += "}\n";
+        AddMemory("custom_meta.json", json.c_str(), json.size(), Compression::ZSTD);
+    }
 
     if (!WriteDirectory()) return false;
 

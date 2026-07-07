@@ -72,6 +72,7 @@ public:
     enum class Compression { None = 0, ZSTD = 1 };
     bool AddFile(const std::string& filename, const std::string& sourcePath, Compression comp = Compression::None);
     bool AddMemory(const std::string& filename, const void* data, size_t size, Compression comp = Compression::None);
+    void AddCustomMeta(const std::string& key, const std::string& value);
 
     bool Finalize();
 
@@ -88,6 +89,7 @@ private:
 
     std::vector<VXPCDirectoryEntry> directory_;
     VXPCHeader header_{};
+    std::vector<std::pair<std::string, std::string>> customMetadata_;
 };
 
 class PackageReader : public VirtualFileSystem {
