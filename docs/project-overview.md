@@ -8,7 +8,8 @@ of points, larger than RAM):
   in-app background jobs), then interactive viewing with frustum culling,
   screen-space-error LOD, async streaming, and a GPU memory budget.
 - Docked ImGui shell (menu/toolbar/Properties/Jobs/Console), measurement,
-  clipping, EDL, stereoscopic SBS, controller + ESP32 serial input.
+  clipping with DXF/CSV/PNG slice export, EDL, stereoscopic SBS, controller +
+  ESP32 serial input.
 - Single-file static release: all deps, shaders, icons, **and the web remote
   app** are embedded in the exe.
 
@@ -30,7 +31,6 @@ Every build stamps a `MAJOR.MINOR.PATCH` version (status bar, exe file-version
 metadata, and the exe's own filename) so a tester can identify exactly which
 build they're running.
 
-Current milestone: `webapp-controller` merged into `main` (PR #3); active work
-continues on branch `minor-fixes` — a round of Web Remote polish (premium
-connect-screen redesign, desktop input, dropdown/legend UI fixes, remote
-measure) ahead of the first production release package.
+Current milestone: medium-feature plan items #1-#4 are complete
+(`parallel-indexer`, `multi-client-roles`, `camera-path-export`,
+`cross-section-slice-export`). Next planned work is #5 phone annotations.

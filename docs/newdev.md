@@ -21,7 +21,7 @@ tree on 2026-07-06.
 | 1 | Parallel indexer (Phase C)           | DONE | branch `parallel-indexer` | 2.9× real-scan phase C; byte-identical output; pftest added; in-app JobQueue smoke ✔ (`--convert` hook) |
 | 2 | Multi-client roles (view-only mode)  | DONE | branch `multi-client-roles` | viewer PIN, server-side gating, read-only UI; live-verified driver+viewer side by side |
 | 3 | Camera path animation + MP4 export   | DONE | branch `camera-path-export` | CamPath spline + IMFSinkWriter MP4; smoke-verified 1080p30 export (121 frames) via `--export-video` hook |
-| 4 | Cross-section / slice export         | PLANNED |       |       |
+| 4 | Cross-section / slice export         | DONE | branch `cross-section-slice-export` | real-model smoke: DXF/CSV/PNG exported from `PointForgeCache_direct`; 871,420 pts; PNG visually verified |
 | 5 | Annotations from phone               | PLANNED |       |       |
 | 6 | Multi-cloud scene                    | PLANNED |       |       |
 
@@ -254,24 +254,24 @@ CPU-side extraction + writers.
 - No DXF code anywhere (confirmed).
 
 **Plan**
-- [ ] `OctreeStore::forEachPointInBox(AABB box, int maxDepth, callback)` —
+- [x] `OctreeStore::forEachPointInBox(AABB box, int maxDepth, callback)` —
       new bulk query beside pickPoint: DFS, skip nodes whose cube misses the
       box, `readNodeInto` + unpack + box test per point. Depth cap = LOD
       control for export density (UI: "export density" slider mapping to
-      depth). Runs on a worker thread (Jobs-queue job — exports can be GBs).
-- [ ] `src/io/DxfWriter.{h,cpp}` in pfcore (no GL deps — CMake conventions
+      depth). Runs on a worker thread (Jobs-panel job — exports can be GBs).
+- [x] `src/io/DxfWriter.{h,cpp}` in pfcore (no GL deps — CMake conventions
       hold): minimal ASCII DXF R12 — `POINT` entities on layers, optional
-      slice outline as `LWPOLYLINE`. R12 chosen: universally importable, no
+      slice outline as R12 `POLYLINE`. R12 chosen: universally importable, no
       lib dependency (own writer ≈ 200 lines, same spirit as own PLY parser).
-- [ ] Slice semantics v1: thin-box slice = current clip box; export projects
+- [x] Slice semantics v1: thin-box slice = current clip box; export projects
       points onto the dominant (thinnest) axis plane → 2D DXF (x,y of the
       other two axes, world coordinates — CAD wants real coords, NOT centred
       space: add cube-centre offset back on export).
-- [ ] Image export: reuse offscreen FBO path — render with clip applied,
+- [x] Image export: reuse offscreen FBO path — render with clip applied,
       ortho camera aligned to slice normal, export-sized FBO → `encodePNG`
       (all exists; ~day).
-- [ ] CSV/XYZ: trivial writer alongside DXF (x y z r g b intensity class).
-- [ ] UI: Properties > Clip gains "Export slice..." → dialog: format
+- [x] CSV/XYZ: trivial writer alongside DXF (x y z r g b intensity class).
+- [x] UI: Properties > Clip gains "Export slice..." → dialog: format
       (DXF/PNG/CSV), density/depth, output file. Job + toast. Remote cmd
       optional later.
 
@@ -281,9 +281,13 @@ can be huge — show live point-count estimate (sum node pointCounts
 intersecting box) before export and warn >50M. DXF POINT flood: >1M points
 chokes AutoCAD — cap + warn, encourage depth cap.
 
-**Acceptance:** clip a wall slice of a real scan; DXF opens in a CAD viewer
-with correct world coordinates + scale; PNG matches viewport framing; CSV
-row count matches reported estimate.
+**Acceptance:** ✔ `pfview` static build clean; ✔ `pftest` extended with exact
+boxed-query coverage and CTest `octree_roundtrip` passes; ✔ real model
+`C:\UnrealProject\model\PointForgeCache_direct` exported DXF/CSV/PNG through
+the startup smoke hook; ✔ DXF R12 header/EOF valid and `POINT` count matches
+CSV rows (**871,420**); ✔ CSV world-coordinate range is inside the expected
+thin slice (`z=314.847..318.784`); ✔ PNG is valid 1920×2160 and visually
+shows the clipped slice.
 
 ---
 

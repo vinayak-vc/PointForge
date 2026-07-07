@@ -231,6 +231,7 @@ add_library(pfcore STATIC
     src/io/PLYReader.cpp
     src/io/LASReader.cpp
     src/io/E57Reader.cpp
+    src/io/DxfWriter.cpp
     src/io/ReaderFactory.cpp
     src/indexer/Chunker.cpp
     src/indexer/OctreeIndexer.cpp

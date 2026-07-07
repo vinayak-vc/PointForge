@@ -48,7 +48,7 @@
 > current): parallel indexer, multi-client roles, camera path + MP4 export,
 > cross-section export, phone annotations, multi-cloud scene.
 - **Animation Paths**: Allow users to keyframe camera paths and render out video frames. *(**done** — newdev.md #3, branch `camera-path-export`: CamPath keyframes + IMFSinkWriter MP4 export)*
-- **Cross-section / Slicing Export**: Export clipped cross-sections to standard CAD or image formats. *(planned — newdev.md #4)*
+- **Cross-section / Slicing Export**: Export clipped cross-sections to standard CAD or image formats. *(**done** — newdev.md #4, branch `cross-section-slice-export`: DXF R12 + CSV + PNG, real-model smoke verified)*
 - **Parallel indexer**: Phase C chunk worker pool, 4–8× conversion speedup. *(**done** — newdev.md #1: 2.9× phase C on a real scan, byte-identical output, pftest)*
 - **Web Remote roles**: view-only clients with a separate viewer PIN. *(**done** — newdev.md #2: viewer PIN, server-side gating, read-only web UI)*
 - **Phone annotations**: tap video → labelled 3D pin, synced + persisted. *(planned — newdev.md #5)*

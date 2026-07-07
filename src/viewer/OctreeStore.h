@@ -1,5 +1,7 @@
 #pragma once
+#include "common/AABB.h"
 #include "common/OctreeFormat.h"
+#include "common/Point.h"
 #include "common/PointFormat.h"
 #include <glm/glm.hpp>
 #include <atomic>
@@ -7,6 +9,7 @@
 #include <cstdint>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -86,10 +89,25 @@ public:
                    double tolPerDist, glm::dvec3& hitWorld,
                    uint64_t maxScanPoints = 8'000'000ull) const;
 
+    using PointVisitor = std::function<bool(const Point&)>;
+
+    // Synchronous bulk point query for exports. box is in WORLD coordinates.
+    // maxDepth < 0 visits every intersecting node; otherwise it includes node
+    // payloads up to and including maxDepth as a density/LOD cap. The visitor
+    // returns false to stop early. Returns the number of points delivered.
+    uint64_t forEachPointInBox(const AABB& box, int maxDepth,
+                               const std::atomic<bool>* cancel,
+                               const PointVisitor& visitor) const;
+
+    // Cheap preflight count for UI warnings/progress: sums payload counts for
+    // intersecting nodes up to maxDepth without reading octree.bin.
+    uint64_t estimatePointsInBox(const AABB& box, int maxDepth) const;
+
 private:
     void computeCubes();
     void workerLoop();
     GpuVertex convert(const PackedPoint& p) const;
+    Point unpackPoint(const PackedPoint& p) const;
     // Read + (if needed) zstd-decompress one node's packed points via an open
     // stream. Shared by the streaming worker and the synchronous picker.
     bool readNodeInto(std::ifstream& in, const NodeRecord& rec,
