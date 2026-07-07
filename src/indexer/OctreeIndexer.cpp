@@ -363,8 +363,8 @@ bool buildOctree(const std::string& inputPath,
     std::unique_ptr<PackageWriter> pkg;
     FILE* payload = nullptr;
     if (isPackage) {
-        pkg = std::make_unique<PackageWriter>(outDir);
-        if (!pkg->isValid()) { logError("buildOctree: cannot create package " + outDir); return false; }
+        pkg = std::make_unique<PackageWriter>();
+        if (!pkg->Create(outDir)) { logError("buildOctree: cannot create package " + outDir); return false; }
         pkg->BeginFile("octree.bin");
     } else {
         payload = std::fopen((outDir + "/octree.bin").c_str(), "wb");
