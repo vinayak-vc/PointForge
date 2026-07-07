@@ -190,8 +190,15 @@ Recommended order; update newdev.md status board as these move:
         test target (first automated test; CTest `octree_roundtrip`).
         Bench: phase C 4.02s → 1.37s (2.9×) on Tikal-13.las at compressed
         preset settings. Pending: one live convert via the viewer Jobs panel.
-- `[ ]` 2. Multi-client roles (view-only role, second viewer PIN, webremote
-        read-only mode)
+- `[x]` 2. Multi-client roles (branch `multi-client-roles`): second
+        watch-only viewer PIN (regenerated per start, always != driver PIN),
+        role echoed in hello_ok, server silently drops move/cmd/set from
+        viewers (security boundary is the server, not the UI); stream/state/
+        cfg + /shot.png work for both roles; "Allow view-only clients"
+        preference (persisted) + both PINs in Preferences and the QR dialog;
+        webremote read-only mode (View-only badge, video+status only).
+        Live-verified: concurrent driver+viewer, forged viewer input ignored,
+        frames flowing to the viewer client.
 - `[ ]` 3. Camera path animation + MP4 export (CamPath keyframes over the
         bookmark pose struct; IMFSinkWriter; offline FBO render loop)
 - `[ ]` 4. Cross-section / slice export (forEachPointInBox bulk query; own

@@ -132,7 +132,7 @@ export default function App() {
     sendRef.current({ t: 'cmd', n: 'shot' });
   }, []);
 
-  const { status, lastState, send, submitPin } = useWebSocket({
+  const { status, lastState, role, send, submitPin } = useWebSocket({
     onCfg: applyServerCfg,
     onFrame: useCallback((blob: Blob) => {
       if (streamType === 'jpeg') videoLayerRef.current?.pushFrame(blob);
@@ -168,11 +168,15 @@ export default function App() {
     document.title = cfg?.version ? `ViitorXPC - v${cfg.version}` : 'ViitorXPC';
   }, [cfg?.version]);
 
+  // Watch-only role: server ignores move/cmd/set from this client anyway,
+  // but don't even offer the controls — video + status only.
+  const readOnly = role === 'viewer';
+
   const moveRef = useRef<MoveValues>({ ...ZERO_MOVE });
 
-  // 30 Hz move loop
+  // 30 Hz move loop (drivers only)
   useEffect(() => {
-    if (status !== 'connected') return;
+    if (status !== 'connected' || readOnly) return;
     moveRef.current = { ...ZERO_MOVE };
     let wasActive = false;
     const id = setInterval(() => {
@@ -189,7 +193,7 @@ export default function App() {
       wasActive = active;
     }, 33);
     return () => clearInterval(id);
-  }, [status, send]);
+  }, [status, send, readOnly]);
 
   // Request video stream when connected
   useEffect(() => {
@@ -241,11 +245,12 @@ export default function App() {
         onVideoQuality={setVideoQuality}
         streamAvailable={streamAvailable}
         onShot={requestShot}
+        readOnly={readOnly}
       />
 
       {/* ── Workspace ── */}
       <div className="workspace">
-        {/* Viewport: video + fly overlay */}
+        {/* Viewport: video + fly overlay (viewers get video only) */}
         <div className="viewport-area">
           <img
             src="/logo.svg"
@@ -253,40 +258,45 @@ export default function App() {
             className="viewport-watermark"
           />
           <VideoLayer ref={videoLayerRef} rtcStream={stream} type={streamType} />
-          <FlyTab
-            moveRef={moveRef}
-            lastState={lastState}
-            status={status}
-            measuring={cfg?.tool === 1}
-            send={send}
-            getVideoNaturalSize={() => videoLayerRef.current?.getNaturalSize() ?? null}
-          />
+          {!readOnly && (
+            <FlyTab
+              moveRef={moveRef}
+              lastState={lastState}
+              status={status}
+              measuring={cfg?.tool === 1}
+              send={send}
+              getVideoNaturalSize={() => videoLayerRef.current?.getNaturalSize() ?? null}
+            />
+          )}
+          {readOnly && <div className="viewer-banner">View-only</div>}
           <Legend cfg={cfg} />
         </div>
 
-        {/* Inspector: vertical icon rail + content */}
-        <div className="inspector">
-          <div className="inspector-icon-rail">
-            {INSPECTOR_TABS.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                type="button"
-                className={`inspector-tab${tab === id ? ' active' : ''}`}
-                onClick={() => setTab(id)}
-                title={label}
-              >
-                <Icon size={16} />
-                {label}
-              </button>
-            ))}
-          </div>
+        {/* Inspector: vertical icon rail + content (drivers only) */}
+        {!readOnly && (
+          <div className="inspector">
+            <div className="inspector-icon-rail">
+              {INSPECTOR_TABS.map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`inspector-tab${tab === id ? ' active' : ''}`}
+                  onClick={() => setTab(id)}
+                  title={label}
+                >
+                  <Icon size={16} />
+                  {label}
+                </button>
+              ))}
+            </div>
 
-          <div className="inspector-body">
-            {tab === 'display' && <DisplayTab cfg={cfg} setValue={setValue} streamType={streamType} />}
-            {tab === 'camera'  && <CameraTab cfg={cfg} setValue={setValue} send={send} />}
-            {tab === 'tools'   && <ToolsTab cfg={cfg} setValue={setValue} send={send} />}
+            <div className="inspector-body">
+              {tab === 'display' && <DisplayTab cfg={cfg} setValue={setValue} streamType={streamType} />}
+              {tab === 'camera'  && <CameraTab cfg={cfg} setValue={setValue} send={send} />}
+              {tab === 'tools'   && <ToolsTab cfg={cfg} setValue={setValue} send={send} />}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* ── Status Bar ── */}

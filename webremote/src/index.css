@@ -1315,6 +1315,24 @@ button.collapse-btn {
 }
 .recent-btn:hover { background: var(--panel-hover); color: var(--text); border-color: var(--border-strong); }
 
+/* Watch-only role badge over the video */
+.viewer-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: rgba(13, 15, 18, 0.75);
+  color: var(--text-2);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+  z-index: 5;
+}
+
 /* Camera bookmarks: goto button + delete beside it */
 .bookmark-row { display: flex; gap: 6px; align-items: stretch; margin-bottom: 6px; }
 .bookmark-row .recent-btn { flex: 1; margin: 0; }

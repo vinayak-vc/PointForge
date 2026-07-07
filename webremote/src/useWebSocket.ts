@@ -51,9 +51,13 @@ export interface UseWebSocketOptions {
   onShotReady?: () => void;
 }
 
+export type WsRole = 'driver' | 'viewer';
+
 export interface UseWebSocketResult {
   status: WsStatus;
   lastState: StateMsg | null;
+  /** Role granted by the server on hello_ok (viewer = watch-only). */
+  role: WsRole | null;
   send: (obj: unknown) => void;
   submitPin: (pin: string) => void;
 }
@@ -61,6 +65,7 @@ export interface UseWebSocketResult {
 export function useWebSocket(opts: UseWebSocketOptions = {}): UseWebSocketResult {
   const [status, setStatus] = useState<WsStatus>('connecting');
   const [lastState, setLastState] = useState<StateMsg | null>(null);
+  const [role, setRole] = useState<WsRole | null>(null);
 
   // Callbacks live in a ref so the connection effect never has to re-run
   // (and thus reconnect) just because a render produced new closures.
@@ -135,6 +140,7 @@ export function useWebSocket(opts: UseWebSocketOptions = {}): UseWebSocketResult
       }
       switch (msg.t) {
         case 'hello_ok':
+          setRole(((msg as { role?: string }).role === 'viewer') ? 'viewer' : 'driver');
           setStatusBoth('connected');
           break;
         case 'hello_bad':
@@ -224,5 +230,5 @@ export function useWebSocket(opts: UseWebSocketOptions = {}): UseWebSocketResult
     [setStatusBoth],
   );
 
-  return { status, lastState, send, submitPin };
+  return { status, lastState, role, send, submitPin };
 }
