@@ -7,7 +7,7 @@
 
 | Phase | Feature | Status | Notes |
 |---|---|---|---|
-| 1 | VXPC Core | PLANNED | Define extended Header and Directory structures |
+| 1 | VXPC Core | DONE | Defined extended Header and Directory structures |
 | 2 | Package Writer | PLANNED | Create, AddFile, AddMemory, Finalize |
 | 3 | Package Reader | PLANNED | Open, Validate, Contains, Read, GetOffset, GetSize |
 | 4 | Loader Integration | PLANNED | Transparent folder vs .vxpc fallback |
