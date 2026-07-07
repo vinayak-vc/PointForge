@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <memory>
 
 namespace pf {
 
@@ -121,6 +122,8 @@ private:
     bool                    hasColor_ = false;
 
     std::string             octreePath_;
+    uint64_t                octreePackageOffset_ = 0;
+    std::unique_ptr<class PackageReader> pkgReader_;
 
     // worker
     std::thread             worker_;

@@ -4328,16 +4328,18 @@ int main(int argc, char** argv) {
                         if (ImGui::SmallButton(pill)) showJobsPanel = true;
                         ImGui::SetItemTooltip("Click to open the Jobs panel");
                     }
+                    // Aggregates across every loaded cloud (status bar is
+                    // scene-wide; per-cloud numbers live in the Scene panel).
+                    double totalMB = 0;
+                    uint64_t totalPts = 0;
                     if (octreeLoaded) {
-                        double totalMB = 0;
-                        uint64_t totalPts = 0;
                         size_t totalPend = 0;
                         for (auto& s : scene) {
-                            totalMB += s.renderer.residentBytes() / 1048576.0;
-                            totalPts += s.store.meta().pointCount;
-                            totalPend += s.store.pendingRequests();
+                            totalMB += s.renderer->residentBytes() / 1048576.0;
+                            totalPts += s.store->meta().pointCount;
+                            totalPend += s.store->pendingRequests();
                         }
-                        
+
                         if (totalPend > 0) {
                             ImGui::SameLine(0, 18);
                             ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Loading %zu...", totalPend);
@@ -4356,9 +4358,9 @@ int main(int argc, char** argv) {
                     char stats[128];
                     if (octreeLoaded) {
                         snprintf(stats, sizeof(stats), "GPU %.0f MB   %s / %s pts   %.0f FPS   v" PF_VERSION_STRING,
-                                 activeRenderer().residentBytes() / 1048576.0,
+                                 totalMB,
                                  prettyCount(drawnPoints).c_str(),
-                                 prettyCount(activeStore().meta().pointCount).c_str(),
+                                 prettyCount(totalPts).c_str(),
                                  dt > 0 ? 1.0f / dt : 0.0f);
                     } else {
                         snprintf(stats, sizeof(stats), "%.0f FPS   v" PF_VERSION_STRING, dt > 0 ? 1.0f / dt : 0.0f);
