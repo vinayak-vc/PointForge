@@ -264,6 +264,7 @@ export default function App() {
               lastState={lastState}
               status={status}
               measuring={cfg?.tool === 1}
+              annotating={cfg?.tool === 3}
               send={send}
               getVideoNaturalSize={() => videoLayerRef.current?.getNaturalSize() ?? null}
             />

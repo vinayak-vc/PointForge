@@ -15,6 +15,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type Vec3 = [number, number, number];
 
+export type Annotation = {
+  p: Vec3;
+  label: string;
+};
+
 // Full cfg snapshot as broadcast by the server (assumed complete each time;
 // merged defensively so a partial broadcast would still work after the first).
 export type Cfg = {
@@ -37,13 +42,14 @@ export type Cfg = {
   stereo: boolean;
   eyeSep: number; // 0.01-0.2
   focalDist: number; // 1-100
-  tool: number; // 0 nav | 1 measure | 2 clip
+  tool: number; // 0 nav | 1 measure | 2 clip | 3 annotate
   clip: boolean;
   clipMin: Vec3;
   clipMax: Vec3;
   clipExt: number; // clip slider range is -clipExt..clipExt (0 = no cloud)
   measurePts: Vec3[];
   measureTotal: number;
+  annotations: Annotation[];
   ui: boolean;
   stats: boolean;
   fullscreen: boolean;

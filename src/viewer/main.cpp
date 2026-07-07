@@ -29,6 +29,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include "viewer/Camera.h"
 #include "viewer/CamPath.h"
 #include "viewer/Shader.h"
@@ -219,7 +221,7 @@ static void copyImageToClipboard(int w, int h, const unsigned char* rgbaTopDown)
 #endif
 
 // ---- UI helpers -------------------------------------------------------------
-enum ToolMode { TOOL_NAV = 0, TOOL_MEASURE = 1, TOOL_CLIP = 2 };
+enum ToolMode { TOOL_NAV = 0, TOOL_MEASURE = 1, TOOL_CLIP = 2, TOOL_ANNOTATE = 3 };
 
 static std::string baseName(const std::string& path) {
     size_t slash = path.find_last_of("/\\");
@@ -679,11 +681,19 @@ int main(int argc, char** argv) {
         SDL_free(bp);
     }
 
-    // ---- tools (Navigate / Measure / Clip) ---------------------------------
+    // ---- tools (Navigate / Measure / Clip / Annotate) ----------------------
     int toolMode = TOOL_NAV;
     std::vector<glm::dvec3> measurePts;   // picked vertices, world coords
     bool pendingPick = false;             // a click is waiting to be resolved this frame
     int  pickX = 0, pickY = 0;
+    bool pendingAnnotationPick = false;
+    int  annotationPickX = 0, annotationPickY = 0;
+    struct Annotation {
+        glm::dvec3 pos = glm::dvec3(0.0);
+        std::string label;
+        float color[3] = {1.0f, 0.30f, 0.12f};
+    };
+    std::map<std::string, std::vector<Annotation>> allAnnotations;
     auto measureTotal = [&]() -> double {
         double t = 0.0;
         for (size_t i = 1; i < measurePts.size(); ++i)
@@ -977,6 +987,80 @@ int main(int argc, char** argv) {
         pivot = glm::vec3(0.0f);
     };
 
+    auto annotationsPath = [&]() -> std::string {
+        std::string p = "annotations.json";
+        if (char* pref = SDL_GetPrefPath("ViitorX", "PointForge")) {
+            p = std::string(pref) + "annotations.json";
+            SDL_free(pref);
+        }
+        return p;
+    };
+    auto cleanAnnotationLabel = [](std::string label) -> std::string {
+        label.erase(std::remove_if(label.begin(), label.end(),
+                                   [](char c) { return c == '\n' || c == '\r' || c == '\t'; }),
+                    label.end());
+        if (label.size() > 96) label.resize(96);
+        return label;
+    };
+    auto loadAnnotations = [&]() {
+        allAnnotations.clear();
+        std::ifstream in(annotationsPath());
+        if (!in) return;
+        try {
+            nlohmann::json root = nlohmann::json::parse(in);
+            if (!root.is_object() || root.value("version", 0) != 1 || !root.contains("clouds")) return;
+            for (const nlohmann::json& cloud : root["clouds"]) {
+                if (!cloud.is_object()) continue;
+                const std::string dir = cloud.value("dir", "");
+                if (dir.empty() || !cloud.contains("items") || !cloud["items"].is_array()) continue;
+                std::vector<Annotation> items;
+                for (const nlohmann::json& item : cloud["items"]) {
+                    if (!item.is_object() || !item.contains("p") || !item["p"].is_array() || item["p"].size() < 3) continue;
+                    Annotation a;
+                    a.pos = glm::dvec3(item["p"][0].get<double>(), item["p"][1].get<double>(), item["p"][2].get<double>());
+                    a.label = cleanAnnotationLabel(item.value("label", ""));
+                    if (a.label.empty()) a.label = "Pin " + std::to_string(items.size() + 1);
+                    if (item.contains("color") && item["color"].is_array() && item["color"].size() >= 3) {
+                        for (int i = 0; i < 3; ++i) {
+                            if (item["color"][i].is_number()) a.color[i] = item["color"][i].get<float>();
+                        }
+                    }
+                    items.push_back(a);
+                }
+                if (!items.empty()) allAnnotations[dir] = std::move(items);
+            }
+        } catch (...) {
+            pf::logError("Could not read annotations.json");
+        }
+    };
+    auto saveAnnotations = [&]() {
+        nlohmann::json root;
+        root["version"] = 1;
+        root["clouds"] = nlohmann::json::array();
+        for (const auto& kv : allAnnotations) {
+            nlohmann::json cloud;
+            cloud["dir"] = kv.first;
+            cloud["items"] = nlohmann::json::array();
+            for (const Annotation& a : kv.second) {
+                cloud["items"].push_back({
+                    {"p", {a.pos.x, a.pos.y, a.pos.z}},
+                    {"label", cleanAnnotationLabel(a.label)},
+                    {"color", {a.color[0], a.color[1], a.color[2]}}
+                });
+            }
+            root["clouds"].push_back(std::move(cloud));
+        }
+        std::ofstream out(annotationsPath(), std::ios::trunc);
+        if (!out) return;
+        out << root.dump(2);
+    };
+    auto gotoAnnotation = [&](const Annotation& a) {
+        pivot = glm::vec3(a.pos - store.cubeCenter());
+        float dist = glm::length(cam.position - pivot);
+        if (dist < 1.0f) dist = 10.0f;
+        cam.position = pivot - cam.front() * dist;
+    };
+
     std::vector<std::shared_ptr<SliceExportJob>> sliceJobs;
     std::shared_ptr<SliceExportJob> pendingSlicePngJob;
     AABB pendingSlicePngBox;
@@ -1002,6 +1086,7 @@ int main(int argc, char** argv) {
     loadSettings();
     loadBookmarks();
     loadCamPaths();
+    loadAnnotations();
     uiScale = std::clamp(uiScale, 0.5f, 4.0f);
     applyUiScale(uiScale);
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
@@ -1474,6 +1559,8 @@ int main(int argc, char** argv) {
                 if (octreeLoaded && !ImGui::GetIO().WantCaptureMouse) {
                     if (toolMode == TOOL_MEASURE) {
                         pendingPick = true; pickX = e.button.x; pickY = e.button.y;
+                    } else if (toolMode == TOOL_ANNOTATE) {
+                        pendingAnnotationPick = true; annotationPickX = e.button.x; annotationPickY = e.button.y;
                     } else {
                         orbitDrag = true;                       // LMB drag = orbit
                         float dist = glm::length(cam.position - pivot);
@@ -1541,6 +1628,8 @@ int main(int argc, char** argv) {
                     frameAllReq = true;                         // 'F' = frame all
                 } else if (!typing && k == SDLK_m && octreeLoaded) {
                     toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                } else if (!typing && k == SDLK_a && octreeLoaded) {
+                    toolMode = (toolMode == TOOL_ANNOTATE) ? TOOL_NAV : TOOL_ANNOTATE;
                 } else if (!typing && k == SDLK_c && octreeLoaded) {
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 } else if (!typing && octreeLoaded && k == SDLK_1) {
@@ -1751,6 +1840,37 @@ int main(int argc, char** argv) {
                     pickX = (int)(std::clamp(rc.vec[0], 0.0f, 1.0f) * winW);
                     pickY = (int)(std::clamp(rc.vec[1], 0.0f, 1.0f) * winH);
                 }
+                else if (rc.name == "anno_tool" && octreeLoaded)
+                    toolMode = (toolMode == TOOL_ANNOTATE) ? TOOL_NAV : TOOL_ANNOTATE;
+                else if (rc.name == "anno_pick" && octreeLoaded && toolMode == TOOL_ANNOTATE && rc.hasVec) {
+                    pendingAnnotationPick = true;
+                    annotationPickX = (int)(std::clamp(rc.vec[0], 0.0f, 1.0f) * winW);
+                    annotationPickY = (int)(std::clamp(rc.vec[1], 0.0f, 1.0f) * winH);
+                }
+                else if (rc.name == "anno_label" && octreeLoaded) {
+                    std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                    int idx = (int)rc.value;
+                    if (idx >= 0 && idx < (int)annotations.size()) {
+                        std::string label = cleanAnnotationLabel(rc.text);
+                        if (!label.empty()) {
+                            annotations[idx].label = label;
+                            saveAnnotations();
+                        }
+                    }
+                }
+                else if (rc.name == "anno_del" && octreeLoaded) {
+                    std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                    int idx = (int)rc.value;
+                    if (idx >= 0 && idx < (int)annotations.size()) {
+                        annotations.erase(annotations.begin() + idx);
+                        saveAnnotations();
+                    }
+                }
+                else if (rc.name == "anno_goto" && octreeLoaded) {
+                    const std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                    int idx = (int)rc.value;
+                    if (idx >= 0 && idx < (int)annotations.size()) gotoAnnotation(annotations[idx]);
+                }
                 else if (rc.name == "clip_tool" && octreeLoaded)
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
@@ -1817,12 +1937,20 @@ int main(int argc, char** argv) {
                 rc.isOrtho = cam.isOrtho; rc.orthoSize = cam.orthoSize;
                 rc.camSpeed = camSpeedMultiplier;
                 rc.stereo = stereoSBS; rc.eyeSep = eyeSeparation; rc.focalDist = focalDistance;
-                rc.toolMode = (toolMode == TOOL_MEASURE) ? 1 : (toolMode == TOOL_CLIP) ? 2 : 0;
+                rc.toolMode = (toolMode == TOOL_MEASURE) ? 1 : (toolMode == TOOL_CLIP) ? 2 : (toolMode == TOOL_ANNOTATE) ? 3 : 0;
                 rc.clipEnabled = enableClipping;
                 rc.clipExt = octreeLoaded ? (float)store.cube(store.rootIndex()).size * 2.0f : 0.0f;
                 rc.measurePts.reserve(measurePts.size());
                 for (const auto& p : measurePts) rc.measurePts.push_back({p.x, p.y, p.z});
                 rc.measureTotal = measureTotal();
+                const std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                rc.annotations.reserve(annotations.size());
+                for (const Annotation& a : annotations) {
+                    RemoteAnnotation ra;
+                    ra.p = {a.pos.x, a.pos.y, a.pos.z};
+                    ra.label = a.label;
+                    rc.annotations.push_back(ra);
+                }
                 rc.uiVisible = showUI; rc.statsOverlay = showStatsOverlay;
                 rc.fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
                 rc.darkTheme = darkTheme;
@@ -2025,6 +2153,38 @@ int main(int argc, char** argv) {
                     glBindVertexArray(0);
                 }
 
+                const std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                if (!annotations.empty()) {
+                    std::vector<glm::vec3> leaderVerts;
+                    std::vector<glm::vec3> pointVerts;
+                    leaderVerts.reserve(annotations.size() * 2);
+                    pointVerts.reserve(annotations.size());
+                    double leader = std::max(0.10, store.meta().cubeSize * 0.01);
+                    for (const Annotation& a : annotations) {
+                        glm::vec3 p = glm::vec3(a.pos - center);
+                        leaderVerts.push_back(p);
+                        leaderVerts.push_back(p + glm::vec3(0.0f, 0.0f, (float)leader));
+                        pointVerts.push_back(p);
+                    }
+                    glBindVertexArray(lineVao);
+                    lineShader.use();
+                    lineShader.setMat4("uMVP", glm::value_ptr(vp));
+                    lineShader.setVec3("uColor", 1.0f, 0.30f, 0.12f);
+                    glDisable(GL_DEPTH_TEST);
+                    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+                    if (!leaderVerts.empty()) {
+                        glBufferData(GL_ARRAY_BUFFER, leaderVerts.size() * sizeof(glm::vec3), leaderVerts.data(), GL_DYNAMIC_DRAW);
+                        glLineWidth(2.0f);
+                        glDrawArrays(GL_LINES, 0, (GLsizei)leaderVerts.size());
+                    }
+                    if (!pointVerts.empty()) {
+                        glBufferData(GL_ARRAY_BUFFER, pointVerts.size() * sizeof(glm::vec3), pointVerts.data(), GL_DYNAMIC_DRAW);
+                        glDrawArrays(GL_POINTS, 0, (GLsizei)pointVerts.size());
+                    }
+                    glEnable(GL_DEPTH_TEST);
+                    glBindVertexArray(0);
+                }
+
                 cam.position = originalPos; // restore
             };
 
@@ -2064,6 +2224,25 @@ int main(int argc, char** argv) {
                 glm::dvec3 hit;
                 if (store.pickPoint(ro, rd, tolPerDist, hit)) {
                     measurePts.push_back(hit);   // append vertex to the polyline
+                }
+            }
+            if (pendingAnnotationPick) {
+                pendingAnnotationPick = false;
+                cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
+                glm::vec3 ro, rd;
+                cam.screenRay((float)annotationPickX, (float)annotationPickY, winW, winH, ro, rd);
+                double ssF = (winH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
+                double tolPerDist = (ssF > 0.0) ? (6.0 / ssF) : 0.01;
+                glm::dvec3 hit;
+                if (store.pickPoint(ro, rd, tolPerDist, hit)) {
+                    std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                    Annotation a;
+                    a.pos = hit;
+                    a.label = "Pin " + std::to_string(annotations.size() + 1);
+                    annotations.push_back(a);
+                    saveAnnotations();
+                    remoteCfgT = 1.0f;
+                    addToast("Annotation added: " + a.label);
                 }
             }
 
@@ -2429,8 +2608,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ---- measurement overlay (project polyline to screen) ---------------
-        if (octreeLoaded && !stereoSBS && (!measurePts.empty() || toolMode == TOOL_MEASURE)) {
+        // ---- measurement / annotation overlay (project to screen) -----------
+        const std::vector<Annotation>& overlayAnnotations = allAnnotations[loadedDir];
+        if (octreeLoaded && !stereoSBS &&
+            (!measurePts.empty() || !overlayAnnotations.empty() || toolMode == TOOL_MEASURE || toolMode == TOOL_ANNOTATE)) {
             cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
             glm::mat4 mvp = cam.viewProj();
             glm::dvec3 ctr = store.cubeCenter();
@@ -2451,6 +2632,7 @@ int main(int argc, char** argv) {
             ImDrawList* dl = ImGui::GetForegroundDrawList();
             const ImU32 cText = IM_COL32(255, 255, 255, 255);
             const ImU32 cSnap = IM_COL32(80, 200, 255, 255);
+            const ImU32 cAnno = IM_COL32(255, 106, 54, 255);
 
             ImVec2 prev;
             bool prevOk = false;
@@ -2464,8 +2646,16 @@ int main(int argc, char** argv) {
                 }
                 prev = s; prevOk = ok;
             }
+            for (size_t i = 0; i < overlayAnnotations.size(); ++i) {
+                ImVec2 s;
+                if (project(overlayAnnotations[i].pos, s)) {
+                    dl->AddCircleFilled(s, 5.0f, cAnno, 12);
+                    dl->AddCircle(s, 8.0f, IM_COL32(255, 255, 255, 200), 12, 1.5f);
+                    dl->AddText(ImVec2(s.x + 10.0f, s.y - 9.0f), cText, overlayAnnotations[i].label.c_str());
+                }
+            }
             // Snap preview: marker at the surface point under the cursor.
-            if (toolMode == TOOL_MEASURE && hoverValid) {
+            if ((toolMode == TOOL_MEASURE || toolMode == TOOL_ANNOTATE) && hoverValid) {
                 ImVec2 s;
                 if (project(hoverWorld, s)) dl->AddCircle(s, 7.0f, cSnap, 0, 2.0f);
             }
@@ -2636,6 +2826,8 @@ int main(int argc, char** argv) {
                     if (ImGui::MenuItem("Navigate", "Esc", toolMode == TOOL_NAV)) toolMode = TOOL_NAV;
                     if (ImGui::MenuItem("Measure", "M", toolMode == TOOL_MEASURE, octreeLoaded))
                         toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE;
+                    if (ImGui::MenuItem("Annotate", "A", toolMode == TOOL_ANNOTATE, octreeLoaded))
+                        toolMode = (toolMode == TOOL_ANNOTATE) ? TOOL_NAV : TOOL_ANNOTATE;
                     if (ImGui::MenuItem("Clip", "C", toolMode == TOOL_CLIP, octreeLoaded))
                         toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                     ImGui::Separator();
@@ -2715,6 +2907,7 @@ int main(int argc, char** argv) {
                 };
                 toolButton("Nav", TOOL_NAV, "Navigate (orbit/fly) — Esc");
                 toolButton("Measure", TOOL_MEASURE, "Measure distances: LMB picks points — M");
+                toolButton("Annotate", TOOL_ANNOTATE, "Place labelled pins: LMB picks points — A");
                 toolButton("Clip", TOOL_CLIP, "Clip box: adjust planes in Properties — C");
 
                 ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
@@ -2996,6 +3189,49 @@ int main(int argc, char** argv) {
                             ImGui::SetItemTooltip("Copy all points + total length to the clipboard.");
                             ImGui::SameLine();
                             if (ImGui::Button("Done")) toolMode = TOOL_NAV;
+                        }
+                    }
+
+                    if (toolMode == TOOL_ANNOTATE || !allAnnotations[loadedDir].empty()) {
+                        ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+                        if (ImGui::CollapsingHeader("Annotations")) {
+                            ImGui::TextWrapped("Click points in the viewport to place labelled pins.");
+                            std::vector<Annotation>& annotations = allAnnotations[loadedDir];
+                            int delIdx = -1;
+                            bool annotationsChanged = false;
+                            for (int i = 0; i < (int)annotations.size(); ++i) {
+                                ImGui::PushID(i);
+                                char labelBuf[128];
+                                snprintf(labelBuf, sizeof(labelBuf), "%s", annotations[i].label.c_str());
+                                ImGui::SetNextItemWidth(160.0f * S);
+                                if (ImGui::InputText("##label", labelBuf, sizeof(labelBuf))) {
+                                    std::string label = cleanAnnotationLabel(labelBuf);
+                                    if (!label.empty()) {
+                                        annotations[i].label = label;
+                                        annotationsChanged = true;
+                                    }
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("Go")) gotoAnnotation(annotations[i]);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("x")) delIdx = i;
+                                ImGui::TextDisabled("%.2f, %.2f, %.2f",
+                                                    annotations[i].pos.x, annotations[i].pos.y, annotations[i].pos.z);
+                                ImGui::PopID();
+                            }
+                            if (delIdx >= 0) {
+                                annotations.erase(annotations.begin() + delIdx);
+                                annotationsChanged = true;
+                            }
+                            if (annotationsChanged) {
+                                saveAnnotations();
+                                remoteCfgT = 1.0f;
+                            }
+                            if (toolMode != TOOL_ANNOTATE) {
+                                if (ImGui::Button("Add Pins")) toolMode = TOOL_ANNOTATE;
+                            } else {
+                                if (ImGui::Button("Done")) toolMode = TOOL_NAV;
+                            }
                         }
                     }
 
@@ -3833,6 +4069,7 @@ int main(int argc, char** argv) {
                 cmds.push_back({"View: Top", "7", [&] { if (octreeLoaded) camPresetTop(); }});
                 cmds.push_back({"Toggle Orthographic", "5", [&] { cam.isOrtho = !cam.isOrtho; }});
                 cmds.push_back({"Tool: Measure", "M", [&] { toolMode = (toolMode == TOOL_MEASURE) ? TOOL_NAV : TOOL_MEASURE; }});
+                cmds.push_back({"Tool: Annotate", "A", [&] { toolMode = (toolMode == TOOL_ANNOTATE) ? TOOL_NAV : TOOL_ANNOTATE; }});
                 cmds.push_back({"Tool: Clip", "C", [&] { toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP; }});
                 cmds.push_back({"Toggle Eye-Dome Lighting", "", [&] { enableEDL = !enableEDL; saveSettings(); }});
                 cmds.push_back({"Toggle Stereoscopic (SBS)", "F9", [&] { toggleStereo(); }});
@@ -3928,11 +4165,14 @@ int main(int argc, char** argv) {
                         const char* mode = mouseLook ? "Look"
                                          : (toolMode == TOOL_MEASURE) ? "Measure"
                                          : (toolMode == TOOL_CLIP) ? "Clip"
+                                         : (toolMode == TOOL_ANNOTATE) ? "Annotate"
                                          : (orbitDrag ? "Orbit" : "Nav");
                         ImGui::Text("%s", mode);
                         ImGui::SameLine(0, 12);
                         if (toolMode == TOOL_MEASURE)
                             ImGui::TextDisabled("LMB add point - Esc done");
+                        else if (toolMode == TOOL_ANNOTATE)
+                            ImGui::TextDisabled("LMB add pin - Esc done");
                         else if (toolMode == TOOL_CLIP)
                             ImGui::TextDisabled("Adjust planes in Properties - Esc done");
                         else

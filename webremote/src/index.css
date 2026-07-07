@@ -1361,6 +1361,44 @@ button.collapse-btn {
   gap: 3px;
 }
 
+.annotation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.annotation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.annotation-row .dim {
+  grid-column: 1 / -1;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.annotation-label-input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-1);
+  padding: 0 9px;
+  font: inherit;
+}
+
+.annotation-label-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* ================================================================
    Responsive
    ================================================================ */

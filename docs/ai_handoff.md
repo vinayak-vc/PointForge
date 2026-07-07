@@ -1,6 +1,64 @@
 # AI Handoff - PointForge (C++ repo)
 
-## Latest Session (2026-07-07, cont.) - Cross-section / slice export DONE (newdev.md #4, branch `cross-section-slice-export`)
+## Latest Session (2026-07-07, cont.) - Phone annotations DONE (newdev.md #5, branch `annotations-from-phone`)
+
+Task #5 is **DONE**. Implementation landed on `annotations-from-phone`, React
+and native builds pass, and CTest is green.
+
+### What was built
+- **Annotation model + persistence** (`src/viewer/main.cpp`): added
+  `Annotation { pos, label, color }` keyed by loaded cloud directory and saved
+  to AppData `annotations.json` (`version: 1`). Labels are sanitized for
+  tabs/newlines/length before save.
+- **Annotate tool mode**: added `TOOL_ANNOTATE = 3` to the native menu,
+  toolbar, command palette, status bar, local LMB picking, and Properties panel.
+  The Properties panel lists pins with rename/delete/goto and a mode toggle.
+- **Remote protocol** (`RemoteServer.{h,cpp}`): `RemoteCmd` now has `text`;
+  `RemoteConfig` publishes `annotations: [{p,label}]`. Commands added:
+  `anno_tool`, `anno_pick`, `anno_label` (`v=index,text=label`), `anno_del`,
+  and `anno_goto`.
+- **Point picking/rendering**: phone and local annotation picks reuse the same
+  `cam.screenRay` -> `store.pickPoint` path as measurement. Annotation pins
+  and leader marks are drawn as GL geometry in `renderPass`, so they appear in
+  JPEG/WebRTC video frames and captures. Full labels are PC ImGui overlay plus
+  phone/PC lists; GL text atlas remains future polish.
+- **Web Remote UI** (`webremote/src/*`): cfg type includes annotations;
+  `FlyTab` routes tap-to-pick to either measure or annotate based on `cfg.tool`;
+  Tools tab has an Annotations card with start/stop, inline rename, goto, and
+  delete.
+
+### Validation
+- `npm run build` from `webremote`
+- `cmake --build build-static --config Release --target pfview`
+- `ctest --test-dir build-static -C Release --output-on-failure`
+- Native build stamped `ViitorXPCViewer_v1023.exe`.
+
+### Modified files
+C:/UnrealProject/PointForge/src/viewer/main.cpp
+C:/UnrealProject/PointForge/src/viewer/RemoteServer.h
+C:/UnrealProject/PointForge/src/viewer/RemoteServer.cpp
+C:/UnrealProject/PointForge/webremote/src/App.tsx
+C:/UnrealProject/PointForge/webremote/src/FlyTab.tsx
+C:/UnrealProject/PointForge/webremote/src/ToolsTab.tsx
+C:/UnrealProject/PointForge/webremote/src/cfg.ts
+C:/UnrealProject/PointForge/webremote/src/index.css
+C:/UnrealProject/PointForge/docs/project-overview.md
+C:/UnrealProject/PointForge/docs/architecture.md
+C:/UnrealProject/PointForge/docs/roadmap.md
+C:/UnrealProject/PointForge/docs/tasks.md
+C:/UnrealProject/PointForge/docs/decisions.md
+C:/UnrealProject/PointForge/docs/newdev.md
+C:/UnrealProject/PointForge/docs/ai_handoff.md
+C:/UnrealProject/PointForge/VERSION
+
+### Next Recommended Task
+Physically smoke-test `build-static/Release/ViitorXPCViewer_v1023.exe` with a
+phone browser: connect as driver, open Tools > Annotations, tap the streamed
+video, rename, delete, restart the viewer, and confirm `annotations.json`
+persists labels for the loaded cloud. Then start newdev.md #6 multi-cloud
+scene on a new branch.
+
+## Previous Session (2026-07-07, cont.) - Cross-section / slice export DONE (newdev.md #4, branch `cross-section-slice-export`)
 
 Task #4 is **DONE**. Implementation landed, tests pass, and real-model
 DXF/CSV/PNG export was smoke-verified against

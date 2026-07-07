@@ -15,9 +15,15 @@ namespace pf {
 // dispatch table in main.cpp.
 struct RemoteCmd {
     std::string name;
+    std::string text;
     float       value  = 0.0f;
     float       vec[3] = {0, 0, 0};
     bool        hasVec = false;
+};
+
+struct RemoteAnnotation {
+    std::array<double,3> p = {0.0, 0.0, 0.0};
+    std::string label;
 };
 
 // Full viewer state pushed to clients as {"t":"cfg",...} — everything the
@@ -38,12 +44,13 @@ struct RemoteConfig {
     float camSpeed = 1;
     bool  stereo = false; float eyeSep = 0.05f, focalDist = 10;
     // tools
-    int   toolMode = 0;              // 0 nav, 1 measure, 2 clip
+    int   toolMode = 0;              // 0 nav, 1 measure, 2 clip, 3 annotate
     bool  clipEnabled = false;
     float clipMin[3] = {0,0,0}, clipMax[3] = {0,0,0};
     float clipExt = 0;               // slider range for clip planes
     std::vector<std::array<double,3>> measurePts;
     double measureTotal = 0;
+    std::vector<RemoteAnnotation> annotations;
     // ui
     bool uiVisible = true, statsOverlay = false, fullscreen = false, darkTheme = true;
     // files

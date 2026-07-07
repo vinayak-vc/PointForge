@@ -227,7 +227,7 @@ pinch zoom/pan) and a `matchMedia('(pointer: fine)')`-gated desktop path
 fly). Both write into the same `moveRef`/`heldState` the 30 Hz loop reads —
 neither path knows the other exists.
 
-**Remote measurement picking**: while the server's Measure tool is active,
+**Remote measurement / annotation picking**: while the server's Measure tool is active,
 tapping the video sends a `measure_pick` cmd carrying the tap's normalized
 (0..1) position *within the video content* (`VideoLayer.getNaturalSize()`
 inverts the `object-fit:contain` letterboxing client-side). The server maps
@@ -236,6 +236,15 @@ the same `pendingPick` → `cam.screenRay` → `store.pickPoint` path a local LM
 click already uses — no separate remote ray-casting implementation, and the
 video stream is guaranteed to share the local window's aspect ratio (it's a
 downscaled copy of the same rendered frame), so the mapping is exact.
+
+The Annotate tool (`toolMode == 3`) reuses that mapping with `anno_pick`.
+Successful picks create per-cloud `Annotation { pos, label, color }` entries
+with default labels `Pin N`, persisted in AppData `annotations.json` as
+versioned JSON. `RemoteConfig.annotations` broadcasts `{p,label}` to clients;
+`anno_label` carries `v=index,text=label`, and `anno_del` / `anno_goto` mutate
+the same list. Pins and leader marks are GL geometry inside `renderPass`, so
+the phone video stream sees them; full label text is currently PC ImGui overlay
+plus the phone/PC annotation lists.
 
 ## 9. Cross-section / slice export
 
