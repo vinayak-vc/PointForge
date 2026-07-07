@@ -615,6 +615,23 @@ bool buildOctree(const std::string& inputPath,
     if (isPackage && pkg) {
         pkg->AddCustomMeta("Generator", "PointForge 1.0");
         pkg->AddCustomMeta("Platform", "Windows");
+        
+        if (!opts.thumbnailPath.empty()) {
+            pkg->AddFile("thumbnail.jpg", opts.thumbnailPath);
+        } else {
+            // Generate synthetic 256x256 simple preview (checkerboard / bounding box visual)
+            std::vector<uint8_t> thumb(256 * 256 * 3);
+            for (int y = 0; y < 256; ++y) {
+                for (int x = 0; x < 256; ++x) {
+                    int i = (y * 256 + x) * 3;
+                    thumb[i+0] = (uint8_t)(x ^ y);
+                    thumb[i+1] = (uint8_t)((x * 2) ^ y);
+                    thumb[i+2] = (uint8_t)(255 - x);
+                }
+            }
+            pkg->AddMemory("thumbnail.raw", thumb.data(), thumb.size(), PackageWriter::Compression::ZSTD);
+        }
+
         if (!pkg->Finalize()) {
             logError("buildOctree: failed to finalize package");
             ok = false;
