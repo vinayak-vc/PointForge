@@ -40,10 +40,31 @@ its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
   in the "Save Project Data to Package" repack (now bookmarks + campath +
   measurements + annotations). pftest round-trips it incl. an escaped-quote
   label. Build + CTest green (v1043).
-- Planned next: 20 Documentation (rewrite docs/vxpc.md — stale 16-byte/var-name
-  spec vs actual 128-byte header / fixed-64 names + compression/CRC enums).
-  Phase 13 (HTTP range streaming) needs libcurl/WinHTTP — assess after.
-  Deferred (multi-month, per plan §"Long-Term"): 10, 14, 17, 18, 19.
+### Phase 20 — Documentation (branch `vxpc/documentation`) — DONE
+- Rewrote `docs/vxpc.md` as the authoritative v1 spec (128-byte header + 104-
+  byte entry field tables, compression/CRC/endianness rules, well-known entry
+  table, read/write/repack APIs, folder back-compat, versioning rules). Fixes
+  the stale 16-byte-header/variable-name draft. Doc-only, no build change.
+
+### VXPC run summary — where it stands
+- DONE this run (small to big, one branch each off the prior tip):
+  11 plugin-data -> 7 camera-data -> 8 measurements -> 9 annotations -> 20 docs.
+  Chain: vxpc/plugin-data -> vxpc/camera-data -> vxpc/measurements ->
+  vxpc/annotations -> vxpc/documentation (each contains all prior).
+- NOT merged to main — branches await PRs (multi-cloud #6 on vxpc/thumbnails is
+  also still unmerged; main tip = PR #9).
+- Remaining PLANNED, NOT started (a deliberate stop, not an omission):
+  - Phase 13 Streaming — HTTP range requests. Needs an HTTP client (WinHTTP is
+    OS-native and lighter than a libcurl/vcpkg dep) + a byte-range cache, and
+    it touches the streaming read path the June audit had to fix for crashes.
+    Next in line but a category jump in size/risk + a networking dependency —
+    flag for a go/no-go before building.
+  - Phases 10, 14, 17, 18, 19 — explicitly deferred by the plan as multi-month
+    architectural work; out of scope for this run.
+- Live-test gap for 7/8/9: the viewer File > "Save Project Data to Package"
+  action is code-verified + its repack path is pftest-proven end-to-end, but
+  the menu click itself (close->repack->reload of the loaded package on
+  Windows) hasn't been exercised against a running instance yet.
 
 ## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
 
