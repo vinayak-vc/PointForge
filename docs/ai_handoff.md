@@ -1,5 +1,26 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-08) - VXPC phases, small→big, branch-per-phase
+
+Implementing the remaining PLANNED VXPC phases (docs/vxpc_feature.md), each on
+its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
+"Long-Term / High Complexity" set (10 multi-cloud-package, 14 chunked octree,
+17 recovery, 18 encryption, 19 VFS-tree) is explicitly deferred — not this run.
+
+### Phase 11 — Plugin Data (branch `vxpc/plugin-data`) — DONE
+- `PackageWriter::AddPluginData(relPath,...)` → `plugins/<relPath>` (namespace
+  prefix forced on). `PackageReader::ListEntries(prefix)` + `ListPlugins()`.
+- `BeginFile` now rejects empty/≥64-char names (was silent truncation → alias
+  risk). Core-ignore is inherent (OctreeStore reads a fixed name set).
+- pftest `testPluginData`: both compression modes, listing/filter, CRC round-
+  trip, over-long-name rejection, core-ignore. Full build + CTest green (v1039).
+- Deferred: Unity `PF_Package_WritePluginData` C-API (pfunity doesn't link
+  PackageWriter yet).
+- Planned next, in order: 7 Camera Data (builds the repack helper), 8
+  Measurements, 9 Annotations, 20 Documentation (spec rewrite — docs/vxpc.md
+  is stale: 16-byte header/var names vs actual 128-byte/fixed-64). Phase 13
+  (HTTP range streaming) needs libcurl/WinHTTP — assess after.
+
 ## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
 
 Two-part session: (1) full audit of newdev.md features 1-6, (2) completion of

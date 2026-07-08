@@ -74,6 +74,15 @@ public:
     bool AddMemory(const std::string& filename, const void* data, size_t size, Compression comp = Compression::None);
     void AddCustomMeta(const std::string& key, const std::string& value);
 
+    // Phase 11: 3rd-party/plugin blobs. Stored under the reserved "plugins/"
+    // namespace (e.g. AddPluginData("acme/state.bin", ...) -> "plugins/acme/
+    // state.bin"). The core PointForge loader only reads a fixed set of names
+    // (meta.bin/hierarchy.bin/octree.bin/...) so it ignores everything here.
+    // relPath must not itself start with "plugins/" (it is prepended) and the
+    // final name must fit VXPCDirectoryEntry::filename (63 chars + NUL).
+    bool AddPluginData(const std::string& relPath, const void* data, size_t size,
+                       Compression comp = Compression::None);
+
     bool Finalize();
 
 private:
@@ -108,6 +117,13 @@ public:
     VXPCDirectoryEntry GetEntry(const std::string& name) const;
     uint64_t GetOffset(const std::string& name) const;
     uint64_t GetSize(const std::string& name) const;
+
+    // Phase 11: enumerate directory entries. With an empty prefix returns
+    // every filename; otherwise only names starting with `prefix`. Order
+    // matches the on-disk directory table.
+    std::vector<std::string> ListEntries(const std::string& prefix = "") const;
+    // Convenience: entries under the reserved "plugins/" namespace.
+    std::vector<std::string> ListPlugins() const { return ListEntries("plugins/"); }
 
 private:
     std::string path_;

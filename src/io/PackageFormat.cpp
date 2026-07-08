@@ -164,8 +164,16 @@ bool PackageWriter::WriteDirectory() {
 bool PackageWriter::BeginFile(const std::string& filename) {
     if (!valid_ || writingFile_) return false;
 
+    // The filename field is fixed at 64 bytes (63 usable + NUL). Silent
+    // truncation could alias two entries to the same stored name and corrupt
+    // lookups, so reject an over-long name outright.
+    if (filename.empty() || filename.size() >= sizeof(currentEntry_.filename)) {
+        logError("PackageWriter: filename too long or empty: " + filename);
+        return false;
+    }
+
     FILE* f = (FILE*)file_;
-    
+
     std::memset(&currentEntry_, 0, sizeof(currentEntry_));
     std::strncpy(currentEntry_.filename, filename.c_str(), sizeof(currentEntry_.filename) - 1);
     currentEntry_.filename[sizeof(currentEntry_.filename) - 1] = '\0';
@@ -265,6 +273,18 @@ bool PackageWriter::AddMemory(const std::string& filename, const void* data, siz
     }
     return EndFile();
 }
+bool PackageWriter::AddPluginData(const std::string& relPath, const void* data, size_t size, Compression comp) {
+    if (relPath.empty()) {
+        logError("PackageWriter: empty plugin path");
+        return false;
+    }
+    // Callers pass a vendor-relative path; the namespace prefix is ours to add
+    // so the "core ignores plugins/" contract can't be sidestepped by a caller
+    // that forgets (or fakes) the prefix.
+    std::string name = (relPath.rfind("plugins/", 0) == 0) ? relPath : "plugins/" + relPath;
+    return AddMemory(name, data, size, comp);
+}
+
 void PackageWriter::AddCustomMeta(const std::string& key, const std::string& value) {
     customMetadata_.push_back({key, value});
 }
@@ -365,6 +385,17 @@ uint64_t PackageReader::GetOffset(const std::string& name) const {
 
 uint64_t PackageReader::GetSize(const std::string& name) const {
     return GetEntry(name).originalSize;
+}
+
+std::vector<std::string> PackageReader::ListEntries(const std::string& prefix) const {
+    std::vector<std::string> names;
+    if (!valid_) return names;
+    for (const auto& entry : directory_) {
+        // filename is NUL-terminated within the fixed field (BeginFile enforces).
+        std::string name(entry.filename);
+        if (prefix.empty() || name.rfind(prefix, 0) == 0) names.push_back(std::move(name));
+    }
+    return names;
 }
 
 std::unique_ptr<PackageStream> PackageReader::OpenStream(const std::string& name) const {

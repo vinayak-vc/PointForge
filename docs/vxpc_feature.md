@@ -17,7 +17,7 @@
 | 8 | Measurements | PLANNED | Distance, Area, Volume, Polyline |
 | 9 | Annotations | PLANNED | Text, Image, Audio, Pins |
 | 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
-| 11 | Plugin Data | PLANNED | Namespaced arbitrary binary blobs |
+| 11 | Plugin Data | DONE | `plugins/` namespace via `AddPluginData`; reader `ListEntries`/`ListPlugins`; core ignores non-fixed names; over-long filename guard; pftest `testPluginData` |
 | 12 | Custom Metadata | DONE | PackageWriter supports dynamic Key/Value addition serialized as custom_meta.json |
 | 13 | Streaming Support | PLANNED | Range-request friendly layout |
 | 14 | Chunked Octree | PLANNED | Multi-chunk octree layout support |
@@ -95,12 +95,25 @@
   - Implementation: Move `annotations.json` into the `.vxpc` archive. 
   - Future expansion: Audio and Image attachments. `PackageWriter::AddFile("annotations/image_1.jpg", path)` can embed external files. `PackageReader` can stream these back into ImGui textures (`UTexture2D` in Unity).
 
-## Phase 11: Plugin Data
+## Phase 11: Plugin Data — DONE
 **Goal**: Ensure extensibility for 3rd party tools without breaking the core parser.
-- **Research & Implementation**: 
-  - Provide a `/plugins/<vendor>/` namespace convention in the directory entries.
-  - Expose a C-API `PF_Package_WritePluginData(pkg, "vendor/data.bin", buffer, size)` for native plugin DLLs (like Unity tools) to inject their own state.
-  - Core PointForge completely ignores files prefixed with `/plugins/`.
+- **Implemented**:
+  - `PackageWriter::AddPluginData(relPath, data, size, comp)` — prepends the
+    reserved `plugins/` namespace (idempotent if the caller already did), so
+    the "core ignores plugins/" contract can't be sidestepped.
+  - `PackageReader::ListEntries(prefix="")` enumerates directory filenames in
+    on-disk order; `ListPlugins()` = `ListEntries("plugins/")`.
+  - Core-ignore is inherent: `OctreeStore` reads only a fixed name set
+    (meta.bin/hierarchy.bin/octree.bin/…), so `plugins/*` is untouched — a
+    package carrying plugin blobs still loads. Asserted by pftest.
+  - Robustness: `BeginFile` now rejects empty / ≥64-char names (the filename
+    field is 64 bytes) instead of silently truncating and risking an alias.
+  - Tests: `pftest testPluginData` — write core + two plugin blobs (both
+    compression modes), reopen, assert listing/filtering, CRC-checked payload
+    round-trip, over-long-name rejection, and the core-ignore contract.
+- **Deferred follow-up**: the Unity/native `PF_Package_WritePluginData` C-API
+  binding — `pfunity` doesn't currently link `PackageWriter`; wire it when a
+  plugin actually needs write access. The pfcore API above is the foundation.
 
 ## Phase 13: Streaming Support
 **Goal**: Cloud-native access via HTTP Range Requests.

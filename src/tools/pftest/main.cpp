@@ -176,6 +176,70 @@ static void verifyStructure(const pf::OctreeStore& store, uint64_t inputPoints,
           "estimatePointsInBox is lower than exact boxed query");
 }
 
+// Phase 11: plugin-data namespace, entry listing, and the core-ignore
+// contract. Self-contained — builds a package by hand, no conversion.
+static void testPluginData(const std::string& work) {
+    const std::string pkgPath = work + "/plugin_test.vxpc";
+    const std::string core = "hello core payload";
+    const std::string blobA = "acme plugin state blob";
+    const std::vector<uint8_t> blobB = {1, 2, 3, 4, 5, 250, 128, 0, 99};
+
+    {
+        pf::PackageWriter w;
+        CHECK(w.Create(pkgPath), "plugin: PackageWriter::Create failed");
+        // A non-plugin entry (compressed) + two plugin blobs (one compressed).
+        CHECK(w.AddMemory("core.bin", core.data(), core.size(),
+                          pf::PackageWriter::Compression::ZSTD),
+              "plugin: AddMemory core failed");
+        CHECK(w.AddPluginData("acme/state.bin", blobA.data(), blobA.size(),
+                              pf::PackageWriter::Compression::ZSTD),
+              "plugin: AddPluginData acme failed");
+        CHECK(w.AddPluginData("umbrella/raw.bin", blobB.data(), blobB.size()),
+              "plugin: AddPluginData umbrella failed");
+        // Over-long names must be rejected, not silently truncated (64-byte field).
+        std::string tooLong(80, 'x');
+        CHECK(!w.AddMemory(tooLong, core.data(), core.size()),
+              "plugin: over-long filename was NOT rejected");
+        CHECK(w.Finalize(), "plugin: Finalize failed");
+    }
+
+    pf::PackageReader r;
+    CHECK(r.Open(pkgPath), "plugin: PackageReader::Open failed");
+
+    // Listing: all entries include core + both plugin blobs (order preserved).
+    auto all = r.ListEntries();
+    CHECK(all.size() == 3, "plugin: expected 3 entries");
+    // Plugin namespace filter.
+    auto plugins = r.ListPlugins();
+    CHECK(plugins.size() == 2, "plugin: expected 2 plugin entries");
+    bool sawAcme = false, sawUmbrella = false;
+    for (const auto& n : plugins) {
+        CHECK(n.rfind("plugins/", 0) == 0, "plugin: ListPlugins returned a non-plugins/ name");
+        if (n == "plugins/acme/state.bin") sawAcme = true;
+        if (n == "plugins/umbrella/raw.bin") sawUmbrella = true;
+    }
+    CHECK(sawAcme && sawUmbrella, "plugin: expected acme + umbrella plugin names");
+
+    // Round-trip payloads (both compression modes) via the CRC-checked Read().
+    auto gotA = r.Read("plugins/acme/state.bin");
+    CHECK(gotA.size() == blobA.size() &&
+          std::memcmp(gotA.data(), blobA.data(), blobA.size()) == 0,
+          "plugin: acme blob round-trip mismatch");
+    auto gotB = r.Read("plugins/umbrella/raw.bin");
+    CHECK(gotB.size() == blobB.size() &&
+          std::memcmp(gotB.data(), blobB.data(), blobB.size()) == 0,
+          "plugin: umbrella blob round-trip mismatch");
+
+    // Core-ignore contract: a non-plugin entry is still readable and is NOT
+    // reported under the plugins/ prefix.
+    auto gotCore = r.Read("core.bin");
+    CHECK(gotCore.size() == core.size(), "plugin: core.bin unreadable alongside plugin blobs");
+    for (const auto& n : plugins) CHECK(n != "core.bin", "plugin: core.bin leaked into plugin list");
+
+    std::error_code ec;
+    fs::remove(pkgPath, ec);
+}
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -197,6 +261,9 @@ int main(int argc, char** argv) {
     const std::string xyz = work + "/synthetic.xyz";
     const std::string seqFile = work + "/seq.vxpc";
     const std::string parFile = work + "/par.vxpc";
+
+    std::printf("pftest: [phase 11] plugin-data namespace + listing...\n");
+    testPluginData(work);
 
     std::printf("pftest: generating %llu synthetic points...\n", (unsigned long long)nPoints);
     if (!writeSyntheticXyz(xyz, nPoints)) {
