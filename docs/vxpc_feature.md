@@ -26,7 +26,7 @@
 | 17 | Recovery | PLANNED | Crash recovery, rollback, atomic saves |
 | 18 | Encryption | PLANNED | AES reserved flags |
 | 19 | Virtual File System | PLANNED | True VFS hierarchy (`/clouds/`, `/images/`, `/plugins/`) |
-| 20 | Documentation | PLANNED | Finalise `docs/vxpc.md` full spec |
+| 20 | Documentation | DONE | `docs/vxpc.md` rewritten as the authoritative v1 spec (128-byte header, 104-byte entry, compression/CRC/endianness, well-known entries, repack, back-compat) — matches the code, replaces the stale 16-byte-header draft |
 
 ---
 
@@ -164,11 +164,15 @@
   - Use `libcurl` or Windows HTTP APIs to fetch the last 4KB (to read the directory offset), then fetch the directory, then fulfill `PackageReader::Read(offset, size)` with HTTP `Range: bytes=offset-(offset+size-1)` requests.
   - Needs a caching layer to coalesce small byte reads.
 
-## Phase 20: Documentation
+## Phase 20: Documentation — DONE
 **Goal**: Formal specification.
-- **Research & Implementation**: 
-  - Create a formal RFC-style Markdown document for `.vxpc`.
-  - Document the magic bytes, versioning, compression enum maps, endianness (Little Endian), and memory alignment guarantees.
+- **Implemented**: `docs/vxpc.md` rewritten as the authoritative v1 spec —
+  file layout, the 128-byte header and 104-byte directory entry (field-by-field
+  offsets), compression enum (None/ZSTD + incompressible fallback, octree.bin
+  stored raw), CRC-32 over stored bytes, little-endian + fixed-size guarantees,
+  the well-known entry table (core + project sidecars + `plugins/`),
+  read/write/repack APIs, and folder back-compat. Corrects the earlier draft
+  (which described a 16-byte header with variable-length names).
 
 ---
 
