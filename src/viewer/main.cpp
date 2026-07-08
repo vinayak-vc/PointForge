@@ -39,6 +39,7 @@
 #include "viewer/Controller.h"
 #include "viewer/SerialController.h"
 #include "viewer/RemoteServer.h"
+#include "viewer/FileAssoc.h"
 #include "viewer/VideoExporter.h"
 #include "viewer/Nv12.h"
 #include "viewer/qrcodegen.hpp"
@@ -750,6 +751,9 @@ int main(int argc, char** argv) {
     // ---- loading (recent files / auto-load) -------------------------------
     std::vector<std::string> recentDirs;   // most-recent first, capped
     bool autoLoadLast = false;
+    // Double-clicking a .vxpc in Explorer opens this viewer. Refreshed each
+    // startup because the exe filename is version-stamped per build.
+    bool assocVxpc = true;
     auto addRecent = [&](const std::string& dir) {
         recentDirs.erase(std::remove(recentDirs.begin(), recentDirs.end(), dir), recentDirs.end());
         recentDirs.insert(recentDirs.begin(), dir);
@@ -805,6 +809,7 @@ int main(int argc, char** argv) {
         fprintf(f, "edlRadius=%f\n", edlRadius);
         fprintf(f, "qualityIdx=%d\n", qualityIdx);
         fprintf(f, "autoLoadLast=%d\n", (int)autoLoadLast);
+        fprintf(f, "assocVxpc=%d\n", (int)assocVxpc);
         fprintf(f, "padEnabled=%d\n", (int)padEnabled);
         fprintf(f, "padDeadzone=%f\n", pad.deadzone);
         fprintf(f, "padLookSens=%f\n", padLookSens);
@@ -857,6 +862,7 @@ int main(int argc, char** argv) {
             else if (sscanf(line, "edlRadius=%f", &f1) == 1) edlRadius = f1;
             else if (sscanf(line, "qualityIdx=%d", &i) == 1) qualityIdx = i;
             else if (sscanf(line, "autoLoadLast=%d", &i) == 1) autoLoadLast = (i != 0);
+            else if (sscanf(line, "assocVxpc=%d", &i) == 1) assocVxpc = (i != 0);
             else if (sscanf(line, "padEnabled=%d", &i) == 1) padEnabled = (i != 0);
             else if (sscanf(line, "padDeadzone=%f", &f1) == 1) pad.deadzone = f1;
             else if (sscanf(line, "padLookSens=%f", &f1) == 1) padLookSens = f1;
@@ -1260,6 +1266,11 @@ int main(int argc, char** argv) {
     if (serialEnabled) serial.start(serialMac, serialPort, serialAuto);
     remote.setAllowViewers(remoteAllowViewers);
     if (remoteEnabled && RemoteServer::available()) remote.start(remotePort, remoteWebRoot);
+    // Keep the .vxpc double-click association pointing at THIS build (the exe
+    // name is version-stamped, so yesterday's registration targets a file that
+    // no longer exists). No-op when already current, or when disabled.
+    if (assocVxpc && !pf::registerVxpcAssociation())
+        pf::logWarn("Could not register the .vxpc file association");
     if (stereoSBS) stereoHintT = 5.0f;   // booted straight into stereo -> show the exit hint
 
     auto setActiveCloud = [&](int index) {
@@ -1731,7 +1742,9 @@ int main(int argc, char** argv) {
         if (!sourceFile.empty()) {
             convInputs = {sourceFile};
             std::filesystem::path p(sourceFile);
-            convOutput = (p.parent_path() / (p.stem().string() + "_octree")).string();
+            // Default to a single-file .vxpc package (buildOctree writes the
+            // folder layout only when the path lacks the .vxpc extension).
+            convOutput = (p.parent_path() / (p.stem().string() + ".vxpc")).string();
         }
         showConvertDialog = true;
     };
@@ -1751,15 +1764,33 @@ int main(int argc, char** argv) {
         if (!folder.empty()) loadOctree(folder);
     };
 
+    // Ensure the output is a single-file .vxpc package. buildOctree writes the
+    // legacy loose-folder layout when the path lacks the .vxpc extension, so the
+    // viewer (which took a folder-style path) always produced folders. If the
+    // path is a directory (e.g. picked via Browse), drop <stem>.vxpc inside it.
+    auto ensureVxpcPath = [](std::string out, const std::string& stem) -> std::string {
+        auto ends = [](const std::string& s, const char* suf) {
+            const size_t n = std::strlen(suf);
+            return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+        };
+        if (ends(out, ".vxpc")) return out;
+        std::error_code ec;
+        const bool isDir = std::filesystem::is_directory(out, ec) ||
+                           (!out.empty() && (out.back() == '/' || out.back() == '\\'));
+        if (isDir) return (std::filesystem::path(out) / (stem + ".vxpc")).string();
+        return out + ".vxpc";
+    };
+
     auto enqueueConvert = [&]() {
         if (convInputs.empty() || convOutput.empty()) return;
         if (convInputs.size() == 1) {
-            jobs.enqueue(convInputs[0], convOutput, customOpts, convLoadWhenDone);
+            std::string out = ensureVxpcPath(convOutput, std::filesystem::path(convInputs[0]).stem().string());
+            jobs.enqueue(convInputs[0], out, customOpts, convLoadWhenDone);
             addToast("Queued: " + baseName(convInputs[0]));
         } else {
             for (const auto& in : convInputs) {
                 std::filesystem::path p(in);
-                std::string out = (std::filesystem::path(convOutput) / (p.stem().string() + "_octree")).string();
+                std::string out = (std::filesystem::path(convOutput) / (p.stem().string() + ".vxpc")).string();
                 jobs.enqueue(in, out, customOpts, /*loadWhenDone=*/false);
             }
             addToast("Queued " + std::to_string(convInputs.size()) + " conversions");
@@ -1854,8 +1885,8 @@ int main(int argc, char** argv) {
                 std::string dropFile = e.drop.file;
                 SDL_free(e.drop.file);
                 std::error_code ec;
-                if (std::filesystem::is_directory(dropFile, ec)) {
-                    loadOctree(dropFile);           // converted octree -> open it
+                if (std::filesystem::is_directory(dropFile, ec) || isVxpc(dropFile)) {
+                    loadOctree(dropFile);           // converted octree/package -> open it
                 } else if (std::filesystem::is_regular_file(dropFile, ec)) {
                     openConvertDialog(dropFile);    // raw scan -> Convert, pre-filled
                 }
@@ -2604,6 +2635,12 @@ int main(int argc, char** argv) {
                     addToast("Annotation added: " + a.label);
                 }
             }
+            // Composite the offscreen scene (edlFbo) onto the WINDOW backbuffer.
+            // The scene was rendered into edlFbo (bound at the top of this
+            // block); this pass — and ImGui afterwards — must target the default
+            // framebuffer, or the whole window stays black (regression fix).
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, winW, winH);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glDisable(GL_DEPTH_TEST);
             edlShader.use();
@@ -2876,7 +2913,14 @@ int main(int argc, char** argv) {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, streamFbo);
             glBlitFramebuffer(0, 0, winW, winH, 0, 0, sw, sh,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
-                        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            // Read the downscaled frame back into streamPixels BEFORE publishing
+            // — the refactor dropped this, leaving publishFrame reading an empty
+            // buffer (out-of-bounds -> crash when a remote client subscribed).
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, streamFbo);
+            streamPixels.resize((size_t)sw * sh * 3);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, streamPixels.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
             remote.publishFrame(streamPixels.data(), sw, sh);
         }
 
@@ -4188,6 +4232,20 @@ int main(int argc, char** argv) {
                                 settingsChanged = true;
                             }
                             if (ImGui::Checkbox("Auto-load last cloud on startup", &autoLoadLast)) settingsChanged = true;
+#ifdef _WIN32
+                            if (ImGui::Checkbox("Open .vxpc files with this viewer", &assocVxpc)) {
+                                if (assocVxpc) {
+                                    if (!pf::registerVxpcAssociation())
+                                        addToast("Could not register the .vxpc association", "", true);
+                                } else {
+                                    pf::unregisterVxpcAssociation();
+                                }
+                                settingsChanged = true;
+                            }
+                            ImGui::SetItemTooltip("Registers a per-user Explorer association so double-clicking\n"
+                                                  "a .vxpc opens it here. Re-checked on every startup, so it\n"
+                                                  "always points at the newest installed build.");
+#endif
                             if (ImGui::Button("Clear recent files")) { recentDirs.clear(); settingsChanged = true; }
                             ImGui::EndTabItem();
                         }
