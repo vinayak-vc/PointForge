@@ -1088,6 +1088,15 @@ void RemoteServer::publishConfig(const RemoteConfig& c) {
         });
     }
     j["annotations"] = std::move(ap);
+    json cl = json::array();
+    for (const RemoteConfig::Cloud& sc : c.clouds) {
+        cl.push_back({
+            {"name", sc.name},
+            {"pts", sc.pts},
+            {"visible", sc.visible}
+        });
+    }
+    j["clouds"] = std::move(cl);
 
     const std::string msg = j.dump();
     std::lock_guard<std::mutex> g(impl_->clMx);

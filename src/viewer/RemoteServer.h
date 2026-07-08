@@ -73,6 +73,11 @@ struct RemoteConfig {
     int   pathKeys = 0;              // keyframe count (>=2 -> playable)
     float pathDuration = 0;          // seconds
     bool  pathPlaying = false;       // preview currently running
+    // multi-cloud scene: one row per resident cloud (mirrors the Scene
+    // panel). Phone toggles visibility via
+    // {"t":"cmd","n":"cloud_vis","v":[index,on,0]}; open/close stay PC-side.
+    struct Cloud { std::string name; uint64_t pts = 0; bool visible = true; };
+    std::vector<Cloud> clouds;
 };
 
 struct RemoteServerImpl;   // defined in RemoteServer.cpp (civetweb kept out of headers)

@@ -57,7 +57,8 @@
   annotations/segments/streams as child items — deliberately deferred until
   `OctreeStore`/`PointRenderer` support more than one resident cloud, so it
   ships once instead of being bolted on twice (see `architecture.md` §7).
-  *(planned — newdev.md #6, scheduled last)*
+  *(**done** — newdev.md #6: SceneCloud vector + Scene panel + remote
+  `clouds`/`cloud_vis`; live two-cloud acceptance walk still pending)*
 - **Point/measurement tool suite growth**: area, angle, profile tools alongside
   the existing distance measure, using the same tool-mode + Properties-section
   pattern (toolbar mode button + docked options, never a modal).

@@ -1,5 +1,191 @@
-## Previous Session (2026-07-07) - Multi-Cloud Scene Refactor
+# AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-08) - VXPC phases, small→big, branch-per-phase
+
+Implementing the remaining PLANNED VXPC phases (docs/vxpc_feature.md), each on
+its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
+"Long-Term / High Complexity" set (10 multi-cloud-package, 14 chunked octree,
+17 recovery, 18 encryption, 19 VFS-tree) is explicitly deferred — not this run.
+
+### Phase 11 — Plugin Data (branch `vxpc/plugin-data`) — DONE
+- `PackageWriter::AddPluginData(relPath,...)` → `plugins/<relPath>` (namespace
+  prefix forced on). `PackageReader::ListEntries(prefix)` + `ListPlugins()`.
+- `BeginFile` now rejects empty/≥64-char names (was silent truncation → alias
+  risk). Core-ignore is inherent (OctreeStore reads a fixed name set).
+- pftest `testPluginData`: both compression modes, listing/filter, CRC round-
+  trip, over-long-name rejection, core-ignore. Full build + CTest green (v1039).
+- Deferred: Unity `PF_Package_WritePluginData` C-API (pfunity doesn't link
+  PackageWriter yet).
+### Phase 7 — Camera Data (branch `vxpc/camera-data`) — DONE
+- Built the shared **repack** primitive `pf::RepackPackage(path, upserts,
+  removals)`: `PackageReader::ReadRaw` + `PackageWriter::AddRawEntry` copy
+  entries verbatim (octree.bin byte-identical), upserts ZSTD-compressed,
+  tmp+atomic-rename. `InheritHeader` keeps uuid/created/converter fields.
+- Camera data → `bookmarks.json` / `campaths.json` (nlohmann). Viewer File >
+  "Save Camera Data to Package" (close active cloud → repack → reload → restore
+  pose, since the store holds octree.bin open). Load-on-open makes package data
+  authoritative for that cloud.
+- pftest `testRepack` (verbatim copy + round-trip + upsert-replace + removal);
+  live: real Tikal-13 .vxpc loads through the new hook and still exports video
+  (v1041). Full build + CTest green.
+### Phase 8 — Measurements (branch `vxpc/measurements`) — DONE
+- `measurements.json` (polyline schema) written via RepackPackage. File menu
+  action renamed "Save Project Data to Package" (bookmarks + campath +
+  measurements in one repack). Loaded on open only for the first cloud
+  (measurePts is scene-global). pftest round-trips measurements.json.
+  Build + CTest green (v1042).
+### Phase 9 — Annotations (branch `vxpc/annotations`) — DONE
+- Per-cloud package `annotations.json` ({version, annotations:[{p,label,color}]},
+  distinct from the multi-cloud AppData file). Authoritative on open; written
+  in the "Save Project Data to Package" repack (now bookmarks + campath +
+  measurements + annotations). pftest round-trips it incl. an escaped-quote
+  label. Build + CTest green (v1043).
+### Phase 20 — Documentation (branch `vxpc/documentation`) — DONE
+- Rewrote `docs/vxpc.md` as the authoritative v1 spec (128-byte header + 104-
+  byte entry field tables, compression/CRC/endianness rules, well-known entry
+  table, read/write/repack APIs, folder back-compat, versioning rules). Fixes
+  the stale 16-byte-header/variable-name draft. Doc-only, no build change.
+
+### Phase 13 — Streaming (branch `vxpc/streaming`) — DONE (reader level)
+- `ByteSource` abstraction behind `PackageReader`: `FileByteSource` +
+  `HttpByteSource` (WinHTTP, OS-native — no vcpkg dep, `#pragma comment(lib)`).
+  `Open` routes by URL scheme; Read/ReadRaw/ListEntries/OpenStream all work
+  over either. 64 KiB block LRU cache; a miss fetches the covering span in one
+  ranged GET and serves directly (correct for spans > cache). OpenStream is now
+  a source-agnostic MemoryStream (old file-stream was unused + mishandled
+  compressed entries).
+- pftest `testHttpStreaming`: WinSock loopback Range server serves the real
+  `.vxpc`; open over http://127.0.0.1, assert directory count, meta.bin
+  decompress+CRC over a ranged read, octree.bin raw byte-match. Full build +
+  CTest green (v1044).
+- **Behaviour change:** `PackageReader` now holds its source open for its
+  lifetime (was per-call fopen). Anything renaming/repacking a file must close
+  readers on it first — `RepackPackage` + the viewer save path already do; this
+  surfaced as a pftest handle-scope fix (product code was fine).
+- **Deferred follow-up (within 13):** streaming the octree PAYLOAD over HTTP in
+  the viewer (remote cloud load end-to-end). Reader supports URL range reads;
+  routing `OctreeStore`'s streaming worker through a `ByteSource` is the
+  remaining work — left out to avoid touching the crash-sensitive path.
+
+### Phase 10 — Multi-cloud package (branch `vxpc/multi-cloud`) — DONE (packaging)
+- N clouds in one `.vxpc` under `clouds/<i>/` + top-level `scene.json` manifest.
+  Chose PACKAGING (copy already-converted single-cloud `.vxpc` verbatim under a
+  namespace) over the doc's re-index-time root-merging (that's the multi-month
+  part; still deferred).
+- pfcore: `combineClouds(outPath, sources)` (ReadRaw/AddRawEntry verbatim copy +
+  scene.json); `OctreeStore::load(dir, prefix)` reads a namespaced sub-cloud
+  (empty prefix = single-cloud, backward compatible). CLI: `pfconvert --combine
+  --out scene.vxpc a.vxpc b.vxpc …`.
+- viewer: `loadOctree` detects `scene.json` and adds every member as a
+  SceneCloud (reuses #6 scene machinery). `SceneCloud` gained `name` + `pkgPrefix`;
+  Scene panel + remote cfg use `name`. Save-project-data guarded off for
+  multi-cloud members (per-cloud sidecar save is a follow-up).
+- Tests: pftest `testMultiCloudPackage` (combine 2 → reopen → namespaced load +
+  full verifyStructure per cloud). Live: two real Tikal `.vxpc` combined
+  (584 MB), viewer loaded BOTH (2× "loaded 1024 nodes, 12.4M pts") + exported
+  video. Full build v1045 + CTest green.
+- Deferred within 10: index-time octree merging into one root; per-cloud
+  sidecar save into a multi-cloud package.
+
+### VXPC run summary — where it stands
+- DONE this run (small to big, one branch each off the prior tip):
+  11 plugin-data -> 7 camera-data -> 8 measurements -> 9 annotations ->
+  20 docs -> 13 streaming -> 10 multi-cloud.
+  Chain: vxpc/plugin-data -> vxpc/camera-data -> vxpc/measurements ->
+  vxpc/annotations -> vxpc/documentation -> vxpc/streaming -> vxpc/multi-cloud
+  (each contains all prior). PRs #18–#23 opened for 11/7/8/9/20/13 (stacked);
+  Phase 10 PR to follow.
+- NOT merged to main — branches await PRs (multi-cloud SCENE #6 on
+  vxpc/thumbnails is also still unmerged; main tip = PR #9).
+- Remaining, explicitly deferred as multi-month architectural work (out of
+  scope): 14 (chunked octree), 17 (recovery/atomic saves), 18 (encryption),
+  19 (hierarchical VFS). Phase 10 landed via the packaging approach; index-time
+  octree merging (the doc's original framing) stays deferred. Every other VXPC
+  phase is now DONE.
+- Live-test gap for 7/8/9: the viewer File > "Save Project Data to Package"
+  action is code-verified + its repack path is pftest-proven end-to-end, but
+  the menu click itself (close->repack->reload of the loaded package on
+  Windows) hasn't been exercised against a running instance yet.
+
+## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
+
+Two-part session: (1) full audit of newdev.md features 1-6, (2) completion of
+#6's remaining items. All six medium features are now **DONE**. Work landed on
+`vxpc/thumbnails` (the branch the working tree was on — it contains the full
+multi-cloud lineage; see repo-state note below).
+
+### Audit results (features 1-6)
+- #1/#2/#3/#4/#5 confirmed done. Gating re-verified: RemoteServer.cpp:748
+  blocks all move/cmd/set from viewer-role clients BEFORE parsing, so every
+  cmd added since (#3 path_*, #5 anno_*, #6 cloud_vis) inherits it.
+- Tests: CTest `octree_roundtrip` green (covers #1 byte-identity + #4
+  forEachPointInBox bounds/count/estimate assertions). #2/#3/#5 live-smoke
+  verified only; no automated coverage.
+- Bugs found and FIXED (details in decisions.md "Multi-Cloud Completion +
+  Audit Round"): 1d68eaf didn't compile (unique_ptr `.` access) + its
+  aggregated status-bar stats were never displayed; CSV slice export lost
+  precision (6 sig digits ≈ 10 m on georeferenced coords → setprecision 15);
+  four scene-space mixups (currentSliceBox, slice-PNG framing, gotoAnnotation,
+  measure/anno label projection used activeStore().cubeCenter() where
+  sceneOrigin is required — wrong whenever active cloud ≠ first); OctreeStore
+  C2027 (unique_ptr<PackageReader> member without a declared ctor).
+
+### #6 completed this session
+- Scene panel already existed (docs were stale — checked its rows: visibility,
+  active-select, close, add all present); copy cleaned up.
+- NEW: remote surface — `RemoteConfig::Cloud` + `clouds:[{name,pts,visible}]`
+  in publishConfig; `cloud_vis` cmd (`v=[index,on,0]`, bounds-checked) in
+  main.cpp; webremote `cfg.ts` `SceneCloud`/`clouds` + ToolsTab "Scene" card
+  (Toggle per cloud, rendered only when 2+ clouds).
+- newdev.md #6 checkboxes + status board DONE; tasks/roadmap/decisions synced.
+
+### Validation
+- `npm run build` clean; pfview+pftest clean build (`ViitorXPCViewer_v1038.exe`);
+  CTest pass; `--export-video` smoke on Tikal-13 → ffprobe-verified 121-frame
+  1080p30 H.264 (also proves the #6 refactor didn't break the #3 pipeline).
+- **NOT done: live two-cloud acceptance walk** (fly between two real scans,
+  toggle visibility, cross-cloud measure) — no second converted scan staged.
+  Run it before merging: convert a second .las, File > Open it on top of the
+  first, walk newdev.md #6's acceptance list, and check the phone Scene card.
+
+### Repo-state warning
+Mid-audit, a PARALLEL session switched this working tree from
+`multi-cloud-scene` to `vxpc/thumbnails` and committed VXPC package-format
+work (04a5168..34c614e) — 04a5168 absorbed this audit's first two fixes.
+`multi-cloud-scene`'s tip (1d68eaf) is still the non-compiling version; #4/#5
+branches are unmerged to main (main tip = PR #9). Branch cleanup + PRs needed.
+
+### Next Recommended Task
+Live two-cloud acceptance walk (above), then raise PRs: the multi-cloud/#6
+work (this branch or a clean cherry-pick back onto `multi-cloud-scene`) and
+the unmerged #4/#5 branches, in dependency order 4 → 5 → 6.
+
+## Previous Session (2026-07-07) - VXPC Phases 5, 12, 15 (Thumbnails, Custom Meta, ZSTD)
+
+### What was built
+- **ZSTD Payload Compression** (Phase 15): Embedded ZSTD payload compression natively into `PackageWriter::AddMemory`. Modified `PackageReader::Read` to detect compressed entries and decompress on the fly.
+- **Custom Metadata** (Phase 12): Added `PackageWriter::AddCustomMeta` API. It serializes a dynamically populated key/value list to `custom_meta.json` during the `Finalize()` step.
+- **Thumbnails** (Phase 5): The `pfconvert` CLI now accepts a `--thumbnail <path>` argument. If omitted, `OctreeIndexer` generates a synthetic 256x256 RGB projection and embeds it into the package as `thumbnail.raw`.
+
+### Validation
+- Compiled `pfcore.lib` and `pftest.exe`.
+- Successfully ran `pftest.exe`, passing sequential and parallel tests, validating CRC32 hashes on compressed payload sizes, and deserializing the custom metadata payloads.
+
+### Modified files
+- `docs/tasks.md`
+- `docs/vxpc_feature.md`
+- `docs/decisions.md`
+- `src/io/PackageFormat.h`
+- `src/io/PackageFormat.cpp`
+- `src/indexer/OctreeIndexer.h`
+- `src/indexer/OctreeIndexer.cpp`
+- `src/indexer/MetadataWriter.cpp`
+- `src/tools/pfconvert/main.cpp`
+
+### Next Recommended Task
+- Move on to Phase 14 (Chunked Octree) or Phase 13 (Streaming Support) from the `.vxpc` roadmap.
+
+## Previous Session (2026-07-07) - Multi-Cloud Scene Refactor
 ### What was built / Fixed
 - **Multi-Cloud Scene Architecture**: Transitioned the global `OctreeStore` and `PointRenderer` instances in `main.cpp` into a `std::vector<SceneCloud> scene` to support loading and rendering multiple point clouds simultaneously.
 - **Render & Interaction Loop Updates**: The `renderPass` now iterates through all `SceneCloud` objects. Picking, cursor hover (`worldUnderCursor`), camera focus, and `frameAll` logic were updated to handle multiple point clouds relative to a shared scene origin (the first loaded cloud's center).

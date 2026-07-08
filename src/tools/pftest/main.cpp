@@ -28,7 +28,15 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#include <algorithm>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -176,6 +184,300 @@ static void verifyStructure(const pf::OctreeStore& store, uint64_t inputPoints,
           "estimatePointsInBox is lower than exact boxed query");
 }
 
+// Phase 11: plugin-data namespace, entry listing, and the core-ignore
+// contract. Self-contained — builds a package by hand, no conversion.
+static void testPluginData(const std::string& work) {
+    const std::string pkgPath = work + "/plugin_test.vxpc";
+    const std::string core = "hello core payload";
+    const std::string blobA = "acme plugin state blob";
+    const std::vector<uint8_t> blobB = {1, 2, 3, 4, 5, 250, 128, 0, 99};
+
+    {
+        pf::PackageWriter w;
+        CHECK(w.Create(pkgPath), "plugin: PackageWriter::Create failed");
+        // A non-plugin entry (compressed) + two plugin blobs (one compressed).
+        CHECK(w.AddMemory("core.bin", core.data(), core.size(),
+                          pf::PackageWriter::Compression::ZSTD),
+              "plugin: AddMemory core failed");
+        CHECK(w.AddPluginData("acme/state.bin", blobA.data(), blobA.size(),
+                              pf::PackageWriter::Compression::ZSTD),
+              "plugin: AddPluginData acme failed");
+        CHECK(w.AddPluginData("umbrella/raw.bin", blobB.data(), blobB.size()),
+              "plugin: AddPluginData umbrella failed");
+        // Over-long names must be rejected, not silently truncated (64-byte field).
+        std::string tooLong(80, 'x');
+        CHECK(!w.AddMemory(tooLong, core.data(), core.size()),
+              "plugin: over-long filename was NOT rejected");
+        CHECK(w.Finalize(), "plugin: Finalize failed");
+    }
+
+    pf::PackageReader r;
+    CHECK(r.Open(pkgPath), "plugin: PackageReader::Open failed");
+
+    // Listing: all entries include core + both plugin blobs (order preserved).
+    auto all = r.ListEntries();
+    CHECK(all.size() == 3, "plugin: expected 3 entries");
+    // Plugin namespace filter.
+    auto plugins = r.ListPlugins();
+    CHECK(plugins.size() == 2, "plugin: expected 2 plugin entries");
+    bool sawAcme = false, sawUmbrella = false;
+    for (const auto& n : plugins) {
+        CHECK(n.rfind("plugins/", 0) == 0, "plugin: ListPlugins returned a non-plugins/ name");
+        if (n == "plugins/acme/state.bin") sawAcme = true;
+        if (n == "plugins/umbrella/raw.bin") sawUmbrella = true;
+    }
+    CHECK(sawAcme && sawUmbrella, "plugin: expected acme + umbrella plugin names");
+
+    // Round-trip payloads (both compression modes) via the CRC-checked Read().
+    auto gotA = r.Read("plugins/acme/state.bin");
+    CHECK(gotA.size() == blobA.size() &&
+          std::memcmp(gotA.data(), blobA.data(), blobA.size()) == 0,
+          "plugin: acme blob round-trip mismatch");
+    auto gotB = r.Read("plugins/umbrella/raw.bin");
+    CHECK(gotB.size() == blobB.size() &&
+          std::memcmp(gotB.data(), blobB.data(), blobB.size()) == 0,
+          "plugin: umbrella blob round-trip mismatch");
+
+    // Core-ignore contract: a non-plugin entry is still readable and is NOT
+    // reported under the plugins/ prefix.
+    auto gotCore = r.Read("core.bin");
+    CHECK(gotCore.size() == core.size(), "plugin: core.bin unreadable alongside plugin blobs");
+    for (const auto& n : plugins) CHECK(n != "core.bin", "plugin: core.bin leaked into plugin list");
+
+    std::error_code ec;
+    fs::remove(pkgPath, ec);
+}
+
+// Phase 7: RepackPackage — verbatim copy of existing entries (octree.bin must
+// be byte-identical, not re-(de)compressed) + add/replace/remove of small
+// JSON entries. `pkgPath` is a real converted package; its store must already
+// be closed (Windows can't rename over an open file).
+static void testRepack(const std::string& pkgPath) {
+    std::vector<uint8_t> octreeBefore;
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "repack: pre-open failed");
+        pf::VXPCDirectoryEntry e;
+        octreeBefore = r.ReadRaw("octree.bin", e);
+        CHECK(!octreeBefore.empty(), "repack: octree.bin empty pre-repack");
+    }
+
+    const std::string bm = "{\"version\":1,\"bookmarks\":[{\"name\":\"A\",\"px\":1.5}]}";
+    const std::string cp = "{\"version\":1,\"keys\":[]}";
+    // Phase 8: a measurements.json entry rides the same repack path.
+    const std::string ms = "{\"version\":1,\"measurements\":[{\"type\":\"polyline\","
+                           "\"points\":[[1.0,2.0,3.0],[4.0,5.0,6.0]]}]}";
+    // Phase 9: annotations.json (label with quotes exercises JSON safety).
+    const std::string an = "{\"version\":1,\"annotations\":[{\"p\":[7.0,8.0,9.0],"
+                           "\"label\":\"pin \\\"one\\\"\",\"color\":[1.0,0.5,0.25]}]}";
+    CHECK(pf::RepackPackage(pkgPath, {
+              {"bookmarks.json",    std::vector<uint8_t>(bm.begin(), bm.end())},
+              {"campaths.json",     std::vector<uint8_t>(cp.begin(), cp.end())},
+              {"measurements.json", std::vector<uint8_t>(ms.begin(), ms.end())},
+              {"annotations.json",  std::vector<uint8_t>(an.begin(), an.end())},
+          }),
+          "repack: add upserts failed");
+
+    size_t entriesAfterAdd = 0;
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "repack: reopen after add failed");
+        // octree.bin copied verbatim (no re-(de)compression).
+        pf::VXPCDirectoryEntry e;
+        auto after = r.ReadRaw("octree.bin", e);
+        CHECK(after == octreeBefore, "repack: octree.bin bytes changed by repack");
+        // new entries round-trip through the CRC-checked/decompressing Read().
+        auto gotBm = r.Read("bookmarks.json");
+        CHECK(std::string(gotBm.begin(), gotBm.end()) == bm, "repack: bookmarks.json round-trip mismatch");
+        CHECK(r.Contains("campaths.json"), "repack: campaths.json missing after add");
+        auto gotMs = r.Read("measurements.json");
+        CHECK(std::string(gotMs.begin(), gotMs.end()) == ms, "repack: measurements.json round-trip mismatch");
+        auto gotAn = r.Read("annotations.json");
+        CHECK(std::string(gotAn.begin(), gotAn.end()) == an, "repack: annotations.json round-trip mismatch");
+        entriesAfterAdd = r.ListEntries().size();
+        // core still loads from the repacked package.
+        pf::OctreeStore s;
+        CHECK(s.load(pkgPath), "repack: octree unloadable after repack");
+    } // store closed here (handle released before next repack)
+
+    // Replace bookmarks.json (upsert existing, not add) + remove campaths.json.
+    const std::string bm2 = "{\"version\":1,\"bookmarks\":[]}";
+    CHECK(pf::RepackPackage(pkgPath,
+                            {{"bookmarks.json", std::vector<uint8_t>(bm2.begin(), bm2.end())}},
+                            {"campaths.json"}),
+          "repack: replace+remove failed");
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "repack: reopen after replace failed");
+        auto gotBm = r.Read("bookmarks.json");
+        CHECK(std::string(gotBm.begin(), gotBm.end()) == bm2, "repack: replacement did not win");
+        CHECK(!r.Contains("campaths.json"), "repack: removal did not drop campaths.json");
+        // replace is net-zero, remove drops one -> exactly one fewer entry.
+        CHECK(r.ListEntries().size() == entriesAfterAdd - 1, "repack: entry count wrong after replace+remove");
+    }
+}
+
+// Phase 13: open a .vxpc over http:// and verify range reads match the local
+// file. A minimal loopback HTTP/1.1 server (WinSock) serves the package with
+// Range support. Windows-only (matches the WinHTTP client); no-op elsewhere.
+#ifdef _WIN32
+struct RangeHttpServer {
+    std::vector<uint8_t> body;
+    SOCKET listenSock = INVALID_SOCKET;
+    int port = 0;
+    std::thread th;
+    std::atomic<bool> stop{false};
+
+    bool start(const std::string& file) {
+        std::ifstream in(file, std::ios::binary | std::ios::ate);
+        if (!in) return false;
+        std::streamsize n = in.tellg(); in.seekg(0);
+        body.resize((size_t)n);
+        if (n > 0) in.read((char*)body.data(), n);
+
+        WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
+        listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listenSock == INVALID_SOCKET) return false;
+        sockaddr_in addr{}; addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = 0;
+        if (bind(listenSock, (sockaddr*)&addr, sizeof(addr)) != 0) return false;
+        int len = sizeof(addr);
+        getsockname(listenSock, (sockaddr*)&addr, &len);
+        port = ntohs(addr.sin_port);
+        if (listen(listenSock, 8) != 0) return false;
+        th = std::thread([this] { serve(); });
+        return true;
+    }
+    void serve() {
+        while (!stop.load()) {
+            fd_set fds; FD_ZERO(&fds); FD_SET(listenSock, &fds);
+            timeval tv{0, 200000};
+            if (select(0, &fds, nullptr, nullptr, &tv) <= 0) continue;
+            SOCKET c = accept(listenSock, nullptr, nullptr);
+            if (c == INVALID_SOCKET) continue;
+            handle(c);
+            closesocket(c);
+        }
+    }
+    void handle(SOCKET c) {
+        std::string req; char buf[2048];
+        for (;;) {
+            int r = recv(c, buf, sizeof(buf), 0);
+            if (r <= 0) return;
+            req.append(buf, r);
+            if (req.find("\r\n\r\n") != std::string::npos || req.size() > 65536) break;
+        }
+        uint64_t start = 0, end = body.empty() ? 0 : body.size() - 1;
+        bool ranged = false;
+        size_t rp = req.find("Range: bytes=");
+        if (rp == std::string::npos) rp = req.find("range: bytes=");
+        if (rp != std::string::npos) {
+            ranged = true;
+            const char* p = req.c_str() + rp + 13;
+            start = strtoull(p, (char**)&p, 10);
+            if (*p == '-') { ++p; if (*p >= '0' && *p <= '9') end = strtoull(p, nullptr, 10); }
+        }
+        if (!body.empty()) {
+            if (start >= body.size()) start = body.size() - 1;
+            if (end >= body.size()) end = body.size() - 1;
+        }
+        uint64_t clen = (end >= start) ? (end - start + 1) : 0;
+
+        std::string hdr = ranged ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n";
+        if (ranged)
+            hdr += "Content-Range: bytes " + std::to_string(start) + "-" + std::to_string(end) +
+                   "/" + std::to_string(body.size()) + "\r\n";
+        hdr += "Accept-Ranges: bytes\r\n";
+        hdr += "Content-Length: " + std::to_string(clen) + "\r\n";
+        hdr += "Connection: close\r\n\r\n";
+        send(c, hdr.data(), (int)hdr.size(), 0);
+        uint64_t sent = 0;
+        while (sent < clen) {
+            int chunk = (int)std::min<uint64_t>(clen - sent, 65536);
+            int wn = send(c, (const char*)body.data() + start + sent, chunk, 0);
+            if (wn <= 0) break;
+            sent += (uint64_t)wn;
+        }
+    }
+    void shutdownServer() {
+        stop = true;
+        if (th.joinable()) th.join();
+        if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+        WSACleanup();
+    }
+};
+
+static void testHttpStreaming(const std::string& pkgPath) {
+    std::vector<uint8_t> refOctree;
+    size_t refEntries = 0;
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "http: local open failed");
+        refEntries = r.ListEntries().size();
+        pf::VXPCDirectoryEntry e;
+        refOctree = r.ReadRaw("octree.bin", e);
+    }
+
+    RangeHttpServer srv;
+    CHECK(srv.start(pkgPath), "http: loopback server failed to start");
+    if (srv.port == 0) return;
+
+    const std::string url = "http://127.0.0.1:" + std::to_string(srv.port) + "/scan.vxpc";
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(url), "http: PackageReader::Open(url) failed");
+        CHECK(r.Validate(), "http: package invalid over http");
+        CHECK(r.ListEntries().size() == refEntries, "http: entry count differs over http");
+        // meta.bin: exercises decompress + CRC over a ranged read.
+        auto meta = r.Read("meta.bin");
+        CHECK(!meta.empty(), "http: meta.bin unreadable over http");
+        // octree.bin raw span must match the local bytes exactly (multi-block).
+        pf::VXPCDirectoryEntry e;
+        auto got = r.ReadRaw("octree.bin", e);
+        CHECK(got == refOctree, "http: octree.bin raw bytes differ over http");
+    }
+    srv.shutdownServer();
+}
+#else
+static void testHttpStreaming(const std::string&) {}
+#endif
+
+// Phase 10: combine two single-cloud .vxpc into one multi-cloud package, then
+// load each namespaced cloud back and verify it matches its source.
+static void testMultiCloudPackage(const std::string& a, const std::string& b, const std::string& work) {
+    const std::string scenePkg = work + "/scene.vxpc";
+    CHECK(pf::combineClouds(scenePkg, {{a, "alpha"}, {b, "beta"}}), "combine: combineClouds failed");
+
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(scenePkg), "combine: reopen scene.vxpc failed");
+        CHECK(r.Contains("scene.json"), "combine: scene.json missing");
+        CHECK(r.Contains("clouds/0/meta.bin") && r.Contains("clouds/0/octree.bin"), "combine: cloud 0 entries missing");
+        CHECK(r.Contains("clouds/1/meta.bin") && r.Contains("clouds/1/octree.bin"), "combine: cloud 1 entries missing");
+        auto sj = r.Read("scene.json");
+        std::string s(sj.begin(), sj.end());
+        CHECK(s.find("clouds/0/") != std::string::npos && s.find("alpha") != std::string::npos, "combine: manifest cloud 0 wrong");
+        CHECK(s.find("clouds/1/") != std::string::npos && s.find("beta") != std::string::npos, "combine: manifest cloud 1 wrong");
+
+        // Cloud 0 must match its source; then full structural verification
+        // through the namespaced octree offset (DFS + boxed query + pick).
+        pf::OctreeStore src;
+        CHECK(src.load(a), "combine: source load failed");
+        pf::OctreeStore c0;
+        CHECK(c0.load(scenePkg, "clouds/0/"), "combine: cloud 0 namespaced load failed");
+        CHECK(c0.meta().pointCount == src.meta().pointCount, "combine: cloud 0 point count mismatch vs source");
+        CHECK(c0.nodes().size() == src.nodes().size(), "combine: cloud 0 node count mismatch vs source");
+        verifyStructure(c0, c0.meta().pointCount, r.GetSize("clouds/0/octree.bin"));
+
+        pf::OctreeStore c1;
+        CHECK(c1.load(scenePkg, "clouds/1/"), "combine: cloud 1 namespaced load failed");
+        verifyStructure(c1, c1.meta().pointCount, r.GetSize("clouds/1/octree.bin"));
+    } // stores + reader closed before removing the file
+
+    std::error_code ec;
+    fs::remove(scenePkg, ec);
+}
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -198,6 +500,9 @@ int main(int argc, char** argv) {
     const std::string seqFile = work + "/seq.vxpc";
     const std::string parFile = work + "/par.vxpc";
 
+    std::printf("pftest: [phase 11] plugin-data namespace + listing...\n");
+    testPluginData(work);
+
     std::printf("pftest: generating %llu synthetic points...\n", (unsigned long long)nPoints);
     if (!writeSyntheticXyz(xyz, nPoints)) {
         std::fprintf(stderr, "FAIL: cannot write %s\n", xyz.c_str());
@@ -219,12 +524,29 @@ int main(int argc, char** argv) {
 
         pf::OctreeStore store;
         CHECK(store.load(parFile), "OctreeStore failed to load parallel output");
-        
-        pf::PackageReader pkg;
-        CHECK(pkg.Open(parFile), "PackageReader failed to open vxpc");
-        uint64_t payloadSize = pkg.GetSize("octree.bin");
-        
-        verifyStructure(store, nPoints, payloadSize);
+
+        {
+            // Scope the reader: it holds parFile open (Phase 13 ByteSource), so
+            // it must be closed before the repack below renames over parFile.
+            pf::PackageReader pkg;
+            CHECK(pkg.Open(parFile), "PackageReader failed to open vxpc");
+            uint64_t payloadSize = pkg.GetSize("octree.bin");
+            verifyStructure(store, nPoints, payloadSize);
+        }
+
+        // Phase 7: repack the freshly-built package. Close the store first so
+        // the .vxpc handle is released (Windows rename-over-open guard).
+        store.clear();
+        std::printf("pftest: [phase 7] repack (verbatim copy + upsert/remove)...\n");
+        testRepack(parFile);
+
+        // Phase 13: stream the repacked package over http:// (once).
+        if (!compress) {
+            std::printf("pftest: [phase 13] open .vxpc over http (range reads)...\n");
+            testHttpStreaming(parFile);
+            std::printf("pftest: [phase 10] combine clouds into one multi-cloud .vxpc...\n");
+            testMultiCloudPackage(seqFile, parFile, work);
+        }
 
         fs::remove(seqFile, ec);
         fs::remove(parFile, ec);

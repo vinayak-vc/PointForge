@@ -15,6 +15,7 @@ struct IndexOptions {
     bool     keepChunks    = false;  // keep intermediate chunk files for debugging
     bool     compress      = false;  // zstd per-node compression of octree.bin payloads
     int      threads       = 0;      // Phase C worker threads; 0 = auto (hardware), 1 = sequential
+    std::string thumbnailPath;       // path to thumbnail image, or empty to auto-generate
     
     // Optional callback for progress updates: progressCb(fraction_0_to_1, status_message)
     std::function<void(float, const std::string&)> progressCb = nullptr;

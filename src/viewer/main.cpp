@@ -52,10 +52,12 @@
 #include "common/OctreeFormat.h"
 #include "common/FileDialog.h"
 #include "io/DxfWriter.h"
+#include "io/PackageFormat.h"
 #include "indexer/OctreeIndexer.h"
 #include <thread>
 #include <atomic>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -472,7 +474,11 @@ int main(int argc, char** argv) {
     struct SceneCloud {
         std::unique_ptr<OctreeStore> store;
         std::unique_ptr<PointRenderer> renderer;
-        std::string dir;
+        std::string dir;                  // source file/folder (shared by clouds
+                                          // from one multi-cloud package)
+        std::string pkgPrefix;            // "clouds/<i>/" for a multi-cloud
+                                          // package member; empty otherwise
+        std::string name;                 // display label (Scene panel / remote)
         bool visible = true;
         glm::dvec3 worldOffset = glm::dvec3(0.0);
     };
@@ -1007,6 +1013,107 @@ int main(int argc, char** argv) {
         pivot = glm::vec3(0.0f);
     };
 
+    // ---- Phase 7: camera data embedded in the .vxpc package ----------------
+    // Bookmarks + the camera path serialize to bookmarks.json / campaths.json
+    // inside the package so a cloud carries its navigation state when shared.
+    // (AppData TSV remains the per-machine store; the package copy is loaded
+    // when present and is authoritative for that cloud.)
+    auto isVxpc = [](const std::string& dir) {
+        return dir.size() >= 5 && dir.compare(dir.size() - 5, 5, ".vxpc") == 0;
+    };
+    auto bookmarksToJson = [&](const std::string& dir) -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json arr = nlohmann::json::array();
+        auto it = allBookmarks.find(dir);
+        if (it != allBookmarks.end())
+            for (const CamBookmark& b : it->second)
+                arr.push_back({{"name", b.name}, {"px", b.px}, {"py", b.py}, {"pz", b.pz},
+                               {"yaw", b.yaw}, {"pitch", b.pitch}, {"ortho", b.ortho},
+                               {"orthoSize", b.orthoSize}});
+        root["bookmarks"] = std::move(arr);
+        return root.dump();
+    };
+    auto campathsToJson = [&](const std::string& dir) -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json keys = nlohmann::json::array();
+        auto it = allCamPaths.find(dir);
+        if (it != allCamPaths.end())
+            for (const CamKey& k : it->second.keys)
+                keys.push_back({{"t", k.t}, {"px", k.px}, {"py", k.py}, {"pz", k.pz},
+                               {"yaw", k.yaw}, {"pitch", k.pitch}, {"ortho", k.ortho},
+                               {"orthoSize", k.orthoSize}});
+        root["keys"] = std::move(keys);   // single path per cloud (matches CamPath)
+        return root.dump();
+    };
+    // Phase 8: measurements. measurePts is a single scene-global world-space
+    // polyline, so measurements.json carries one polyline object.
+    auto measurementsToJson = [&]() -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json arr = nlohmann::json::array();
+        if (!measurePts.empty()) {
+            nlohmann::json pts = nlohmann::json::array();
+            for (const glm::dvec3& p : measurePts) pts.push_back({p.x, p.y, p.z});
+            arr.push_back({{"type", "polyline"}, {"points", std::move(pts)}});
+        }
+        root["measurements"] = std::move(arr);
+        return root.dump();
+    };
+    auto loadCameraDataFromPackage = [&](const std::string& dir) {
+        if (!isVxpc(dir)) return;
+        pf::PackageReader r;
+        if (!r.Open(dir)) return;
+        if (r.Contains("bookmarks.json")) {
+            auto buf = r.Read("bookmarks.json");
+            try {
+                auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                std::vector<CamBookmark> v;
+                for (const auto& e : j.value("bookmarks", nlohmann::json::array())) {
+                    CamBookmark b;
+                    b.name = e.value("name", std::string("Bookmark"));
+                    b.px = e.value("px", 0.0f); b.py = e.value("py", 0.0f); b.pz = e.value("pz", 0.0f);
+                    b.yaw = e.value("yaw", 0.0f); b.pitch = e.value("pitch", 0.0f);
+                    b.ortho = e.value("ortho", 0); b.orthoSize = e.value("orthoSize", 100.0f);
+                    v.push_back(std::move(b));
+                }
+                allBookmarks[dir] = std::move(v);   // package is authoritative for this cloud
+            } catch (...) { pf::logWarn("bookmarks.json in package is malformed"); }
+        }
+        if (r.Contains("campaths.json")) {
+            auto buf = r.Read("campaths.json");
+            try {
+                auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                CamPath path;
+                for (const auto& e : j.value("keys", nlohmann::json::array())) {
+                    CamKey k;
+                    k.t = e.value("t", 0.0); k.px = e.value("px", 0.0f); k.py = e.value("py", 0.0f);
+                    k.pz = e.value("pz", 0.0f); k.yaw = e.value("yaw", 0.0f); k.pitch = e.value("pitch", 0.0f);
+                    k.ortho = e.value("ortho", 0); k.orthoSize = e.value("orthoSize", 100.0f);
+                    path.keys.push_back(k);
+                }
+                path.sortKeys();
+                allCamPaths[dir] = std::move(path);
+            } catch (...) { pf::logWarn("campaths.json in package is malformed"); }
+        }
+        // Phase 8: measurePts is scene-global, so only adopt a package's
+        // measurements when this is the first/only cloud (avoid clobbering an
+        // existing measurement when a second cloud is added).
+        if (scene.size() == 1 && r.Contains("measurements.json")) {
+            auto buf = r.Read("measurements.json");
+            try {
+                auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                std::vector<glm::dvec3> pts;
+                for (const auto& m : j.value("measurements", nlohmann::json::array())) {
+                    if (m.value("type", std::string()) != "polyline") continue;
+                    for (const auto& p : m.value("points", nlohmann::json::array()))
+                        if (p.is_array() && p.size() >= 3)
+                            pts.emplace_back(p[0].get<double>(), p[1].get<double>(), p[2].get<double>());
+                    break;   // one polyline for now
+                }
+                measurePts = std::move(pts);
+            } catch (...) { pf::logWarn("measurements.json in package is malformed"); }
+        }
+    };
+
     auto annotationsPath = [&]() -> std::string {
         std::string p = "annotations.json";
         if (char* pref = SDL_GetPrefPath("ViitorX", "PointForge")) {
@@ -1074,8 +1181,49 @@ int main(int argc, char** argv) {
         if (!out) return;
         out << root.dump(2);
     };
+    // Phase 9: annotations embedded in the .vxpc. Package copy is per-cloud
+    // (single-cloud schema {version, annotations:[{p,label,color}]}), distinct
+    // from the multi-cloud AppData annotations.json above. On open the package
+    // copy is authoritative for that cloud; the save action writes it via the
+    // shared RepackPackage.
+    auto annotationsToPackageJson = [&](const std::string& dir) -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json arr = nlohmann::json::array();
+        auto it = allAnnotations.find(dir);
+        if (it != allAnnotations.end())
+            for (const Annotation& a : it->second)
+                arr.push_back({{"p", {a.pos.x, a.pos.y, a.pos.z}},
+                               {"label", cleanAnnotationLabel(a.label)},
+                               {"color", {a.color[0], a.color[1], a.color[2]}}});
+        root["annotations"] = std::move(arr);
+        return root.dump();
+    };
+    auto loadAnnotationsFromPackage = [&](const std::string& dir) {
+        if (!isVxpc(dir)) return;
+        pf::PackageReader r;
+        if (!r.Open(dir) || !r.Contains("annotations.json")) return;
+        auto buf = r.Read("annotations.json");
+        try {
+            auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+            std::vector<Annotation> items;
+            for (const auto& e : j.value("annotations", nlohmann::json::array())) {
+                if (!e.contains("p") || !e["p"].is_array() || e["p"].size() < 3) continue;
+                Annotation a;
+                a.pos = glm::dvec3(e["p"][0].get<double>(), e["p"][1].get<double>(), e["p"][2].get<double>());
+                a.label = cleanAnnotationLabel(e.value("label", std::string()));
+                if (a.label.empty()) a.label = "Pin " + std::to_string(items.size() + 1);
+                if (e.contains("color") && e["color"].is_array() && e["color"].size() >= 3)
+                    for (int i = 0; i < 3; ++i)
+                        if (e["color"][i].is_number()) a.color[i] = e["color"][i].get<float>();
+                items.push_back(std::move(a));
+            }
+            allAnnotations[dir] = std::move(items);   // package is authoritative for this cloud
+        } catch (...) { pf::logWarn("annotations.json in package is malformed"); }
+    };
     auto gotoAnnotation = [&](const Annotation& a) {
-        pivot = glm::vec3(a.pos - activeStore().cubeCenter());
+        // Annotation positions are world-space; the camera lives in scene
+        // space (origin = first cloud's centre) — NOT the active cloud's.
+        pivot = glm::vec3(a.pos - sceneOrigin);
         float dist = glm::length(cam.position - pivot);
         if (dist < 1.0f) dist = 10.0f;
         cam.position = pivot - cam.front() * dist;
@@ -1125,34 +1273,71 @@ int main(int argc, char** argv) {
     // Load an octree directory, reset view, record it as recent.
     auto loadOctree = [&](const std::string& dir) -> bool {
         cancelActiveSliceExports();
-        SceneCloud cloud;
-        cloud.store = std::make_unique<OctreeStore>();
-        cloud.renderer = std::make_unique<PointRenderer>();
-        cloud.dir = dir;
-        cloud.visible = true;
-        if (cloud.store->load(dir)) {
-            if (scene.empty()) {
-                sceneOrigin = cloud.store->cubeCenter();
+
+        // Append one cloud; `prefix` selects a namespaced sub-cloud of a
+        // multi-cloud package (Phase 10), empty for a single-cloud load.
+        auto appendCloud = [&](const std::string& d, const std::string& prefix,
+                               const std::string& name) -> bool {
+            SceneCloud cloud;
+            cloud.store = std::make_unique<OctreeStore>();
+            cloud.renderer = std::make_unique<PointRenderer>();
+            cloud.dir = d;
+            cloud.pkgPrefix = prefix;
+            cloud.name = name.empty() ? baseName(d) : name;
+            cloud.visible = true;
+            if (!cloud.store->load(d, prefix)) {
+                pf::logError("Could not load octree from " + d +
+                             (prefix.empty() ? "" : " [" + prefix + "]"));
+                return false;
             }
+            if (scene.empty()) sceneOrigin = cloud.store->cubeCenter();
             cloud.worldOffset = cloud.store->cubeCenter() - sceneOrigin;
-            double offsetMeters = glm::length(cloud.worldOffset);
-            if (offsetMeters > 100000.0) {
+            if (glm::length(cloud.worldOffset) > 100000.0)
                 pf::logWarn("Cloud is more than 100 km from the scene origin; precision may be reduced");
-            }
             scene.push_back(std::move(cloud));
-            setActiveCloud((int)scene.size() - 1);
-            if (scene.size() == 1) setupCamera();
-            else frameAllReq = true;
-            addRecent(dir);
-            saveSettings();
-            navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
-#ifdef _WIN32
-            MessageBeep(MB_ICONINFORMATION);
-#endif
             return true;
+        };
+
+        // Phase 10: a multi-cloud package carries a scene.json manifest — add
+        // every listed member as its own SceneCloud (reuses the #6 scene).
+        std::vector<std::pair<std::string, std::string>> members;  // (prefix, name)
+        if (isVxpc(dir)) {
+            pf::PackageReader r;
+            if (r.Open(dir) && r.Contains("scene.json")) {
+                auto buf = r.Read("scene.json");
+                try {
+                    auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                    for (const auto& c : j.value("clouds", nlohmann::json::array())) {
+                        std::string prefix = c.value("prefix", std::string());
+                        if (!prefix.empty()) members.push_back({prefix, c.value("name", std::string())});
+                    }
+                } catch (...) { pf::logWarn("scene.json malformed; loading as single cloud"); }
+            }
         }
-        pf::logError("Could not load octree from " + dir);
-        return false;
+
+        const bool wasEmpty = scene.empty();
+        bool anyLoaded = false;
+        if (!members.empty()) {
+            for (const auto& m : members) anyLoaded |= appendCloud(dir, m.first, m.second);
+        } else {
+            anyLoaded = appendCloud(dir, "", "");
+        }
+        if (!anyLoaded) { pf::logError("Could not load any cloud from " + dir); return false; }
+
+        setActiveCloud((int)scene.size() - 1);
+        if (wasEmpty && scene.size() == 1) setupCamera();
+        else frameAllReq = true;
+        if (members.empty()) {   // single-cloud sidecars live at the top level
+            loadCameraDataFromPackage(dir);   // .vxpc-embedded bookmarks/campath/measure win
+            loadAnnotationsFromPackage(dir);  // .vxpc-embedded annotations win
+        }
+        addRecent(dir);
+        saveSettings();
+        navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
+#ifdef _WIN32
+        MessageBeep(MB_ICONINFORMATION);
+#endif
+        return true;
     };
 
     auto closeCloud = [&](int index) {
@@ -1249,6 +1434,45 @@ int main(int argc, char** argv) {
         if (toasts.size() > 5) toasts.erase(toasts.begin());
     };
 
+    // Phases 7-9: embed the active cloud's project data (bookmarks + camera
+    // path + measurements) into its .vxpc package. The package file is held
+    // open by the streaming store, so the cloud is closed (releasing the
+    // handle), repacked, and reloaded — the camera pose is preserved across
+    // the round-trip. (Defined here, after addToast/loadOctree/closeCloud;
+    // invoked from the File menu.)
+    auto saveProjectDataToPackage = [&]() {
+        if (!octreeLoaded) return;
+        const std::string dir = activeCloud().dir;
+        if (!isVxpc(dir)) {
+            addToast("Project data can only be embedded in a .vxpc package", "", true);
+            return;
+        }
+        if (!activeCloud().pkgPrefix.empty()) {
+            // Sidecars in a multi-cloud package are per-cloud (namespaced);
+            // the single top-level repack path would corrupt it. Not yet wired.
+            addToast("Saving project data into a multi-cloud package isn't supported yet", "", true);
+            return;
+        }
+        const std::string bm = bookmarksToJson(dir);
+        const std::string cp = campathsToJson(dir);
+        const std::string ms = measurementsToJson();
+        const std::string an = annotationsToPackageJson(dir);
+        const glm::vec3 sp = cam.position; const float sy = cam.yaw, spi = cam.pitch;
+        const bool so = cam.isOrtho; const float ss = cam.orthoSize;
+
+        closeCloud(activeCloudIndex);       // releases the file handle
+        const bool ok = pf::RepackPackage(dir, {
+            {"bookmarks.json",    std::vector<uint8_t>(bm.begin(), bm.end())},
+            {"campaths.json",     std::vector<uint8_t>(cp.begin(), cp.end())},
+            {"measurements.json", std::vector<uint8_t>(ms.begin(), ms.end())},
+            {"annotations.json",  std::vector<uint8_t>(an.begin(), an.end())},
+        });
+        loadOctree(dir);                    // re-adds + reloads embedded data
+        cam.position = sp; cam.yaw = sy; cam.pitch = spi; cam.isOrtho = so; cam.orthoSize = ss;
+        if (ok) addToast("Project data saved into " + baseName(dir), "", false, dir);
+        else    addToast("Failed to save project data into package", "", true);
+    };
+
     auto startSliceCpuExport = [&](const std::string& output, SliceExportFormat format,
                                    const AABB& box, int maxDepth, uint64_t estimated) {
         std::shared_ptr<SliceExportJob> job = std::make_shared<SliceExportJob>();
@@ -1305,6 +1529,9 @@ int main(int argc, char** argv) {
                         job->state = SliceExportJob::State::Failed;
                         return;
                     }
+                    // Full double precision: the default 6 significant digits
+                    // truncate georeferenced coordinates to ~10 m granularity.
+                    out << std::setprecision(15);
                     out << "x,y,z,r,g,b,intensity,classification\n";
                     uint64_t delivered = sliceStore->forEachPointInBox(
                         box, maxDepth, &job->cancelFlag,
@@ -1367,7 +1594,11 @@ int main(int argc, char** argv) {
 
     auto currentSliceBox = [&]() -> AABB {
         AABB box;
-        const glm::dvec3 center = activeStore().cubeCenter();
+        // clipMin/Max are scene-space (the per-cloud render subtracts each
+        // cloud's worldOffset), so world = sceneOrigin + clip — using the
+        // ACTIVE cloud's centre here shifted the box by that cloud's offset
+        // whenever it wasn't the first-loaded cloud.
+        const glm::dvec3 center = sceneOrigin;
         const double x0 = center.x + std::min((double)clipMin[0], (double)clipMax[0]);
         const double y0 = center.y + std::min((double)clipMin[1], (double)clipMax[1]);
         const double z0 = center.z + std::min((double)clipMin[2], (double)clipMax[2]);
@@ -1391,7 +1622,7 @@ int main(int argc, char** argv) {
         hookBox.min[hookAxis] = mid - thickness * 0.5;
         hookBox.max[hookAxis] = mid + thickness * 0.5;
 
-        const glm::dvec3 center = activeStore().cubeCenter();
+        const glm::dvec3 center = sceneOrigin;   // clip bounds are scene-space
         enableClipping = true;
         clipMin[0] = (float)(hookBox.min.x - center.x);
         clipMin[1] = (float)(hookBox.min.y - center.y);
@@ -1946,6 +2177,14 @@ int main(int argc, char** argv) {
                     int idx = (int)rc.value;
                     if (idx >= 0 && idx < (int)annotations.size()) gotoAnnotation(annotations[idx]);
                 }
+                else if (rc.name == "cloud_vis" && octreeLoaded && rc.hasVec) {
+                    // v = [cloud index, on, 0] — mirrors the Scene panel eye.
+                    int idx = (int)rc.vec[0];
+                    if (idx >= 0 && idx < (int)scene.size()) {
+                        scene[(size_t)idx].visible = rc.vec[1] != 0.0f;
+                        remoteCfgT = 1.0f;   // republish cfg promptly
+                    }
+                }
                 else if (rc.name == "clip_tool" && octreeLoaded)
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
@@ -2047,6 +2286,13 @@ int main(int argc, char** argv) {
                     rc.pathKeys = (int)cp.keys.size();
                     rc.pathDuration = (float)cp.duration();
                     rc.pathPlaying = pathPreviewing;
+                }
+                for (const SceneCloud& sc : scene) {
+                    RemoteConfig::Cloud rcc;
+                    rcc.name = sc.name.empty() ? baseName(sc.dir) : sc.name;
+                    rcc.pts = sc.store ? sc.store->meta().pointCount : 0;
+                    rcc.visible = sc.visible;
+                    rc.clouds.push_back(std::move(rcc));
                 }
                 remote.publishConfig(rc);
             }
@@ -2500,7 +2746,9 @@ int main(int argc, char** argv) {
                     float savedClipMin[3] = { clipMin[0], clipMin[1], clipMin[2] };
                     float savedClipMax[3] = { clipMax[0], clipMax[1], clipMax[2] };
 
-                    const glm::dvec3 center = activeStore().cubeCenter();
+                    // Camera + clip work in scene space (origin = first
+                    // cloud's centre); the slice box is world-space.
+                    const glm::dvec3 center = sceneOrigin;
                     const Vec3d boxCenter = pendingSlicePngBox.center();
                     const glm::vec3 target((float)(boxCenter.x - center.x),
                                            (float)(boxCenter.y - center.y),
@@ -2698,7 +2946,10 @@ int main(int argc, char** argv) {
             (!measurePts.empty() || !overlayAnnotations.empty() || toolMode == TOOL_MEASURE || toolMode == TOOL_ANNOTATE)) {
             cam.aspect = (winH > 0) ? (float)winW / (float)winH : 1.0f;
             glm::mat4 mvp = cam.viewProj();
-            glm::dvec3 ctr = activeStore().cubeCenter();
+            // Measure/annotation positions are world-space; camera is in
+            // scene space — project through sceneOrigin, not the active
+            // cloud's centre (wrong for non-first clouds).
+            glm::dvec3 ctr = sceneOrigin;
             auto project = [&](const glm::dvec3& world, ImVec2& out) -> bool {
                 glm::vec4 clip = mvp * glm::vec4(glm::vec3(world - ctr), 1.0f);
                 if (clip.w <= 0.0f) return false; // behind the camera
@@ -2872,6 +3123,12 @@ int main(int argc, char** argv) {
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Convert a Scan...", "Ctrl+I")) openConvertDialog("");
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Save Project Data to Package",
+                                        nullptr, false,
+                                        octreeLoaded && isVxpc(activeCloud().dir)))
+                        saveProjectDataToPackage();
+                    ImGui::SetItemTooltip("Embed this cloud's bookmarks, camera path, measurements + annotations into its .vxpc file");
                     ImGui::Separator();
                     if (ImGui::MenuItem("Screenshot", "F12")) pendingShot = true;
                     ImGui::Separator();
@@ -3081,10 +3338,10 @@ int main(int argc, char** argv) {
                             ImGui::PushID(i);
                             bool visible = cloud.visible;
                             if (ImGui::Checkbox("##vis", &visible)) cloud.visible = visible;
-                            ImGui::SetItemTooltip("Visible when multi-cloud rendering is enabled");
+                            ImGui::SetItemTooltip("Show/hide this cloud in the viewport");
                             ImGui::SameLine();
                             bool selected = i == activeCloudIndex;
-                            std::string label = baseName(cloud.dir) + "##cloud";
+                            std::string label = (cloud.name.empty() ? baseName(cloud.dir) : cloud.name) + "##cloud";
                             if (ImGui::Selectable(label.c_str(), selected)) {
                                 setActiveCloud(i);
                             }
@@ -3097,7 +3354,8 @@ int main(int argc, char** argv) {
                         }
                         if (closeIndex >= 0) closeCloud(closeIndex);
                         if (scene.size() > 1) {
-                            ImGui::TextWrapped("This first slice keeps rendering and tools on the active cloud while the scene model is generalized.");
+                            ImGui::TextDisabled("Tools (measure, clip, slice) follow the active cloud;");
+                            ImGui::TextDisabled("rendering and frame-all include every visible cloud.");
                         }
                     }
                 }

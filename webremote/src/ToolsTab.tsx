@@ -95,9 +95,30 @@ export default function ToolsTab({ cfg, setValue, send }: ToolsTabProps) {
   const clipRange = clipDisabled ? 1 : cfg.clipExt;
   const clipStep = clipRange / 200;
   const annotations = cfg.annotations ?? [];
+  const clouds = cfg.clouds ?? [];
 
   return (
     <div className="panel">
+      {clouds.length > 1 && (
+        <Card title="Scene">
+          <p className="dim">
+            {clouds.length} clouds — tap the eye to show/hide
+          </p>
+          {clouds.map((cloud, i) => (
+            <div className="scene-cloud-row" key={`${i}-${cloud.name}`}>
+              <Toggle
+                label={`${cloud.name} (${formatPoints(cloud.pts)})`}
+                on={cloud.visible}
+                onChange={(on) =>
+                  send({ t: 'cmd', n: 'cloud_vis', v: [i, on ? 1 : 0, 0] })
+                }
+              />
+            </div>
+          ))}
+          <p className="dim">Loading and closing clouds stays on the PC.</p>
+        </Card>
+      )}
+
       <Card title="Measure">
         <button
           type="button"
