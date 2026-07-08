@@ -11,6 +11,13 @@
         and yaw/pitch that never faced the model; now `presetView(dir)` =
         frameAll-fit distance + `lookAt(origin)` + orbit-pivot reset
 - `[x]` Modify application name to "ViitorX PointCloud Viewer" and insert watermark
+- `[x]` Guided fullscreen Conversion Wizard — Source → Quality → Destination → Convert
+        → Done. Replaces the compact "Convert to Octree" dialog; a fullscreen ImGui
+        modal blocks the menu/toolbar/docks so a conversion can't be disturbed mid-flow.
+        Triggered by the Convert button, Ctrl+I, or dropping a LAS/LAZ/E57/PLY/PTS/XYZ file.
+- `[x]` Renamed remaining user-facing "PointForge" strings to "ViitorX PointCloud Viewer"
+        (welcome panel title, Help > About menu item + About dialog). Internal names
+        (pfcore/pf::/format magic) and the AppData settings folder are unchanged.
 - `[x]` Build Viewer as a standard WIN32 executable to hide the console terminal
 - `[x]` Add system SFX / Beeps on load completion
 - `[x]` Persistent saving and loading of Viewer UI settings locally

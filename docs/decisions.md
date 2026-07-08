@@ -19,6 +19,21 @@ This document records major design decisions.
 - **Decision**: The executable is built as a WIN32 subsystem application (on Windows) rather than a Console App.
 - **Reason**: This prevents a persistent and ugly DOS prompt terminal window from opening alongside the ViitorX Viewer application.
 
+## Guided Conversion Wizard (fullscreen modal)
+- **Decision**: The Convert flow is a step-by-step fullscreen wizard rendered as an
+  ImGui `BeginPopupModal` sized to the whole viewport (Source → Quality → Destination
+  → Convert → Done), replacing the old compact non-modal "Convert to Octree" window.
+- **Reason**: The user asked for a guided flow that can't be disturbed. A modal popup
+  blocks input to the menu bar, toolbar and docks for free, and covering the full
+  viewport hides them visually — so once a conversion starts the user cannot touch
+  other controls until it finishes or is canceled.
+- **Consequence**: The underlying state (`convInputs`/`convOutput`/`convPreset`/
+  `customOpts`) and the `JobQueue`/`buildOctree` path are unchanged — the wizard just
+  guides the choices. It captures the jobs it enqueues (`convWizJobs`) to drive the
+  Converting/Done screens, and enqueues them with `loadWhenDone=false` so the wizard
+  (not the global finished-job handler) owns post-conversion loading. The `--convert`
+  smoke hook enqueues directly and bypasses the wizard so headless runs still auto-load.
+
 ## Settings Persistence (User AppData)
 - **Decision**: Viewer settings (`pfview_config.txt`) are serialized into the user's `AppData` directory via `SDL_GetPrefPath("ViitorX", "ViitorXPC")`, rather than alongside the executable.
 - **Reason**: Standard desktop application behavior. Keeping it in `AppData` ensures the executable can be deployed to a read-only directory (e.g., `Program Files`) without triggering UAC virtualization or permission-denied errors when users modify UI settings.

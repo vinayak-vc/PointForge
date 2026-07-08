@@ -1,4 +1,4 @@
-// pfview — PointForge streaming viewer (SDL2 + OpenGL 3.3 core + Dear ImGui).
+// pfview — ViitorX PointCloud Viewer streaming viewer (SDL2 + OpenGL 3.3 core + Dear ImGui).
 //
 // UI architecture (viewport-centric docked shell):
 //   menu bar + thin toolbar          constant-touch actions
@@ -1412,6 +1412,9 @@ int main(int argc, char** argv) {
     bool convLoadWhenDone = true;
     std::string pendingLoadDir;
     pf::IndexOptions customOpts;
+    // Guided conversion wizard (fullscreen modal, driven by showConvertDialog).
+    int convWizStep = 0;               // 0 Source, 1 Quality, 2 Destination, 3 Converting, 4 Done
+    std::vector<std::shared_ptr<ConvertJob>> convWizJobs; // jobs the active wizard tracks
 
     // ---- UI state -----------------------------------------------------------
     bool showUI = true;                // F5 / Shift+Space zen toggle (hides everything)
@@ -1746,6 +1749,8 @@ int main(int argc, char** argv) {
             // folder layout only when the path lacks the .vxpc extension).
             convOutput = (p.parent_path() / (p.stem().string() + ".vxpc")).string();
         }
+        convWizStep = 0;
+        convWizJobs.clear();
         showConvertDialog = true;
     };
 
@@ -1756,6 +1761,8 @@ int main(int argc, char** argv) {
         if (files.size() == 1) { openConvertDialog(files[0]); return; }
         convInputs = std::move(files);
         convOutput = std::filesystem::path(convInputs[0]).parent_path().string();
+        convWizStep = 0;
+        convWizJobs.clear();
         showConvertDialog = true;
     };
 
@@ -1781,29 +1788,35 @@ int main(int argc, char** argv) {
         return out + ".vxpc";
     };
 
+    // Enqueue the current selection and hand the created jobs to the wizard,
+    // which owns progress display + post-conversion loading (loadWhenDone=false
+    // here so the global finished-job handler doesn't also auto-load).
     auto enqueueConvert = [&]() {
         if (convInputs.empty() || convOutput.empty()) return;
+        convWizJobs.clear();
         if (convInputs.size() == 1) {
             std::string out = ensureVxpcPath(convOutput, std::filesystem::path(convInputs[0]).stem().string());
-            jobs.enqueue(convInputs[0], out, customOpts, convLoadWhenDone);
+            convWizJobs.push_back(jobs.enqueue(convInputs[0], out, customOpts, /*loadWhenDone=*/false));
             addToast("Queued: " + baseName(convInputs[0]));
         } else {
             for (const auto& in : convInputs) {
                 std::filesystem::path p(in);
                 std::string out = (std::filesystem::path(convOutput) / (p.stem().string() + ".vxpc")).string();
-                jobs.enqueue(in, out, customOpts, /*loadWhenDone=*/false);
+                convWizJobs.push_back(jobs.enqueue(in, out, customOpts, /*loadWhenDone=*/false));
             }
             addToast("Queued " + std::to_string(convInputs.size()) + " conversions");
         }
         if (!firstJobRevealed) { firstJobRevealed = true; showJobsPanel = true; }
-        showConvertDialog = false;
     };
 
-    // --convert smoke hook: drive the exact dialog enqueue path at startup.
+    // --convert smoke hook: enqueue directly at startup (no wizard UI), and
+    // auto-load the result so the headless smoke path still opens the cloud.
     if (!convertOnStart.empty()) {
         openConvertDialog(convertOnStart);   // fills convInputs + default output
-        logInfo("--convert: enqueueing " + convertOnStart + " -> " + convOutput);
-        enqueueConvert();
+        showConvertDialog = false;           // smoke path bypasses the wizard
+        std::string out = ensureVxpcPath(convOutput, std::filesystem::path(convInputs[0]).stem().string());
+        logInfo("--convert: enqueueing " + convertOnStart + " -> " + out);
+        jobs.enqueue(convInputs[0], out, customOpts, /*loadWhenDone=*/true);
     }
 
     // --export-video smoke hook: synth a 3-key orbit path over the loaded
@@ -3244,7 +3257,7 @@ int main(int argc, char** argv) {
                     if (ImGui::MenuItem("Keyboard Shortcuts", "F1")) showHelp = true;
                     if (ImGui::MenuItem("Command Palette", "Ctrl+P")) { showPalette = true; paletteBuf[0] = 0; }
                     ImGui::Separator();
-                    if (ImGui::MenuItem("About PointForge")) aboutOpenReq = true;
+                    if (ImGui::MenuItem("About ViitorX PointCloud Viewer")) aboutOpenReq = true;
                     ImGui::EndMenu();
                 }
                 ImGui::EndMainMenuBar();
@@ -3883,146 +3896,391 @@ int main(int argc, char** argv) {
                 ImGui::End();
             }
 
-            // ---- Convert dialog -------------------------------------------------
+            // ---- Guided Conversion Wizard (fullscreen, modal) -------------------
+            // A step-by-step wizard that fills the whole window and blocks every
+            // other control (menu, toolbar, docks) via an ImGui modal popup, so a
+            // conversion can't be disturbed mid-flow. Same underlying state and
+            // JobQueue path as before; the wizard guides the choices and tracks
+            // the jobs it enqueued through completion.
             if (showConvertDialog) {
-                ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
-                                               vp->WorkPos.y + vp->WorkSize.y * 0.45f),
-                                        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-                ImGui::SetNextWindowSizeConstraints(ImVec2(540.0f * S, 0), ImVec2(540.0f * S, FLT_MAX));
-                if (ImGui::Begin("Convert to Octree", &showConvertDialog,
-                                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
-                    // Source (multi-select: one background job per file)
-                    ImGui::Text("Source");
-                    ImGui::SameLine(90.0f * S);
-                    if (ImGui::Button("Browse...##src")) {
-                        auto fs = pf::openFileDialogMulti("Point Clouds\0*.las;*.laz;*.e57;*.ply;*.pts;*.xyz\0All Files\0*.*\0");
-                        if (!fs.empty()) setConvertSources(std::move(fs));
-                    }
-                    ImGui::SameLine();
-                    if (convInputs.empty()) {
-                        ImGui::TextDisabled("LAS / LAZ / E57 / PLY / PTS / XYZ (multi-select OK)");
-                    } else if (convInputs.size() == 1) {
-                        ImGui::Text("%s", baseName(convInputs[0]).c_str());
-                        ImGui::SetItemTooltip("%s", convInputs[0].c_str());
-                        std::error_code ec;
-                        auto sz = std::filesystem::file_size(convInputs[0], ec);
-                        if (!ec) {
-                            ImGui::SameLine();
-                            ImGui::TextDisabled("(%.2f GB)", sz / (1024.0 * 1024.0 * 1024.0));
-                        }
-                    } else {
-                        uintmax_t total = 0;
-                        for (const auto& in : convInputs) {
-                            std::error_code ec;
-                            auto sz = std::filesystem::file_size(in, ec);
-                            if (!ec) total += sz;
-                        }
-                        ImGui::Text("%d files", (int)convInputs.size());
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("(%.2f GB total)", total / (1024.0 * 1024.0 * 1024.0));
-                        // Scrollable file list with per-file remove.
-                        float listH = std::min(6, (int)convInputs.size()) * ImGui::GetTextLineHeightWithSpacing() + 8.0f * S;
-                        if (ImGui::BeginChild("##srclist", ImVec2(-FLT_MIN, listH), ImGuiChildFlags_FrameStyle)) {
-                            int removeIdx = -1;
-                            for (int i = 0; i < (int)convInputs.size(); ++i) {
-                                ImGui::PushID(i);
-                                if (ImGui::SmallButton("x")) removeIdx = i;
-                                ImGui::SameLine();
-                                ImGui::Text("%s", baseName(convInputs[i]).c_str());
-                                ImGui::SetItemTooltip("%s", convInputs[i].c_str());
-                                ImGui::PopID();
-                            }
-                            if (removeIdx >= 0) convInputs.erase(convInputs.begin() + removeIdx);
-                        }
-                        ImGui::EndChild();
-                    }
+                if (!ImGui::IsPopupOpen("##convWizard")) ImGui::OpenPopup("##convWizard");
+                ImGui::SetNextWindowPos(vp->Pos);
+                ImGui::SetNextWindowSize(vp->Size);
+                ImGui::SetNextWindowBgAlpha(1.0f);
+                ImGuiWindowFlags wzf = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                       ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoDocking;
+                if (ImGui::BeginPopupModal("##convWizard", nullptr, wzf)) {
+                    const ImVec4 accent   (0.24f, 0.53f, 0.95f, 1.0f);
+                    const ImVec4 accentDim(0.16f, 0.34f, 0.60f, 1.0f);
+                    const ImVec4 warnCol  (0.95f, 0.75f, 0.25f, 1.0f);
+                    const ImVec4 okCol    (0.35f, 0.80f, 0.45f, 1.0f);
+                    const ImVec4 errCol   (0.92f, 0.42f, 0.42f, 1.0f);
+                    const ImVec4 dimCol   (0.55f, 0.55f, 0.58f, 1.0f);
 
-                    // Output
-                    ImGui::Text("Output");
-                    ImGui::SameLine(90.0f * S);
-                    if (ImGui::Button("Browse...##out")) {
-                        std::string d = pf::openFolderDialog();
-                        if (!d.empty()) convOutput = d;
+                    auto fmtBytes = [](uintmax_t b) -> std::string {
+                        char buf[64];
+                        double gb = b / (1024.0 * 1024.0 * 1024.0);
+                        if (gb >= 1.0) snprintf(buf, sizeof(buf), "%.2f GB", gb);
+                        else           snprintf(buf, sizeof(buf), "%.0f MB", b / (1024.0 * 1024.0));
+                        return buf;
+                    };
+                    uintmax_t totalBytes = 0;
+                    for (const auto& in : convInputs) {
+                        std::error_code ec; auto s = std::filesystem::file_size(in, ec);
+                        if (!ec) totalBytes += s;
                     }
-                    ImGui::SameLine();
+                    const char* qualityName = convPreset == 0 ? "Draft" : convPreset == 1 ? "Balanced"
+                                            : convPreset == 2 ? "High" : "Custom";
+
+                    auto wizClose = [&]() {
+                        showConvertDialog = false; convWizStep = 0; convWizJobs.clear();
+                        ImGui::CloseCurrentPopup();
+                    };
+                    auto wizReset = [&]() {   // "Convert another" -> back to an empty step 1
+                        convInputs.clear(); convOutput.clear(); convWizJobs.clear(); convWizStep = 0;
+                    };
+                    auto wizOpenResult = [&](const std::string& dir) {
+                        showConvertDialog = false; convWizStep = 0; convWizJobs.clear();
+                        ImGui::CloseCurrentPopup();
+                        if (scene.empty()) loadOctree(dir); else pendingLoadDir = dir;
+                    };
+
+                    const float pad      = 40.0f * S;
+                    const float contentW = std::min(vp->Size.x - 2.0f * pad, 820.0f * S);
+                    const float leftPad  = (vp->Size.x - contentW) * 0.5f;
+                    const float headerH  = 104.0f * S;
+                    const float footerH  = 72.0f * S;
+
+                    // ---- header: title + step breadcrumb ----------------------
+                    ImGui::SetCursorPos(ImVec2(leftPad, 26.0f * S));
+                    ImGui::SetWindowFontScale(1.7f);
+                    ImGui::TextUnformatted("Convert a Scan");
+                    ImGui::SetWindowFontScale(1.0f);
+                    ImGui::SetCursorPosX(leftPad);
                     {
-                        char outBuf[512];
-                        snprintf(outBuf, sizeof(outBuf), "%s", convOutput.c_str());
-                        ImGui::SetNextItemWidth(-FLT_MIN);
-                        if (ImGui::InputText("##outdir", outBuf, sizeof(outBuf))) convOutput = outBuf;
+                        const char* names[4] = { "1  Source", "2  Quality", "3  Destination", "4  Convert" };
+                        int cur = convWizStep >= 3 ? 3 : convWizStep;
+                        for (int i = 0; i < 4; ++i) {
+                            ImGui::TextColored(i <= cur ? accent : dimCol, "%s", names[i]);
+                            if (i < 3) { ImGui::SameLine(); ImGui::TextColored(dimCol, "  >  "); ImGui::SameLine(); }
+                        }
                     }
 
-                    ImGui::Spacing();
-                    ImGui::SeparatorText("Quality");
-                    if (ImGui::RadioButton("Balanced - recommended", convPreset == 1)) { convPreset = 1; applyConvertPreset(1); }
-                    if (ImGui::RadioButton("Draft - fastest, coarse detail", convPreset == 0)) { convPreset = 0; applyConvertPreset(0); }
-                    if (ImGui::RadioButton("High - best close-up detail, slower", convPreset == 2)) { convPreset = 2; applyConvertPreset(2); }
-                    if (ImGui::RadioButton("Custom", convPreset == 3)) convPreset = 3;
-
-                    // Advanced (rarely touched; edits switch the preset to Custom)
-                    if (ImGui::CollapsingHeader("Advanced")) {
-                        ImGui::SeparatorText("Sampling");
-                        float spacingFloat = (float)customOpts.rootSpacing;
-                        ImGui::SetNextItemWidth(120.0f * S);
-                        if (ImGui::DragFloat("Spacing", &spacingFloat, 0.01f, 0.0f, 10.0f, "%.3f m")) {
-                            customOpts.rootSpacing = spacingFloat; convPreset = 3;
+                    // ---- completion detection while converting ----------------
+                    bool keepOpen = true;
+                    if (convWizStep == 3) {
+                        bool allDone = !convWizJobs.empty();
+                        for (auto& j : convWizJobs) if (!j->finished()) allDone = false;
+                        if (allDone) {
+                            bool allSucc = true;
+                            for (auto& j : convWizJobs)
+                                if (j->state.load() != ConvertJob::State::Succeeded) allSucc = false;
+                            if (allSucc && convWizJobs.size() == 1 && convLoadWhenDone) {
+                                wizOpenResult(convWizJobs[0]->output);   // auto-open single result
+                                keepOpen = false;
+                            } else {
+                                convWizStep = 4;
+                            }
                         }
-                        helpMarker("Root sample spacing. 0 = auto (cubeSize / 128). Smaller = denser coarse levels.");
-                        int leafSize = (int)customOpts.targetLeafSize;
-                        ImGui::SetNextItemWidth(120.0f * S);
-                        if (ImGui::DragInt("Leaf size", &leafSize, 1000, 1000, 1000000)) {
-                            customOpts.targetLeafSize = (uint32_t)std::max(1000, leafSize); convPreset = 3;
-                        }
-                        helpMarker("Max points per leaf node. Smaller = more nodes, better culling/LOD, larger octree.");
-                        ImGui::SetNextItemWidth(120.0f * S);
-                        if (ImGui::DragInt("Max depth", &customOpts.maxDepth, 1, 4, 32)) convPreset = 3;
-                        helpMarker("Hard cap on octree depth. Higher = better close-up precision, more nodes, slower conversion.");
-
-                        ImGui::SeparatorText("Resources");
-                        ImGui::SetNextItemWidth(120.0f * S);
-                        if (ImGui::DragInt("Chunk grid depth", &customOpts.gridDepth, 1, 1, 8)) convPreset = 3;
-                        helpMarker("Coarse chunk grid depth L; the grid is (2^L)^3 cells. Higher = more, smaller chunks (lower peak RAM, more files).");
-                        int flushM = (int)(customOpts.flushBudget / 1000000ull);
-                        ImGui::SetNextItemWidth(120.0f * S);
-                        if (ImGui::DragInt("Flush budget", &flushM, 1, 1, 1024, "%d Mpts")) {
-                            customOpts.flushBudget = (uint64_t)std::max(1, flushM) * 1000000ull; convPreset = 3;
-                        }
-                        helpMarker("Chunker memory budget in points; buffers flush to disk when exceeded. Higher = faster, more RAM (~20 bytes/point).");
-                        ImGui::SetNextItemWidth(120.0f * S);
-                        if (ImGui::DragInt("Indexer threads", &customOpts.threads, 1, 0, 64,
-                                           customOpts.threads == 0 ? "auto" : "%d")) convPreset = 3;
-                        helpMarker("Worker threads for the subtree-build phase. 0 = one per CPU core. More threads = faster conversion, more RAM (a few chunks in flight at once).");
-
-                        ImGui::SeparatorText("Output");
-                        if (ImGui::Checkbox("Compress nodes (zstd)", &customOpts.compress)) convPreset = 3;
-                        helpMarker("Per-node zstd compression of point payloads. Smaller octree on disk, slightly slower load.");
-                        ImGui::SameLine();
-                        if (ImGui::Checkbox("Keep chunk files", &customOpts.keepChunks)) convPreset = 3;
-                        helpMarker("Keep the intermediate chunk files after indexing (debugging only).");
                     }
 
-                    ImGui::Spacing();
-                    ImGui::BeginDisabled(convInputs.size() > 1);
-                    ImGui::Checkbox("Load in viewer when done", &convLoadWhenDone);
-                    ImGui::EndDisabled();
-                    if (convInputs.size() > 1) {
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("(batch: each file -> <output>\\<name>_octree)");
-                    }
-                    ImGui::Spacing();
+                    // ---- body -------------------------------------------------
+                    if (keepOpen) {
+                        ImGui::SetCursorPos(ImVec2(leftPad, headerH));
+                        ImGui::BeginChild("##wizBody", ImVec2(contentW, vp->Size.y - headerH - footerH));
 
-                    bool canConvert = !convInputs.empty() && !convOutput.empty();
-                    ImGui::BeginDisabled(!canConvert);
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.85f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.53f, 0.95f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.38f, 0.75f, 1.0f));
-                    if (ImGui::Button("Convert", ImVec2(-FLT_MIN, 34.0f * S))) enqueueConvert();
-                    ImGui::PopStyleColor(3);
-                    ImGui::EndDisabled();
-                    if (!canConvert) ImGui::TextDisabled("Choose a source file first.");
-                    ImGui::TextDisabled("Runs in the background - watch it in the Jobs panel.");
+                        if (convWizStep == 0) {
+                            // ----- Step 1: Source -----
+                            ImGui::SetWindowFontScale(1.25f);
+                            ImGui::TextUnformatted("Select your scan file");
+                            ImGui::SetWindowFontScale(1.0f);
+                            ImGui::Spacing();
+                            ImGui::TextWrapped("Pick one or more point cloud files. ViitorX builds a fast, "
+                                               "streamable octree so you can explore clouds far larger than RAM.");
+                            ImGui::Spacing();
+                            if (ImGui::Button("Browse for files...", ImVec2(240.0f * S, 38.0f * S))) {
+                                auto fs = pf::openFileDialogMulti("Point Clouds\0*.las;*.laz;*.e57;*.ply;*.pts;*.xyz\0All Files\0*.*\0");
+                                if (!fs.empty()) setConvertSources(std::move(fs));
+                            }
+                            ImGui::SameLine();
+                            ImGui::TextColored(dimCol, "LAS, LAZ, E57, PLY, PTS, XYZ");
+                            ImGui::Spacing();
+                            if (convInputs.empty()) {
+                                ImGui::TextColored(dimCol, "No files selected yet - browse above, or drag & drop files onto the window.");
+                            } else {
+                                ImGui::Text("%d file%s selected  -  %s total",
+                                            (int)convInputs.size(), convInputs.size() == 1 ? "" : "s",
+                                            fmtBytes(totalBytes).c_str());
+                                float listH = std::min(9, (int)convInputs.size()) * ImGui::GetTextLineHeightWithSpacing() + 12.0f * S;
+                                if (ImGui::BeginChild("##wizSrcList", ImVec2(-FLT_MIN, listH), ImGuiChildFlags_FrameStyle)) {
+                                    int removeIdx = -1;
+                                    for (int i = 0; i < (int)convInputs.size(); ++i) {
+                                        ImGui::PushID(i);
+                                        if (ImGui::SmallButton("x")) removeIdx = i;
+                                        ImGui::SameLine();
+                                        ImGui::Text("%s", baseName(convInputs[i]).c_str());
+                                        std::error_code ec; auto s = std::filesystem::file_size(convInputs[i], ec);
+                                        if (!ec) { ImGui::SameLine(); ImGui::TextColored(dimCol, "(%s)", fmtBytes(s).c_str()); }
+                                        ImGui::SetItemTooltip("%s", convInputs[i].c_str());
+                                        ImGui::PopID();
+                                    }
+                                    if (removeIdx >= 0) convInputs.erase(convInputs.begin() + removeIdx);
+                                }
+                                ImGui::EndChild();
+                            }
+                        } else if (convWizStep == 1) {
+                            // ----- Step 2: Quality -----
+                            ImGui::SetWindowFontScale(1.25f);
+                            ImGui::TextUnformatted("Choose the quality");
+                            ImGui::SetWindowFontScale(1.0f);
+                            ImGui::Spacing();
+                            ImGui::TextWrapped("Balanced suits most scans. Higher quality sharpens close-up detail "
+                                               "but takes longer to build and makes a larger file.");
+                            ImGui::Spacing();
+                            // Bordered clickable card, drawn by hand (an InvisibleButton is
+                            // the hit-target; the box + title + description are drawn on top)
+                            // so every card has a visible frame — selected/hovered just
+                            // brighten it, instead of one card blending into the background.
+                            auto card = [&](int idx, const char* title, const char* desc) {
+                                ImGui::PushID(idx);
+                                bool sel = (convPreset == idx);
+                                const float cardW = ImGui::GetContentRegionAvail().x;
+                                const float cardH = 52.0f * S;
+                                ImVec2 p0 = ImGui::GetCursorScreenPos();
+                                if (ImGui::InvisibleButton("##card", ImVec2(cardW, cardH))) {
+                                    convPreset = idx; if (idx != 3) applyConvertPreset(idx);
+                                }
+                                bool hov = ImGui::IsItemHovered();
+                                ImVec2 p1(p0.x + cardW, p0.y + cardH);
+                                ImU32 fill = sel ? ImGui::GetColorU32(accentDim)
+                                           : hov ? ImGui::GetColorU32(ImVec4(0.22f, 0.24f, 0.28f, 1.0f))
+                                                 : ImGui::GetColorU32(ImVec4(0.15f, 0.16f, 0.19f, 1.0f));
+                                ImU32 line = sel ? ImGui::GetColorU32(accent)
+                                                 : ImGui::GetColorU32(ImVec4(0.33f, 0.35f, 0.40f, 1.0f));
+                                ImDrawList* dl = ImGui::GetWindowDrawList();
+                                dl->AddRectFilled(p0, p1, fill, 6.0f * S);
+                                dl->AddRect(p0, p1, line, 6.0f * S, 0, sel ? 2.0f : 1.0f);
+                                dl->AddText(ImVec2(p0.x + 14.0f * S, p0.y + 8.0f * S),
+                                            ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), title);
+                                dl->AddText(ImVec2(p0.x + 14.0f * S, p0.y + 28.0f * S),
+                                            ImGui::GetColorU32(dimCol), desc);
+                                ImGui::Spacing();
+                                ImGui::PopID();
+                            };
+                            card(1, "Balanced   (Recommended)", "Great detail at a sensible speed and size.");
+                            card(0, "Draft",                    "Fastest. Coarser detail - good for a quick first look.");
+                            card(2, "High",                     "Best close-up detail. Slower to build, larger on disk.");
+                            if (convPreset == 3)
+                                card(3, "Custom", "Using the advanced settings below.");
+                            if (totalBytes > 5ull * 1024 * 1024 * 1024 && convPreset == 2)
+                                ImGui::TextColored(warnCol, "Heads up: High quality on %s can take a while.",
+                                                   fmtBytes(totalBytes).c_str());
+                            ImGui::Spacing();
+                            if (ImGui::CollapsingHeader("Advanced settings")) {
+                                ImGui::SeparatorText("Sampling");
+                                float spacingFloat = (float)customOpts.rootSpacing;
+                                ImGui::SetNextItemWidth(120.0f * S);
+                                if (ImGui::DragFloat("Spacing", &spacingFloat, 0.01f, 0.0f, 10.0f, "%.3f m")) {
+                                    customOpts.rootSpacing = spacingFloat; convPreset = 3;
+                                }
+                                helpMarker("Root sample spacing. 0 = auto (cubeSize / 128). Smaller = denser coarse levels.");
+                                int leafSize = (int)customOpts.targetLeafSize;
+                                ImGui::SetNextItemWidth(120.0f * S);
+                                if (ImGui::DragInt("Leaf size", &leafSize, 1000, 1000, 1000000)) {
+                                    customOpts.targetLeafSize = (uint32_t)std::max(1000, leafSize); convPreset = 3;
+                                }
+                                helpMarker("Max points per leaf node. Smaller = more nodes, better culling/LOD, larger octree.");
+                                ImGui::SetNextItemWidth(120.0f * S);
+                                if (ImGui::DragInt("Max depth", &customOpts.maxDepth, 1, 4, 32)) convPreset = 3;
+                                helpMarker("Hard cap on octree depth. Higher = better close-up precision, more nodes, slower conversion.");
+
+                                ImGui::SeparatorText("Resources");
+                                ImGui::SetNextItemWidth(120.0f * S);
+                                if (ImGui::DragInt("Chunk grid depth", &customOpts.gridDepth, 1, 1, 8)) convPreset = 3;
+                                helpMarker("Coarse chunk grid depth L; the grid is (2^L)^3 cells. Higher = more, smaller chunks (lower peak RAM, more files).");
+                                int flushM = (int)(customOpts.flushBudget / 1000000ull);
+                                ImGui::SetNextItemWidth(120.0f * S);
+                                if (ImGui::DragInt("Flush budget", &flushM, 1, 1, 1024, "%d Mpts")) {
+                                    customOpts.flushBudget = (uint64_t)std::max(1, flushM) * 1000000ull; convPreset = 3;
+                                }
+                                helpMarker("Chunker memory budget in points; buffers flush to disk when exceeded. Higher = faster, more RAM (~20 bytes/point).");
+                                ImGui::SetNextItemWidth(120.0f * S);
+                                if (ImGui::DragInt("Indexer threads", &customOpts.threads, 1, 0, 64,
+                                                   customOpts.threads == 0 ? "auto" : "%d")) convPreset = 3;
+                                helpMarker("Worker threads for the subtree-build phase. 0 = one per CPU core.");
+
+                                ImGui::SeparatorText("Output");
+                                if (ImGui::Checkbox("Compress nodes (zstd)", &customOpts.compress)) convPreset = 3;
+                                helpMarker("Per-node zstd compression of point payloads. Smaller octree on disk, slightly slower load.");
+                                ImGui::SameLine();
+                                if (ImGui::Checkbox("Keep chunk files", &customOpts.keepChunks)) convPreset = 3;
+                                helpMarker("Keep the intermediate chunk files after indexing (debugging only).");
+                            }
+                        } else if (convWizStep == 2) {
+                            // ----- Step 3: Destination + review -----
+                            ImGui::SetWindowFontScale(1.25f);
+                            ImGui::TextUnformatted("Where should we save it?");
+                            ImGui::SetWindowFontScale(1.0f);
+                            ImGui::Spacing();
+                            if (convInputs.size() <= 1) {
+                                ImGui::TextWrapped("Your converted cloud is saved as a single .vxpc package.");
+                                ImGui::Spacing();
+                                if (ImGui::Button("Choose location...", ImVec2(200.0f * S, 34.0f * S))) {
+                                    std::string d = pf::openFolderDialog();
+                                    if (!d.empty()) {
+                                        std::string stem = convInputs.empty() ? std::string("cloud")
+                                                          : std::filesystem::path(convInputs[0]).stem().string();
+                                        convOutput = (std::filesystem::path(d) / (stem + ".vxpc")).string();
+                                    }
+                                }
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                {
+                                    char outBuf[512];
+                                    snprintf(outBuf, sizeof(outBuf), "%s", convOutput.c_str());
+                                    if (ImGui::InputText("##wizOut", outBuf, sizeof(outBuf))) convOutput = outBuf;
+                                }
+                                ImGui::Spacing();
+                                ImGui::Checkbox("Open in the viewer when finished", &convLoadWhenDone);
+                            } else {
+                                ImGui::TextWrapped("Each file is saved as its own .vxpc package inside this folder:");
+                                ImGui::Spacing();
+                                if (ImGui::Button("Choose folder...", ImVec2(200.0f * S, 34.0f * S))) {
+                                    std::string d = pf::openFolderDialog();
+                                    if (!d.empty()) convOutput = d;
+                                }
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                {
+                                    char outBuf[512];
+                                    snprintf(outBuf, sizeof(outBuf), "%s", convOutput.c_str());
+                                    if (ImGui::InputText("##wizOutDir", outBuf, sizeof(outBuf))) convOutput = outBuf;
+                                }
+                                ImGui::Spacing();
+                                ImGui::BeginDisabled(true);
+                                ImGui::Checkbox("Open in the viewer when finished", &convLoadWhenDone);
+                                ImGui::EndDisabled();
+                                ImGui::SameLine(); ImGui::TextColored(dimCol, "(batch - opens nothing automatically)");
+                            }
+                            ImGui::Spacing();
+                            ImGui::SeparatorText("Review");
+                            if (convInputs.size() == 1)
+                                ImGui::BulletText("Source: %s", baseName(convInputs[0]).c_str());
+                            else
+                                ImGui::BulletText("Source: %d files (%s)", (int)convInputs.size(), fmtBytes(totalBytes).c_str());
+                            ImGui::BulletText("Quality: %s", qualityName);
+                            ImGui::BulletText("Destination: %s", convOutput.empty() ? "(choose a location above)" : convOutput.c_str());
+                            if (convOutput.empty())
+                                ImGui::TextColored(warnCol, "Choose where to save before starting.");
+                        } else if (convWizStep == 3) {
+                            // ----- Step 4: Converting (locked) -----
+                            ImGui::SetWindowFontScale(1.25f);
+                            ImGui::TextUnformatted("Converting...");
+                            ImGui::SetWindowFontScale(1.0f);
+                            ImGui::Spacing();
+                            float avg = 0.0f;
+                            for (auto& j : convWizJobs) avg += j->progress.load();
+                            if (!convWizJobs.empty()) avg /= (float)convWizJobs.size();
+                            ImGui::Text("Overall progress");
+                            ImGui::ProgressBar(avg, ImVec2(-FLT_MIN, 26.0f * S));
+                            ImGui::Spacing(); ImGui::Spacing();
+                            for (auto& j : convWizJobs) {
+                                ImGui::Text("%s", j->name.c_str());
+                                ImGui::ProgressBar(j->progress.load(), ImVec2(-FLT_MIN, 0.0f));
+                                ImGui::TextColored(dimCol, "%s", j->message().c_str());
+                                ImGui::Spacing();
+                            }
+                            ImGui::Spacing();
+                            ImGui::TextColored(warnCol, "Keep this window open - other controls are locked until the conversion finishes.");
+                        } else if (convWizStep == 4) {
+                            // ----- Step 5: Done -----
+                            int nSucc = 0, nFail = 0, nCanc = 0;
+                            for (auto& j : convWizJobs) {
+                                switch (j->state.load()) {
+                                    case ConvertJob::State::Succeeded: ++nSucc; break;
+                                    case ConvertJob::State::Failed:    ++nFail; break;
+                                    case ConvertJob::State::Canceled:  ++nCanc; break;
+                                    default: break;
+                                }
+                            }
+                            ImGui::SetWindowFontScale(1.35f);
+                            if (nFail == 0 && nCanc == 0) ImGui::TextColored(okCol, "Conversion complete");
+                            else if (nFail == 0)          ImGui::TextColored(warnCol, "Conversion canceled");
+                            else                          ImGui::TextColored(errCol, "Conversion failed");
+                            ImGui::SetWindowFontScale(1.0f);
+                            ImGui::Spacing();
+                            if (nFail == 0 && nCanc == 0) {
+                                if (convWizJobs.size() == 1)
+                                    ImGui::TextWrapped("Saved to %s", convWizJobs[0]->output.c_str());
+                                else
+                                    ImGui::TextWrapped("%d clouds converted.", (int)convWizJobs.size());
+                            } else if (nFail > 0) {
+                                ImGui::TextWrapped("One or more files failed to convert. Open the Console panel for details.");
+                            }
+                            ImGui::Spacing();
+                            for (auto& j : convWizJobs) {
+                                const char* icon = "-";
+                                ImVec4 c = dimCol;
+                                switch (j->state.load()) {
+                                    case ConvertJob::State::Succeeded: icon = "[ok]";   c = okCol;   break;
+                                    case ConvertJob::State::Failed:    icon = "[fail]"; c = errCol;  break;
+                                    case ConvertJob::State::Canceled:  icon = "[skip]"; c = warnCol; break;
+                                    default: break;
+                                }
+                                ImGui::TextColored(c, "%s", icon);
+                                ImGui::SameLine();
+                                ImGui::Text("%s", j->name.c_str());
+                            }
+                        }
+
+                        ImGui::EndChild();
+
+                        // ---- footer: navigation ------------------------------
+                        ImGui::SetCursorPos(ImVec2(leftPad, vp->Size.y - footerH + 16.0f * S));
+                        const float bw = 150.0f * S;
+                        if (convWizStep == 0) {
+                            if (ImGui::Button("Cancel", ImVec2(bw, 0))) wizClose();
+                            ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - bw);
+                            ImGui::BeginDisabled(convInputs.empty());
+                            if (ImGui::Button("Next", ImVec2(bw, 0))) convWizStep = 1;
+                            ImGui::EndDisabled();
+                        } else if (convWizStep == 1) {
+                            if (ImGui::Button("Back", ImVec2(bw, 0))) convWizStep = 0;
+                            ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - bw);
+                            if (ImGui::Button("Next", ImVec2(bw, 0))) convWizStep = 2;
+                        } else if (convWizStep == 2) {
+                            if (ImGui::Button("Back", ImVec2(bw, 0))) convWizStep = 1;
+                            ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - 200.0f * S);
+                            ImGui::BeginDisabled(convInputs.empty() || convOutput.empty());
+                            ImGui::PushStyleColor(ImGuiCol_Button,        accent);
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.60f, 1.0f, 1.0f));
+                            if (ImGui::Button("Start Conversion", ImVec2(200.0f * S, 0))) { enqueueConvert(); convWizStep = 3; }
+                            ImGui::PopStyleColor(2);
+                            ImGui::EndDisabled();
+                        } else if (convWizStep == 3) {
+                            ImGui::SetCursorPosX(leftPad + contentW - 200.0f * S);
+                            if (ImGui::Button("Cancel Conversion", ImVec2(200.0f * S, 0)))
+                                for (auto& j : convWizJobs) JobQueue::cancel(j);
+                        } else { // step 4 (Done)
+                            bool allSucc = !convWizJobs.empty();
+                            for (auto& j : convWizJobs) if (j->state.load() != ConvertJob::State::Succeeded) allSucc = false;
+                            bool single = convWizJobs.size() == 1;
+                            if (ImGui::Button("Convert Another", ImVec2(170.0f * S, 0))) wizReset();
+                            if (single && allSucc) {
+                                ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - 300.0f * S);
+                                ImGui::PushStyleColor(ImGuiCol_Button,        accent);
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.60f, 1.0f, 1.0f));
+                                if (ImGui::Button("Open in Viewer", ImVec2(150.0f * S, 0))) wizOpenResult(convWizJobs[0]->output);
+                                ImGui::PopStyleColor(2);
+                                ImGui::SameLine();
+                            } else {
+                                ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - bw);
+                            }
+                            if (ImGui::Button("Close", ImVec2(bw, 0))) wizClose();
+                        }
+                    }
+                    ImGui::EndPopup();
                 }
-                ImGui::End();
             }
 
             // ---- Export Video dialog (Properties > Camera Path) -----------------
@@ -4447,7 +4705,7 @@ int main(int argc, char** argv) {
                                       ImGuiWindowFlags_NoDocking;
                 ImGui::SetNextWindowBgAlpha(0.90f);
                 if (ImGui::Begin("##welcome", nullptr, wf)) {
-                    ImGui::SeparatorText("PointForge");
+                    ImGui::SeparatorText("ViitorX PointCloud Viewer");
                     ImGui::TextDisabled("Out-of-core point cloud viewer");
                     ImGui::Spacing();
                     float bw = 360.0f * S;
@@ -4731,10 +4989,10 @@ int main(int argc, char** argv) {
             }
 
             // ---- About modal -------------------------------------------------------
-            if (aboutOpenReq) { ImGui::OpenPopup("About PointForge"); aboutOpenReq = false; }
+            if (aboutOpenReq) { ImGui::OpenPopup("About ViitorX PointCloud Viewer"); aboutOpenReq = false; }
             ImGui::SetNextWindowPos(ImVec2(winW * 0.5f, winH * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-            if (ImGui::BeginPopupModal("About PointForge", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::Text("PointForge Viewer 0.1.0");
+            if (ImGui::BeginPopupModal("About ViitorX PointCloud Viewer", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("ViitorX PointCloud Viewer 0.1.0");
                 ImGui::TextDisabled("Out-of-core point cloud importer + viewer");
                 ImGui::TextDisabled("SDL2 - OpenGL 3.3 - Dear ImGui (docking)");
                 ImGui::Spacing();

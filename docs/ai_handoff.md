@@ -1,5 +1,53 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-08, cont.) - Guided Conversion Wizard + rebrand cleanup
+
+### What was built
+- **Guided fullscreen Conversion Wizard** (`src/viewer/main.cpp`): replaced the compact
+  non-modal "Convert to Octree" window with a fullscreen ImGui `BeginPopupModal`
+  (`##convWizard`, sized to `vp->Pos/Size`, opaque bg) driven by a new `convWizStep`
+  (0 Source → 1 Quality → 2 Destination → 3 Converting → 4 Done) plus `convWizJobs`
+  (the jobs the wizard tracks). Header shows title + a step breadcrumb; footer holds
+  Back/Next/Cancel/Start/Close per step.
+  - Step 1 Source: Browse (multi-select) / drag-drop pre-fill, per-file size + remove list.
+  - Step 2 Quality: Balanced/Draft/High selectable cards (+ Custom when advanced edited),
+    size-aware warning for High on >5 GB, existing Advanced controls under a collapsing header.
+  - Step 3 Destination: `.vxpc` location (single) or folder (batch), "open when finished"
+    toggle, and a Review summary (source / quality / destination).
+  - Step 4 Converting: overall + per-file progress bars, live `job->message()`, Cancel
+    Conversion; the modal keeps everything else locked. Auto-advances when all jobs finish.
+  - Step 5 Done: complete/canceled/failed result + per-file status; Open in Viewer
+    (single success), Convert Another, Close.
+- **Enqueue path**: `enqueueConvert()` now records the created jobs into `convWizJobs`
+  and enqueues with `loadWhenDone=false` (wizard owns loading); no longer closes the
+  dialog itself. `openConvertDialog`/`setConvertSources` reset `convWizStep`/`convWizJobs`.
+  The `--convert` smoke hook enqueues directly (loadWhenDone=true) and bypasses the wizard.
+- **Rebrand**: remaining user-facing "PointForge" strings → "ViitorX PointCloud Viewer"
+  (welcome panel `SeparatorText`, Help > About menu item + About modal id/text, file
+  header comment). Left unchanged: `pfcore`/`pf::`/format magic (internal) and
+  `SDL_GetPrefPath("ViitorX","PointForge")` (the AppData settings folder — renaming it
+  would orphan every user's saved settings/bookmarks/annotations/campaths).
+
+### Verified
+- `cmake --build build-static --config Release --target pfview` — clean, produced
+  `ViitorXPCViewer_v1046.exe` (main.cpp compiled + linked, no errors/warnings).
+- Launched the exe: starts and runs stably (welcome panel renders with the new name),
+  no startup crash.
+- **NOT done (native GUI, can't drive headlessly):** clicking through the wizard
+  end-to-end against a real scan — step navigation, live progress on the Converting
+  screen, Cancel mid-convert, and the Done → Open in Viewer / Convert Another paths.
+  Run this manually before merging (drop `C:\UnrealProject\model\NTPC.laz`, walk all steps).
+
+### Modified files
+- `src/viewer/main.cpp` (wizard + enqueue path + smoke hook + rename)
+- `docs/tasks.md`, `docs/decisions.md`, `docs/ai_handoff.md`
+
+### Next Recommended Task
+Manual acceptance walk of the wizard (above). Optional: fix the stale
+`decisions.md` "Settings Persistence" note (it claims `SDL_GetPrefPath(...,"ViitorXPC")`
+but the code uses `"PointForge"` — doc-only drift, no code change unless a settings
+migration is wanted).
+
 ## Session (2026-07-08) - VXPC phases, small→big, branch-per-phase
 
 Implementing the remaining PLANNED VXPC phases (docs/vxpc_feature.md), each on
