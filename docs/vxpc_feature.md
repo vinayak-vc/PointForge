@@ -15,7 +15,7 @@
 | 6 | Project Metadata | DONE | ProjectMetadata struct implemented in OctreeFormat.h and embedded inside the .vxpc container via MetadataWriter |
 | 7 | Camera Data | DONE | bookmarks.json + campaths.json in the package; `RepackPackage` (verbatim copy + upsert/remove); viewer File > "Save Camera Data to Package" + load-on-open; pftest `testRepack` |
 | 8 | Measurements | DONE | measurements.json (polyline) in the package via the shared repack; loaded for the first cloud; folded into File > "Save Project Data to Package"; pftest measurements round-trip |
-| 9 | Annotations | PLANNED | Text, Image, Audio, Pins |
+| 9 | Annotations | DONE | annotations.json (per-cloud) embedded via repack; authoritative on open; in File > "Save Project Data to Package"; pftest round-trip incl. quoted-label JSON safety. Image/audio attachments deferred |
 | 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
 | 11 | Plugin Data | DONE | `plugins/` namespace via `AddPluginData`; reader `ListEntries`/`ListPlugins`; core ignores non-fixed names; over-long filename guard; pftest `testPluginData` |
 | 12 | Custom Metadata | DONE | PackageWriter supports dynamic Key/Value addition serialized as custom_meta.json |
@@ -119,12 +119,22 @@
 - **Deferred**: area/volume measurement types (the viewer only has the
   distance polyline today).
 
-## Phase 9: Annotations
+## Phase 9: Annotations — DONE
 **Goal**: Embed collaboration markers directly in the package.
-- **Research & Implementation**: 
-  - `annotations.json` is currently written to AppData.
-  - Implementation: Move `annotations.json` into the `.vxpc` archive. 
-  - Future expansion: Audio and Image attachments. `PackageWriter::AddFile("annotations/image_1.jpg", path)` can embed external files. `PackageReader` can stream these back into ImGui textures (`UTexture2D` in Unity).
+- **Implemented**:
+  - Package `annotations.json` is per-cloud: `{version, annotations:[{p:[x,y,z],
+    label, color:[r,g,b]}]}` — distinct from the multi-cloud AppData
+    `annotations.json` (`{clouds:[{dir, items}]}`), which stays the per-machine
+    store. Labels are sanitized (no tab/newline, ≤96 chars) both ways.
+  - Loaded on open and authoritative for that cloud; written via the shared
+    `RepackPackage` as part of File > "Save Project Data to Package" (now
+    bookmarks + campath + measurements + annotations in one repack).
+  - Tests: `pftest testRepack` upserts + round-trips an `annotations.json`
+    whose label contains escaped quotes (JSON-safety via nlohmann). Full build
+    + CTest green.
+- **Deferred**: image/audio attachments (`AddFile("plugins/…" or "media/…")`
+  + ImGui/Unity texture streaming) — the Phase 11 plugin namespace + `AddFile`
+  already provide the embed primitive; wire the UI when the feature is needed.
 
 ## Phase 11: Plugin Data — DONE
 **Goal**: Ensure extensibility for 3rd party tools without breaking the core parser.

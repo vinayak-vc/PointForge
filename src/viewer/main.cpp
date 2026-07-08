@@ -1177,6 +1177,45 @@ int main(int argc, char** argv) {
         if (!out) return;
         out << root.dump(2);
     };
+    // Phase 9: annotations embedded in the .vxpc. Package copy is per-cloud
+    // (single-cloud schema {version, annotations:[{p,label,color}]}), distinct
+    // from the multi-cloud AppData annotations.json above. On open the package
+    // copy is authoritative for that cloud; the save action writes it via the
+    // shared RepackPackage.
+    auto annotationsToPackageJson = [&](const std::string& dir) -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json arr = nlohmann::json::array();
+        auto it = allAnnotations.find(dir);
+        if (it != allAnnotations.end())
+            for (const Annotation& a : it->second)
+                arr.push_back({{"p", {a.pos.x, a.pos.y, a.pos.z}},
+                               {"label", cleanAnnotationLabel(a.label)},
+                               {"color", {a.color[0], a.color[1], a.color[2]}}});
+        root["annotations"] = std::move(arr);
+        return root.dump();
+    };
+    auto loadAnnotationsFromPackage = [&](const std::string& dir) {
+        if (!isVxpc(dir)) return;
+        pf::PackageReader r;
+        if (!r.Open(dir) || !r.Contains("annotations.json")) return;
+        auto buf = r.Read("annotations.json");
+        try {
+            auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+            std::vector<Annotation> items;
+            for (const auto& e : j.value("annotations", nlohmann::json::array())) {
+                if (!e.contains("p") || !e["p"].is_array() || e["p"].size() < 3) continue;
+                Annotation a;
+                a.pos = glm::dvec3(e["p"][0].get<double>(), e["p"][1].get<double>(), e["p"][2].get<double>());
+                a.label = cleanAnnotationLabel(e.value("label", std::string()));
+                if (a.label.empty()) a.label = "Pin " + std::to_string(items.size() + 1);
+                if (e.contains("color") && e["color"].is_array() && e["color"].size() >= 3)
+                    for (int i = 0; i < 3; ++i)
+                        if (e["color"][i].is_number()) a.color[i] = e["color"][i].get<float>();
+                items.push_back(std::move(a));
+            }
+            allAnnotations[dir] = std::move(items);   // package is authoritative for this cloud
+        } catch (...) { pf::logWarn("annotations.json in package is malformed"); }
+    };
     auto gotoAnnotation = [&](const Annotation& a) {
         // Annotation positions are world-space; the camera lives in scene
         // space (origin = first cloud's centre) — NOT the active cloud's.
@@ -1248,7 +1287,8 @@ int main(int argc, char** argv) {
             setActiveCloud((int)scene.size() - 1);
             if (scene.size() == 1) setupCamera();
             else frameAllReq = true;
-            loadCameraDataFromPackage(dir);   // .vxpc-embedded bookmarks/campath win
+            loadCameraDataFromPackage(dir);   // .vxpc-embedded bookmarks/campath/measure win
+            loadAnnotationsFromPackage(dir);  // .vxpc-embedded annotations win
             addRecent(dir);
             saveSettings();
             navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
@@ -1371,6 +1411,7 @@ int main(int argc, char** argv) {
         const std::string bm = bookmarksToJson(dir);
         const std::string cp = campathsToJson(dir);
         const std::string ms = measurementsToJson();
+        const std::string an = annotationsToPackageJson(dir);
         const glm::vec3 sp = cam.position; const float sy = cam.yaw, spi = cam.pitch;
         const bool so = cam.isOrtho; const float ss = cam.orthoSize;
 
@@ -1379,6 +1420,7 @@ int main(int argc, char** argv) {
             {"bookmarks.json",    std::vector<uint8_t>(bm.begin(), bm.end())},
             {"campaths.json",     std::vector<uint8_t>(cp.begin(), cp.end())},
             {"measurements.json", std::vector<uint8_t>(ms.begin(), ms.end())},
+            {"annotations.json",  std::vector<uint8_t>(an.begin(), an.end())},
         });
         loadOctree(dir);                    // re-adds + reloads embedded data
         cam.position = sp; cam.yaw = sy; cam.pitch = spi; cam.isOrtho = so; cam.orthoSize = ss;
@@ -3041,7 +3083,7 @@ int main(int argc, char** argv) {
                                         nullptr, false,
                                         octreeLoaded && isVxpc(activeCloud().dir)))
                         saveProjectDataToPackage();
-                    ImGui::SetItemTooltip("Embed this cloud's bookmarks, camera path + measurements into its .vxpc file");
+                    ImGui::SetItemTooltip("Embed this cloud's bookmarks, camera path, measurements + annotations into its .vxpc file");
                     ImGui::Separator();
                     if (ImGui::MenuItem("Screenshot", "F12")) pendingShot = true;
                     ImGui::Separator();

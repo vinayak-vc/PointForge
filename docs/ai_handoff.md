@@ -34,12 +34,16 @@ its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
   measurements in one repack). Loaded on open only for the first cloud
   (measurePts is scene-global). pftest round-trips measurements.json.
   Build + CTest green (v1042).
-- Planned next: 9 Annotations (same repack path — move package copy of
-  annotations.json in, authoritative on open, add to the save action), then
-  20 Documentation (rewrite docs/vxpc.md — stale 16-byte/var-name spec vs
-  actual 128-byte/fixed-64). Phase 13 (HTTP range streaming) needs
-  libcurl/WinHTTP — assess after. Deferred (multi-month, per plan): 10, 14,
-  17, 18, 19.
+### Phase 9 — Annotations (branch `vxpc/annotations`) — DONE
+- Per-cloud package `annotations.json` ({version, annotations:[{p,label,color}]},
+  distinct from the multi-cloud AppData file). Authoritative on open; written
+  in the "Save Project Data to Package" repack (now bookmarks + campath +
+  measurements + annotations). pftest round-trips it incl. an escaped-quote
+  label. Build + CTest green (v1043).
+- Planned next: 20 Documentation (rewrite docs/vxpc.md — stale 16-byte/var-name
+  spec vs actual 128-byte header / fixed-64 names + compression/CRC enums).
+  Phase 13 (HTTP range streaming) needs libcurl/WinHTTP — assess after.
+  Deferred (multi-month, per plan §"Long-Term"): 10, 14, 17, 18, 19.
 
 ## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
 
