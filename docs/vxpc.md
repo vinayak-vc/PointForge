@@ -194,8 +194,29 @@ with `Content-Range`). Note: streaming the octree **payload** node-by-node in
 the live viewer is not yet wired (the reader supports URL range reads; routing
 `OctreeStore`'s streaming worker through the same source is a follow-up).
 
-## 12. Deferred (not in v1)
+## 12. Multi-cloud packages
 
-Per `docs/vxpc_feature.md` §"Long-Term / High Complexity": multi-cloud packages
-(10), chunked `octree.bin` (14), crash-recovery/atomic journaling (17),
-AES encryption (18), and a true hierarchical VFS/trie directory (19).
+A `.vxpc` may hold several clouds. Each cloud's entries live under a
+`clouds/<i>/` name prefix (`clouds/0/meta.bin`, `clouds/0/octree.bin`, …), and a
+top-level `scene.json` manifest lists them:
+
+```json
+{ "version": 1,
+  "clouds": [ { "prefix": "clouds/0/", "name": "north-wing" },
+              { "prefix": "clouds/1/", "name": "south-wing" } ] }
+```
+
+A reader that finds `scene.json` is multi-cloud; otherwise the top-level
+`meta.bin`/`hierarchy.bin`/`octree.bin` are the single cloud. `OctreeStore`
+loads one member with a prefix argument; the viewer loads every member into its
+scene. Build one with `pfconvert --combine --out scene.vxpc a.vxpc b.vxpc …`,
+which copies each source's entries verbatim under a `clouds/<i>/` namespace
+(no re-compression) and writes the manifest. Nested multi-cloud sources are
+rejected. (This is packaging of already-converted clouds; merging N clouds into
+a single unified octree at index time is not part of v1.)
+
+## 13. Deferred (not in v1)
+
+Per `docs/vxpc_feature.md` §"Long-Term / High Complexity": chunked `octree.bin`
+(14), crash-recovery/atomic journaling (17), AES encryption (18), and a true
+hierarchical VFS/trie directory (19).

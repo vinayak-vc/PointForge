@@ -67,19 +67,41 @@ its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
   routing `OctreeStore`'s streaming worker through a `ByteSource` is the
   remaining work — left out to avoid touching the crash-sensitive path.
 
+### Phase 10 — Multi-cloud package (branch `vxpc/multi-cloud`) — DONE (packaging)
+- N clouds in one `.vxpc` under `clouds/<i>/` + top-level `scene.json` manifest.
+  Chose PACKAGING (copy already-converted single-cloud `.vxpc` verbatim under a
+  namespace) over the doc's re-index-time root-merging (that's the multi-month
+  part; still deferred).
+- pfcore: `combineClouds(outPath, sources)` (ReadRaw/AddRawEntry verbatim copy +
+  scene.json); `OctreeStore::load(dir, prefix)` reads a namespaced sub-cloud
+  (empty prefix = single-cloud, backward compatible). CLI: `pfconvert --combine
+  --out scene.vxpc a.vxpc b.vxpc …`.
+- viewer: `loadOctree` detects `scene.json` and adds every member as a
+  SceneCloud (reuses #6 scene machinery). `SceneCloud` gained `name` + `pkgPrefix`;
+  Scene panel + remote cfg use `name`. Save-project-data guarded off for
+  multi-cloud members (per-cloud sidecar save is a follow-up).
+- Tests: pftest `testMultiCloudPackage` (combine 2 → reopen → namespaced load +
+  full verifyStructure per cloud). Live: two real Tikal `.vxpc` combined
+  (584 MB), viewer loaded BOTH (2× "loaded 1024 nodes, 12.4M pts") + exported
+  video. Full build v1045 + CTest green.
+- Deferred within 10: index-time octree merging into one root; per-cloud
+  sidecar save into a multi-cloud package.
+
 ### VXPC run summary — where it stands
 - DONE this run (small to big, one branch each off the prior tip):
   11 plugin-data -> 7 camera-data -> 8 measurements -> 9 annotations ->
-  20 docs -> 13 streaming.
+  20 docs -> 13 streaming -> 10 multi-cloud.
   Chain: vxpc/plugin-data -> vxpc/camera-data -> vxpc/measurements ->
-  vxpc/annotations -> vxpc/documentation -> vxpc/streaming (each contains all
-  prior). PRs #18–#22 opened for 11/7/8/9/20 (stacked); Phase 13 PR to follow.
-- NOT merged to main — branches await PRs (multi-cloud #6 on vxpc/thumbnails is
-  also still unmerged; main tip = PR #9).
-- Remaining, explicitly deferred by the plan as multi-month architectural work
-  (out of scope): Phases 10 (multi-cloud package), 14 (chunked octree),
-  17 (recovery/atomic saves), 18 (encryption), 19 (hierarchical VFS). Every
-  non-deferred VXPC phase is now DONE.
+  vxpc/annotations -> vxpc/documentation -> vxpc/streaming -> vxpc/multi-cloud
+  (each contains all prior). PRs #18–#23 opened for 11/7/8/9/20/13 (stacked);
+  Phase 10 PR to follow.
+- NOT merged to main — branches await PRs (multi-cloud SCENE #6 on
+  vxpc/thumbnails is also still unmerged; main tip = PR #9).
+- Remaining, explicitly deferred as multi-month architectural work (out of
+  scope): 14 (chunked octree), 17 (recovery/atomic saves), 18 (encryption),
+  19 (hierarchical VFS). Phase 10 landed via the packaging approach; index-time
+  octree merging (the doc's original framing) stays deferred. Every other VXPC
+  phase is now DONE.
 - Live-test gap for 7/8/9: the viewer File > "Save Project Data to Package"
   action is code-verified + its repack path is pftest-proven end-to-end, but
   the menu click itself (close->repack->reload of the loaded package on

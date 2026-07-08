@@ -766,4 +766,85 @@ bool RepackPackage(const std::string& path,
     return true;
 }
 
+// --- Combine (Phase 10: multi-cloud package) ---
+
+static std::string fileStem(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    size_t dot = base.find_last_of('.');
+    return (dot == std::string::npos) ? base : base.substr(0, dot);
+}
+
+// Minimal JSON string escape (names are user-facing free text).
+static std::string jsonEscape(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+bool combineClouds(const std::string& outPath,
+                   const std::vector<std::pair<std::string, std::string>>& sources) {
+    if (sources.empty()) { logError("combineClouds: no sources"); return false; }
+
+    PackageWriter writer;
+    if (!writer.Create(outPath)) { logError("combineClouds: cannot create " + outPath); return false; }
+
+    std::string manifest = "{\n  \"version\": 1,\n  \"clouds\": [\n";
+
+    for (size_t i = 0; i < sources.size(); ++i) {
+        const std::string& srcPath = sources[i].first;
+        PackageReader r;
+        if (!r.Open(srcPath)) { logError("combineClouds: cannot open source " + srcPath); return false; }
+        if (r.Contains("scene.json")) {
+            logError("combineClouds: source is itself multi-cloud (nesting unsupported): " + srcPath);
+            return false;
+        }
+        const std::string prefix = "clouds/" + std::to_string(i) + "/";
+        // Copy every entry verbatim under the cloud's namespace.
+        for (const std::string& name : r.ListEntries()) {
+            VXPCDirectoryEntry e;
+            std::vector<uint8_t> raw = r.ReadRaw(name, e);
+            const uint64_t storedSize = (e.compression == 1) ? e.compressedSize : e.originalSize;
+            if (raw.size() != storedSize) {
+                logError("combineClouds: raw read short for " + name + " in " + srcPath);
+                return false;
+            }
+            VXPCDirectoryEntry ne = e;
+            const std::string nsName = prefix + name;
+            if (nsName.size() >= sizeof(ne.filename)) {
+                logError("combineClouds: namespaced name too long: " + nsName);
+                return false;
+            }
+            std::memset(ne.filename, 0, sizeof(ne.filename));
+            std::strncpy(ne.filename, nsName.c_str(), sizeof(ne.filename) - 1);
+            if (!writer.AddRawEntry(ne, raw.data(), raw.size())) {
+                logError("combineClouds: failed to append " + nsName);
+                return false;
+            }
+        }
+        const std::string name = sources[i].second.empty() ? fileStem(srcPath) : sources[i].second;
+        manifest += "    { \"prefix\": \"" + prefix + "\", \"name\": \"" + jsonEscape(name) + "\" }";
+        manifest += (i + 1 < sources.size()) ? ",\n" : "\n";
+    }
+    manifest += "  ]\n}\n";
+
+    if (!writer.AddMemory("scene.json", manifest.data(), manifest.size(),
+                          PackageWriter::Compression::None)) {
+        logError("combineClouds: failed to write scene.json");
+        return false;
+    }
+    if (!writer.Finalize()) { logError("combineClouds: finalize failed"); return false; }
+    logInfo("combineClouds: wrote " + std::to_string(sources.size()) + " clouds -> " + outPath);
+    return true;
+}
+
 } // namespace pf

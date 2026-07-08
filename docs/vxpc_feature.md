@@ -16,7 +16,7 @@
 | 7 | Camera Data | DONE | bookmarks.json + campaths.json in the package; `RepackPackage` (verbatim copy + upsert/remove); viewer File > "Save Camera Data to Package" + load-on-open; pftest `testRepack` |
 | 8 | Measurements | DONE | measurements.json (polyline) in the package via the shared repack; loaded for the first cloud; folded into File > "Save Project Data to Package"; pftest measurements round-trip |
 | 9 | Annotations | DONE | annotations.json (per-cloud) embedded via repack; authoritative on open; in File > "Save Project Data to Package"; pftest round-trip incl. quoted-label JSON safety. Image/audio attachments deferred |
-| 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
+| 10 | Multi Cloud | DONE (packaging) | N clouds in one `.vxpc` under `clouds/<i>/` + top-level `scene.json`; `combineClouds()` packer + `pfconvert --combine`; `OctreeStore::load(dir, prefix)`; viewer opens the manifest into the #6 scene. pftest `testMultiCloudPackage` + real 2-cloud viewer load. Re-index-time merging still deferred |
 | 11 | Plugin Data | DONE | `plugins/` namespace via `AddPluginData`; reader `ListEntries`/`ListPlugins`; core ignores non-fixed names; over-long filename guard; pftest `testPluginData` |
 | 12 | Custom Metadata | DONE | PackageWriter supports dynamic Key/Value addition serialized as custom_meta.json |
 | 13 | Streaming Support | DONE (reader) | `PackageReader` opens `http(s)://` URLs via WinHTTP Range requests + 64 KiB LRU block cache (`ByteSource` abstraction; file + HTTP). pftest loopback-server round-trip. Remote octree PAYLOAD streaming in the viewer = documented follow-up |
@@ -201,9 +201,32 @@
 
 > **Note**: The following phases require massive architectural shifts, multi-month development, or significant refactoring. They are deferred to the end of the roadmap and should not be implemented at this moment.
 
-## Phase 10: Multi Cloud
+## Phase 10: Multi Cloud — DONE (packaging approach)
 **Goal**: Store entire project scenes inside a single `.vxpc`.
-- **Why it's kept at last**: PointForge's core rendering and octree structures assume 1 root per package. Supporting N roots means rewriting the indexer to merge bounds, offset point coordinates, and maintain a Scene Graph inside the `.vxpc`.
+- **Implemented (packaging, not re-indexing)**: rather than rewrite the indexer
+  to merge N roots into one octree, several already-converted single-cloud
+  `.vxpc` files are *packed* into one multi-cloud package:
+  - Each source's entries are copied VERBATIM under a `clouds/<i>/` namespace
+    (via `ReadRaw`/`AddRawEntry` — no re-(de)compression), plus a top-level
+    `scene.json` manifest `{version, clouds:[{prefix, name}]}`.
+  - `pf::combineClouds(outPath, sources)` in pfcore; `pfconvert --combine --out
+    <scene.vxpc> <a.vxpc> <b.vxpc> …` CLI. Nested multi-cloud sources rejected.
+  - `OctreeStore::load(dir, prefix)` reads a namespaced sub-cloud
+    (`clouds/<i>/meta.bin` etc., octree offset from `clouds/<i>/octree.bin`);
+    empty prefix = the single-cloud layout (backward compatible).
+  - The viewer detects `scene.json` on open and adds each member as its own
+    `SceneCloud` (reusing the #6 multi-cloud SCENE machinery: per-cloud renderer,
+    shared scene origin, frame-all/visibility). `SceneCloud` gained `name`
+    (manifest label) + `pkgPrefix`.
+  - Tests: `pftest testMultiCloudPackage` — combine two clouds, reopen, assert
+    `scene.json` + namespaced entries, then load each via `load(dir, prefix)`
+    and run full `verifyStructure` (DFS + boxed query + pick) through the
+    namespaced octree offset. Live: two real Tikal `.vxpc` combined (584 MB)
+    and both loaded + rendered in the viewer.
+- **Still deferred**: (a) re-index-time merging into a single unified octree
+  (the doc's original framing — merge bounds/coords into one root); (b)
+  per-cloud sidecar (bookmarks/measure/annotation) save into a multi-cloud
+  package — the save action is guarded off for package members for now.
 
 ## Phase 14: Chunked Octree
 **Goal**: Pave the way for out-of-core massive datasets exceeding 1TB.

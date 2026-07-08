@@ -474,7 +474,11 @@ int main(int argc, char** argv) {
     struct SceneCloud {
         std::unique_ptr<OctreeStore> store;
         std::unique_ptr<PointRenderer> renderer;
-        std::string dir;
+        std::string dir;                  // source file/folder (shared by clouds
+                                          // from one multi-cloud package)
+        std::string pkgPrefix;            // "clouds/<i>/" for a multi-cloud
+                                          // package member; empty otherwise
+        std::string name;                 // display label (Scene panel / remote)
         bool visible = true;
         glm::dvec3 worldOffset = glm::dvec3(0.0);
     };
@@ -1269,36 +1273,71 @@ int main(int argc, char** argv) {
     // Load an octree directory, reset view, record it as recent.
     auto loadOctree = [&](const std::string& dir) -> bool {
         cancelActiveSliceExports();
-        SceneCloud cloud;
-        cloud.store = std::make_unique<OctreeStore>();
-        cloud.renderer = std::make_unique<PointRenderer>();
-        cloud.dir = dir;
-        cloud.visible = true;
-        if (cloud.store->load(dir)) {
-            if (scene.empty()) {
-                sceneOrigin = cloud.store->cubeCenter();
+
+        // Append one cloud; `prefix` selects a namespaced sub-cloud of a
+        // multi-cloud package (Phase 10), empty for a single-cloud load.
+        auto appendCloud = [&](const std::string& d, const std::string& prefix,
+                               const std::string& name) -> bool {
+            SceneCloud cloud;
+            cloud.store = std::make_unique<OctreeStore>();
+            cloud.renderer = std::make_unique<PointRenderer>();
+            cloud.dir = d;
+            cloud.pkgPrefix = prefix;
+            cloud.name = name.empty() ? baseName(d) : name;
+            cloud.visible = true;
+            if (!cloud.store->load(d, prefix)) {
+                pf::logError("Could not load octree from " + d +
+                             (prefix.empty() ? "" : " [" + prefix + "]"));
+                return false;
             }
+            if (scene.empty()) sceneOrigin = cloud.store->cubeCenter();
             cloud.worldOffset = cloud.store->cubeCenter() - sceneOrigin;
-            double offsetMeters = glm::length(cloud.worldOffset);
-            if (offsetMeters > 100000.0) {
+            if (glm::length(cloud.worldOffset) > 100000.0)
                 pf::logWarn("Cloud is more than 100 km from the scene origin; precision may be reduced");
-            }
             scene.push_back(std::move(cloud));
-            setActiveCloud((int)scene.size() - 1);
-            if (scene.size() == 1) setupCamera();
-            else frameAllReq = true;
+            return true;
+        };
+
+        // Phase 10: a multi-cloud package carries a scene.json manifest — add
+        // every listed member as its own SceneCloud (reuses the #6 scene).
+        std::vector<std::pair<std::string, std::string>> members;  // (prefix, name)
+        if (isVxpc(dir)) {
+            pf::PackageReader r;
+            if (r.Open(dir) && r.Contains("scene.json")) {
+                auto buf = r.Read("scene.json");
+                try {
+                    auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                    for (const auto& c : j.value("clouds", nlohmann::json::array())) {
+                        std::string prefix = c.value("prefix", std::string());
+                        if (!prefix.empty()) members.push_back({prefix, c.value("name", std::string())});
+                    }
+                } catch (...) { pf::logWarn("scene.json malformed; loading as single cloud"); }
+            }
+        }
+
+        const bool wasEmpty = scene.empty();
+        bool anyLoaded = false;
+        if (!members.empty()) {
+            for (const auto& m : members) anyLoaded |= appendCloud(dir, m.first, m.second);
+        } else {
+            anyLoaded = appendCloud(dir, "", "");
+        }
+        if (!anyLoaded) { pf::logError("Could not load any cloud from " + dir); return false; }
+
+        setActiveCloud((int)scene.size() - 1);
+        if (wasEmpty && scene.size() == 1) setupCamera();
+        else frameAllReq = true;
+        if (members.empty()) {   // single-cloud sidecars live at the top level
             loadCameraDataFromPackage(dir);   // .vxpc-embedded bookmarks/campath/measure win
             loadAnnotationsFromPackage(dir);  // .vxpc-embedded annotations win
-            addRecent(dir);
-            saveSettings();
-            navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
-#ifdef _WIN32
-            MessageBeep(MB_ICONINFORMATION);
-#endif
-            return true;
         }
-        pf::logError("Could not load octree from " + dir);
-        return false;
+        addRecent(dir);
+        saveSettings();
+        navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
+#ifdef _WIN32
+        MessageBeep(MB_ICONINFORMATION);
+#endif
+        return true;
     };
 
     auto closeCloud = [&](int index) {
@@ -1406,6 +1445,12 @@ int main(int argc, char** argv) {
         const std::string dir = activeCloud().dir;
         if (!isVxpc(dir)) {
             addToast("Project data can only be embedded in a .vxpc package", "", true);
+            return;
+        }
+        if (!activeCloud().pkgPrefix.empty()) {
+            // Sidecars in a multi-cloud package are per-cloud (namespaced);
+            // the single top-level repack path would corrupt it. Not yet wired.
+            addToast("Saving project data into a multi-cloud package isn't supported yet", "", true);
             return;
         }
         const std::string bm = bookmarksToJson(dir);
@@ -2244,7 +2289,7 @@ int main(int argc, char** argv) {
                 }
                 for (const SceneCloud& sc : scene) {
                     RemoteConfig::Cloud rcc;
-                    rcc.name = baseName(sc.dir);
+                    rcc.name = sc.name.empty() ? baseName(sc.dir) : sc.name;
                     rcc.pts = sc.store ? sc.store->meta().pointCount : 0;
                     rcc.visible = sc.visible;
                     rc.clouds.push_back(std::move(rcc));
@@ -3296,7 +3341,7 @@ int main(int argc, char** argv) {
                             ImGui::SetItemTooltip("Show/hide this cloud in the viewport");
                             ImGui::SameLine();
                             bool selected = i == activeCloudIndex;
-                            std::string label = baseName(cloud.dir) + "##cloud";
+                            std::string label = (cloud.name.empty() ? baseName(cloud.dir) : cloud.name) + "##cloud";
                             if (ImGui::Selectable(label.c_str(), selected)) {
                                 setActiveCloud(i);
                             }
