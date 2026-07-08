@@ -20,10 +20,79 @@
 #endif
 #include <windows.h>
 #include <winhttp.h>
+#include <bcrypt.h>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "bcrypt.lib")
+#define PF_HAS_CRYPTO 1
 #endif
 
 namespace pf {
+
+// ---- Phase 18: AES-256-GCM at-rest crypto (Windows CNG / BCrypt) ----------
+// PBKDF2-HMAC-SHA256 key derivation, per-entry random 12-byte IV, 16-byte GCM
+// auth tag. Stored encrypted entry = IV(12) | tag(16) | ciphertext.
+// Framing sizes are unconditional so ReadRaw/Read compute stored lengths even
+// on a build with no crypto backend (it still won't be able to decrypt).
+static constexpr int kIvLen = 12, kTagLen = 16;
+static constexpr int kEncFrame = kIvLen + kTagLen;   // 28
+#ifdef PF_HAS_CRYPTO
+static constexpr int kKeyLen = 32, kSaltLen = 16;
+static constexpr uint32_t kPbkdf2Iterations = 100000;
+#define PF_NT_OK(s) (((NTSTATUS)(s)) >= 0)
+
+static bool cryptoRandom(uint8_t* buf, size_t n) {
+    return PF_NT_OK(BCryptGenRandom(nullptr, buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+}
+
+static bool cryptoDeriveKey(const std::string& password, const uint8_t* salt, size_t saltLen,
+                            uint32_t iterations, uint8_t* outKey, size_t keyLen) {
+    BCRYPT_ALG_HANDLE hPrf = nullptr;
+    if (!PF_NT_OK(BCryptOpenAlgorithmProvider(&hPrf, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                              BCRYPT_ALG_HANDLE_HMAC_FLAG)))
+        return false;
+    NTSTATUS s = BCryptDeriveKeyPBKDF2(
+        hPrf, (PUCHAR)password.data(), (ULONG)password.size(),
+        (PUCHAR)salt, (ULONG)saltLen, (ULONGLONG)iterations, outKey, (ULONG)keyLen, 0);
+    BCryptCloseAlgorithmProvider(hPrf, 0);
+    return PF_NT_OK(s);
+}
+
+// AES-256-GCM. Encrypt: caller provides a fresh random iv (kIvLen); fills tag
+// (kTagLen) + out (== inLen). Decrypt: verifies tag, fails on mismatch.
+static bool aesGcm(bool encrypt, const uint8_t* key,
+                   const uint8_t* iv, uint8_t* tag,
+                   const uint8_t* in, size_t inLen, uint8_t* out) {
+    BCRYPT_ALG_HANDLE hAlg = nullptr;
+    BCRYPT_KEY_HANDLE hKey = nullptr;
+    bool ok = false;
+    if (!PF_NT_OK(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, nullptr, 0))) return false;
+    do {
+        if (!PF_NT_OK(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
+                                        (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
+                                        sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) break;
+        if (!PF_NT_OK(BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0,
+                                                 (PUCHAR)key, kKeyLen, 0))) break;
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+        BCRYPT_INIT_AUTH_MODE_INFO(info);
+        info.pbNonce = (PUCHAR)iv;   info.cbNonce = kIvLen;
+        info.pbTag   = tag;          info.cbTag   = kTagLen;
+        ULONG done = 0;
+        NTSTATUS s = encrypt
+            ? BCryptEncrypt(hKey, (PUCHAR)in, (ULONG)inLen, &info, nullptr, 0, out, (ULONG)inLen, &done, 0)
+            : BCryptDecrypt(hKey, (PUCHAR)in, (ULONG)inLen, &info, nullptr, 0, out, (ULONG)inLen, &done, 0);
+        ok = PF_NT_OK(s) && done == inLen;
+    } while (false);
+    if (hKey) BCryptDestroyKey(hKey);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return ok;
+}
+
+// Fixed keycheck plaintext (16 bytes) encrypted under the derived key so a
+// reader can validate the password before touching real entries.
+static const uint8_t kKeyCheckPlain[16] = {
+    'V','X','P','C','-','K','E','Y','C','H','E','C','K','!','!','!'
+};
+#endif // PF_HAS_CRYPTO
 
 static_assert(sizeof(VXPCHeader) == 128, "VXPCHeader size mismatch");
 static_assert(sizeof(VXPCDirectoryEntry) == 104, "VXPCDirectoryEntry size mismatch");
@@ -439,39 +508,80 @@ bool PackageWriter::AddFile(const std::string& filename, const std::string& sour
     return AddMemory(filename, buffer.data(), size, comp);
 }
 
+bool PackageWriter::SetEncryption(const std::string& password) {
+#ifdef PF_HAS_CRYPTO
+    if (!valid_) return false;
+    salt_.resize(kSaltLen);
+    if (!cryptoRandom(salt_.data(), kSaltLen)) { logError("PackageWriter: RNG failed"); return false; }
+    iterations_ = kPbkdf2Iterations;
+    key_.resize(kKeyLen);
+    if (!cryptoDeriveKey(password, salt_.data(), kSaltLen, iterations_, key_.data(), kKeyLen)) {
+        key_.clear();
+        logError("PackageWriter: key derivation failed");
+        return false;
+    }
+    encrypt_ = true;
+    return true;
+#else
+    (void)password;
+    logError("PackageWriter: encryption not supported on this platform");
+    return false;
+#endif
+}
+
 bool PackageWriter::AddMemory(const std::string& filename, const void* data, size_t size, Compression comp) {
     if (!BeginFile(filename)) return false;
-    
-    currentEntry_.compression = (uint32_t)comp;
 
+    // 1. Compress (optional). `payload` = post-compression bytes.
+    const uint8_t* payload = (const uint8_t*)data;
+    size_t payloadLen = size;
+    uint32_t compression = (uint32_t)Compression::None;
+    std::vector<uint8_t> compBuf;
     if (comp == Compression::ZSTD && size > 0) {
 #ifdef PF_WITH_ZSTD
         size_t bound = ZSTD_compressBound(size);
-        std::vector<uint8_t> cbuf(bound);
-        size_t cSize = ZSTD_compress(cbuf.data(), bound, data, size, 3);
+        compBuf.resize(bound);
+        size_t cSize = ZSTD_compress(compBuf.data(), bound, data, size, 3);
         if (!ZSTD_isError(cSize) && cSize < size) {
-            if (!Write(cbuf.data(), cSize)) {
-                EndFile();
-                return false;
-            }
-            // Fix original size since Write() increments both originalSize and compressedSize
-            currentEntry_.originalSize = size;
-            return EndFile();
-        } else {
-            // Fallback to uncompressed if ZSTD error or incompressible
-            currentEntry_.compression = (uint32_t)Compression::None;
-        }
+            compBuf.resize(cSize);
+            payload = compBuf.data(); payloadLen = cSize;
+            compression = (uint32_t)Compression::ZSTD;
+        }   // else incompressible -> keep None (payload stays = data)
 #else
-        logError("PackageWriter: ZSTD not compiled in, falling back to None");
-        currentEntry_.compression = (uint32_t)Compression::None;
+        logError("PackageWriter: ZSTD not compiled in, storing uncompressed");
 #endif
     }
-    
-    // Uncompressed path
-    if (!Write(data, size)) {
-        EndFile();
-        return false;
+
+    // 2. Encrypt (optional, AFTER compression). Stored = IV|tag|ciphertext.
+    std::vector<uint8_t> stored;
+    uint32_t flags = 0;
+    if (encrypt_) {
+#ifdef PF_HAS_CRYPTO
+        stored.resize((size_t)kIvLen + kTagLen + payloadLen);
+        uint8_t* iv  = stored.data();
+        uint8_t* tag = stored.data() + kIvLen;
+        uint8_t* ct  = stored.data() + kIvLen + kTagLen;
+        if (!cryptoRandom(iv, kIvLen) ||
+            !aesGcm(true, key_.data(), iv, tag, payload, payloadLen, ct)) {
+            logError("PackageWriter: encryption failed for " + filename);
+            EndFile(); return false;
+        }
+        flags |= VXPC_FLAG_ENCRYPTED;
+#else
+        logError("PackageWriter: encryption requested but no crypto backend");
+        EndFile(); return false;
+#endif
+    } else {
+        stored.assign(payload, payload + payloadLen);
     }
+
+    // 3. Write stored bytes (Write computes crc over them). Then set the
+    //    logical sizes: originalSize=plaintext, compressedSize=pre-encryption.
+    if (!Write(stored.data(), stored.size())) { EndFile(); return false; }
+    currentEntry_.compression    = compression;
+    currentEntry_.flags         |= flags;
+    currentEntry_.originalSize    = size;
+    currentEntry_.compressedSize  = payloadLen;
     return EndFile();
 }
 bool PackageWriter::AddPluginData(const std::string& relPath, const void* data, size_t size, Compression comp) {
@@ -535,6 +645,31 @@ bool PackageWriter::Finalize() {
         json += "}\n";
         AddMemory("custom_meta.json", json.c_str(), json.size(), Compression::ZSTD);
     }
+
+#ifdef PF_HAS_CRYPTO
+    // Phase 18: keycheck entry (stored UNENCRYPTED) so a reader can verify the
+    // password before decrypting real entries. Layout:
+    //   "VXCR"(4) | iterations(4) | salt(16) | checkIV(12) | checkTag(16) | checkCT(16)
+    if (encrypt_ && !key_.empty()) {
+        uint8_t blob[68];
+        std::memset(blob, 0, sizeof(blob));
+        std::memcpy(blob, "VXCR", 4);
+        std::memcpy(blob + 4, &iterations_, 4);
+        std::memcpy(blob + 8, salt_.data(), kSaltLen);
+        uint8_t* civ  = blob + 24;
+        uint8_t* ctag = blob + 36;
+        uint8_t* cct  = blob + 52;
+        if (cryptoRandom(civ, kIvLen) &&
+            aesGcm(true, key_.data(), civ, ctag, kKeyCheckPlain, sizeof(kKeyCheckPlain), cct)) {
+            bool save = encrypt_; encrypt_ = false;   // the keycheck itself is plaintext
+            AddMemory("vxpc_crypto", blob, sizeof(blob), Compression::None);
+            encrypt_ = save;
+        } else {
+            logError("PackageWriter: failed to build keycheck");
+            return false;
+        }
+    }
+#endif
 
     if (!WriteDirectory()) return false;
 
@@ -615,8 +750,10 @@ std::vector<uint8_t> PackageReader::ReadRaw(const std::string& name, VXPCDirecto
     if (!valid_ || !Contains(name)) return buffer;
 
     outEntry = GetEntry(name);
-    const uint64_t storedSize = (outEntry.compression == 1) ? outEntry.compressedSize
-                                                            : outEntry.originalSize;
+    // Stored length = pre-encryption payload (compressedSize) + the IV|tag
+    // framing when encrypted. Verbatim bytes, no decrypt/decompress/CRC.
+    const uint64_t frame = (outEntry.flags & VXPC_FLAG_ENCRYPTED) ? (uint64_t)kEncFrame : 0;
+    const uint64_t storedSize = frame + outEntry.compressedSize;
     if (storedSize == 0) return buffer;   // valid empty entry
     if (!src_) return buffer;
 
@@ -654,7 +791,10 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
     }
     if (!src_) return buffer;
 
-    uint64_t readSize = (entry.compression == 1) ? entry.compressedSize : entry.originalSize;
+    // Stored bytes = [IV|tag] (if encrypted) + payload (compressedSize).
+    const bool encrypted = (entry.flags & VXPC_FLAG_ENCRYPTED) != 0;
+    const uint64_t frame = encrypted ? (uint64_t)kEncFrame : 0;
+    const uint64_t readSize = frame + entry.compressedSize;
     std::vector<uint8_t> diskBuffer(readSize);
 
     if (readSize > 0) {
@@ -668,14 +808,39 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
                 diskBuffer.clear();
             }
         }
+        if (diskBuffer.empty()) return buffer;
     }
 
-    if (diskBuffer.empty()) return buffer;
+    // Phase 18: decrypt (AES-256-GCM) -> payload (compressedSize bytes).
+    std::vector<uint8_t> payload;
+    if (encrypted) {
+#ifdef PF_HAS_CRYPTO
+        if (key_.empty()) {
+            logError("PackageReader: '" + name + "' is encrypted — call SetPassword() first");
+            return buffer;
+        }
+        payload.resize(entry.compressedSize);
+        uint8_t* iv  = diskBuffer.data();
+        uint8_t* tag = diskBuffer.data() + kIvLen;
+        uint8_t* ct  = diskBuffer.data() + kEncFrame;
+        if (!aesGcm(false, key_.data(), iv, tag, ct, entry.compressedSize, payload.data())) {
+            logError("PackageReader: decryption/authentication failed for " + name);
+            return buffer;
+        }
+#else
+        logError("PackageReader: encrypted entry '" + name + "' but no crypto backend");
+        return buffer;
+#endif
+    } else {
+        payload = std::move(diskBuffer);
+    }
+
+    if (payload.empty() && entry.originalSize == 0) return buffer;  // valid empty
 
     if (entry.compression == 1) { // ZSTD
 #ifdef PF_WITH_ZSTD
         buffer.resize(entry.originalSize);
-        size_t dSize = ZSTD_decompress(buffer.data(), entry.originalSize, diskBuffer.data(), diskBuffer.size());
+        size_t dSize = ZSTD_decompress(buffer.data(), entry.originalSize, payload.data(), payload.size());
         if (ZSTD_isError(dSize) || dSize != entry.originalSize) {
             logError("PackageReader: ZSTD decompression failed for " + name);
             buffer.clear();
@@ -684,10 +849,48 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
         logError("PackageReader: Cannot decompress ZSTD because PF_WITH_ZSTD is not defined.");
 #endif
     } else {
-        buffer = std::move(diskBuffer);
+        buffer = std::move(payload);
     }
 
     return buffer;
+}
+
+bool PackageReader::isEncrypted() const { return valid_ && Contains("vxpc_crypto"); }
+
+bool PackageReader::SetPassword(const std::string& password) {
+#ifdef PF_HAS_CRYPTO
+    if (!valid_ || !Contains("vxpc_crypto")) {
+        logError("PackageReader: package is not encrypted");
+        return false;
+    }
+    auto blob = Read("vxpc_crypto");   // stored unencrypted
+    if (blob.size() != 68 || std::memcmp(blob.data(), "VXCR", 4) != 0) {
+        logError("PackageReader: malformed vxpc_crypto keycheck");
+        return false;
+    }
+    uint32_t iters = 0; std::memcpy(&iters, blob.data() + 4, 4);
+    const uint8_t* salt = blob.data() + 8;
+    uint8_t* civ  = blob.data() + 24;
+    uint8_t* ctag = blob.data() + 36;
+    uint8_t* cct  = blob.data() + 52;
+    std::vector<uint8_t> k(kKeyLen);
+    if (!cryptoDeriveKey(password, salt, kSaltLen, iters, k.data(), kKeyLen)) {
+        logError("PackageReader: key derivation failed");
+        return false;
+    }
+    uint8_t check[16];
+    if (!aesGcm(false, k.data(), civ, ctag, cct, sizeof(check), check) ||
+        std::memcmp(check, kKeyCheckPlain, sizeof(check)) != 0) {
+        logError("PackageReader: wrong password");
+        return false;
+    }
+    key_ = std::move(k);
+    return true;
+#else
+    (void)password;
+    logError("PackageReader: encryption not supported on this platform");
+    return false;
+#endif
 }
 
 // --- Repack (Phase 7 support) ---
@@ -722,7 +925,7 @@ bool RepackPackage(const std::string& path,
             if (removeNames.count(name) || upsertNames.count(name)) continue;
             VXPCDirectoryEntry e;
             std::vector<uint8_t> raw = reader.ReadRaw(name, e);
-            const uint64_t storedSize = (e.compression == 1) ? e.compressedSize : e.originalSize;
+            const uint64_t storedSize = ((e.flags & VXPC_FLAG_ENCRYPTED) ? (uint64_t)kEncFrame : 0) + e.compressedSize;
             if (raw.size() != storedSize) {
                 logError("RepackPackage: raw read short for " + name);
                 std::error_code ec; std::filesystem::remove(tmp, ec);
@@ -813,7 +1016,7 @@ bool combineClouds(const std::string& outPath,
         for (const std::string& name : r.ListEntries()) {
             VXPCDirectoryEntry e;
             std::vector<uint8_t> raw = r.ReadRaw(name, e);
-            const uint64_t storedSize = (e.compression == 1) ? e.compressedSize : e.originalSize;
+            const uint64_t storedSize = ((e.flags & VXPC_FLAG_ENCRYPTED) ? (uint64_t)kEncFrame : 0) + e.compressedSize;
             if (raw.size() != storedSize) {
                 logError("combineClouds: raw read short for " + name + " in " + srcPath);
                 return false;

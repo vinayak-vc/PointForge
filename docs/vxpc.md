@@ -215,8 +215,28 @@ which copies each source's entries verbatim under a `clouds/<i>/` namespace
 rejected. (This is packaging of already-converted clouds; merging N clouds into
 a single unified octree at index time is not part of v1.)
 
-## 13. Deferred (not in v1)
+## 13. Encryption (at rest)
+
+Individual entries may be encrypted with **AES-256-GCM**. An encrypted entry
+sets `flags` bit 0 (`VXPC_FLAG_ENCRYPTED`) and its stored bytes are
+`IV(12) | tag(16) | ciphertext`; `compressedSize` remains the pre-encryption
+payload length and `crc32` covers the full stored (encrypted) bytes. Encryption
+is applied **after** compression, per entry.
+
+The key is derived from a password via PBKDF2-HMAC-SHA256 (16-byte random salt,
+100 000 iterations → 32-byte key). A plaintext **`vxpc_crypto`** entry holds the
+salt, iteration count, and an encrypted known-plaintext keycheck
+(`"VXCR" | iterations(4) | salt(16) | checkIV(12) | checkTag(16) | checkCT(16)`),
+letting a reader validate the password before decrypting real entries. The
+reference backend is Windows CNG (BCrypt); a build without a crypto backend can
+still read plaintext entries but cannot decrypt.
+
+Scope: this protects metadata/sidecar entries at rest. The streamed `octree.bin`
+payload is not encrypted (the streaming reader would need block-aligned per-node
+decryption); encrypting it, plus a viewer password prompt, is future work.
+
+## 14. Deferred (not in v1)
 
 Per `docs/vxpc_feature.md` §"Long-Term / High Complexity": chunked `octree.bin`
-(14), crash-recovery/atomic journaling (17), AES encryption (18), and a true
-hierarchical VFS/trie directory (19).
+(14), crash-recovery/atomic journaling (17), and a true hierarchical VFS/trie
+directory (19).

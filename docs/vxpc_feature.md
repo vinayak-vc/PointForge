@@ -24,7 +24,7 @@
 | 15 | Compression | DONE | ZSTD compression added to PackageWriter AddMemory/AddFile APIs |
 | 16 | Checksums | DONE | Implemented CRC32 computation per-file, computed by Writer, validated by Reader on Read() |
 | 17 | Recovery | PLANNED | Crash recovery, rollback, atomic saves |
-| 18 | Encryption | PLANNED | AES reserved flags |
+| 18 | Encryption | DONE (at-rest, pfcore) | Per-entry AES-256-GCM via Windows CNG/BCrypt; PBKDF2-HMAC-SHA256 key (100k iters); `PackageWriter::SetEncryption` + `PackageReader::SetPassword`/`isEncrypted`; entry `flags` bit0 + IV\|tag\|ct framing; `vxpc_crypto` keycheck; pftest `testEncryption`. Streaming octree-payload decryption + viewer/CLI = follow-up |
 | 19 | Virtual File System | PLANNED | True VFS hierarchy (`/clouds/`, `/images/`, `/plugins/`) |
 | 20 | Documentation | DONE | `docs/vxpc.md` rewritten as the authoritative v1 spec (128-byte header, 104-byte entry, compression/CRC/endianness, well-known entries, repack, back-compat) — matches the code, replaces the stale 16-byte-header draft |
 
@@ -236,9 +236,38 @@
 **Goal**: Fail-safe generation and crash recovery.
 - **Why it's kept at last**: Requires a journaling system inside the `.vxpc`. Modifying a 100GB package safely means either full file duplication (too slow) or append-only block chains (requires a garbage collection phase and complicates read offsets).
 
-## Phase 18: Encryption
+## Phase 18: Encryption — DONE (at-rest, pfcore)
 **Goal**: Data security via AES.
-- **Why it's kept at last**: Streaming decryption of AES-CTR or AES-GCM requires strict block-aligned reads. Random access point-picking would have to read block boundaries, decrypt, and then extract the point. Significant performance penalty.
+- **Implemented (per-entry at-rest AES-256-GCM)**:
+  - Backend: **Windows CNG / BCrypt** (OS-native, no new dependency — same
+    `#pragma comment(lib,"bcrypt.lib")` pattern as WinHTTP/Media Foundation).
+    Non-Windows builds compile with the API returning `false` (no backend).
+  - Key: derived from a password via **PBKDF2-HMAC-SHA256** (random 16-byte
+    salt, 100 000 iterations) → 32-byte AES-256 key.
+  - Per entry: compress (optional) → encrypt. Stored bytes are
+    `IV(12) | tag(16) | ciphertext`; the entry's `flags` bit0
+    (`VXPC_FLAG_ENCRYPTED`) marks it, `compressedSize` stays the pre-encryption
+    payload length, CRC32 covers the stored (encrypted) bytes.
+  - `PackageWriter::SetEncryption(password)` enables it for subsequent entries;
+    `Finalize()` writes a plaintext **`vxpc_crypto`** keycheck (salt + iters +
+    an encrypted known-plaintext) so `PackageReader::SetPassword(password)` can
+    verify the password (and reject a wrong one) before decrypting anything.
+    `PackageReader::Read` transparently decrypts flagged entries once the
+    password is set (refuses with a clear error if not).
+  - Encrypted entries survive `RepackPackage`/`combineClouds` — they're copied
+    verbatim (framed bytes + flags), so repack/combine need no key.
+  - Tests: `pftest testEncryption` — flagged + framed storage, plaintext absent
+    from ciphertext, read-without-password refused, **wrong password rejected**
+    (GCM auth), correct password round-trips (both compression modes), and
+    encrypted entries stay decryptable across a repack.
+- **Why the rest is still deferred** (the plan's original concern): encrypting
+  the STREAMED `octree.bin` payload. `OctreeStore` streams nodes via a raw
+  `ifstream` at byte offsets and never goes through `PackageReader::Read`, so an
+  encrypted `octree.bin` can't be streamed/point-picked without block-aligned
+  per-node decryption (a real perf/architecture cost). This phase therefore
+  encrypts metadata/sidecar entries at the format level; `pfconvert` is NOT
+  wired to encrypt `octree.bin` (it would make packages unloadable), and there
+  is no viewer password UI yet. Both are the documented follow-up.
 
 ## Phase 19: Virtual File System
 **Goal**: Fully hierarchical container acting like a ZIP tree.

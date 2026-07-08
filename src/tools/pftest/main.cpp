@@ -478,6 +478,71 @@ static void testMultiCloudPackage(const std::string& a, const std::string& b, co
     fs::remove(scenePkg, ec);
 }
 
+// Phase 18: AES-256-GCM at-rest encryption. Self-contained; Windows-only
+// (matches the BCrypt backend). Verifies: entries flagged + framed (IV|tag|ct),
+// plaintext absent from ciphertext, read-without-password refused, wrong
+// password rejected, correct password round-trips (both compression modes),
+// and encrypted entries survive a repack (copied verbatim, still decryptable).
+#ifdef _WIN32
+static void testEncryption(const std::string& work) {
+    const std::string pkg = work + "/enc.vxpc";
+    const std::string pw = "correct horse battery staple";
+    const std::string secretA = "top secret metadata payload that should be encrypted at rest";
+    const std::vector<uint8_t> secretB = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 255, 254, 253};
+
+    {
+        pf::PackageWriter w;
+        CHECK(w.Create(pkg), "enc: Create failed");
+        CHECK(w.SetEncryption(pw), "enc: SetEncryption failed");
+        CHECK(w.AddMemory("a.txt", secretA.data(), secretA.size(), pf::PackageWriter::Compression::ZSTD), "enc: add a");
+        CHECK(w.AddMemory("b.bin", secretB.data(), secretB.size(), pf::PackageWriter::Compression::None), "enc: add b");
+        CHECK(w.Finalize(), "enc: Finalize failed");
+    }
+
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkg), "enc: open failed");
+        CHECK(r.isEncrypted(), "enc: isEncrypted() false");
+        pf::VXPCDirectoryEntry e;
+        auto raw = r.ReadRaw("a.txt", e);
+        CHECK((e.flags & pf::VXPC_FLAG_ENCRYPTED) != 0, "enc: entry not flagged encrypted");
+        CHECK(raw.size() == 28 + e.compressedSize, "enc: stored size != IV+tag+ciphertext");
+        std::string rawStr(raw.begin(), raw.end());
+        CHECK(rawStr.find("top secret") == std::string::npos, "enc: plaintext leaked into ciphertext!");
+        CHECK(r.Read("a.txt").empty(), "enc: read without password returned data");
+    }
+
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkg), "enc: reopen failed");
+        CHECK(!r.SetPassword("wrong password"), "enc: wrong password ACCEPTED");
+        CHECK(r.SetPassword(pw), "enc: correct password rejected");
+        auto a = r.Read("a.txt");
+        CHECK(std::string(a.begin(), a.end()) == secretA, "enc: a.txt round-trip mismatch");
+        auto b = r.Read("b.bin");
+        CHECK(b == secretB, "enc: b.bin round-trip mismatch");
+    }
+
+    {
+        const std::string plain = "{\"note\":\"added later, plaintext\"}";
+        CHECK(pf::RepackPackage(pkg, {{"note.json", std::vector<uint8_t>(plain.begin(), plain.end())}}),
+              "enc: repack failed");
+        pf::PackageReader r;
+        CHECK(r.Open(pkg), "enc: reopen after repack");
+        CHECK(r.SetPassword(pw), "enc: password rejected after repack");
+        auto a = r.Read("a.txt");
+        CHECK(std::string(a.begin(), a.end()) == secretA, "enc: a.txt lost across repack");
+        auto n = r.Read("note.json");
+        CHECK(std::string(n.begin(), n.end()) == plain, "enc: plaintext upsert wrong");
+    }
+
+    std::error_code ec;
+    fs::remove(pkg, ec);
+}
+#else
+static void testEncryption(const std::string&) {}
+#endif
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -502,6 +567,9 @@ int main(int argc, char** argv) {
 
     std::printf("pftest: [phase 11] plugin-data namespace + listing...\n");
     testPluginData(work);
+
+    std::printf("pftest: [phase 18] AES-256-GCM at-rest encryption...\n");
+    testEncryption(work);
 
     std::printf("pftest: generating %llu synthetic points...\n", (unsigned long long)nPoints);
     if (!writeSyntheticXyz(xyz, nPoints)) {
