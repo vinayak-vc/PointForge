@@ -23,14 +23,19 @@ struct VXPCHeader {
     uint32_t reserved[15] = {0}; // Padding for future use to reach 128 bytes
 };
 
+// Per-entry `flags` bits.
+enum VXPCEntryFlags : uint32_t {
+    VXPC_FLAG_ENCRYPTED = 1u << 0,   // stored bytes are IV(12)|tag(16)|ciphertext (Phase 18)
+};
+
 struct VXPCDirectoryEntry {
     char     filename[64] = {0};
     uint64_t offset = 0;
-    uint64_t compressedSize = 0;
-    uint64_t originalSize = 0;
+    uint64_t compressedSize = 0;   // stored payload length BEFORE encryption framing
+    uint64_t originalSize = 0;     // plaintext length (before compression)
     uint32_t compression = 0;
-    uint32_t crc32 = 0;
-    uint32_t flags = 0;
+    uint32_t crc32 = 0;            // over the STORED bytes (post-compress, post-encrypt)
+    uint32_t flags = 0;            // VXPCEntryFlags
     uint32_t userFlags = 0;
 };
 
@@ -83,6 +88,14 @@ public:
     bool Write(const void* data, size_t size);
     bool EndFile();
 
+    // Phase 18: enable AES-256-GCM at-rest encryption for entries added AFTER
+    // this call. The key is derived from `password` via PBKDF2-HMAC-SHA256
+    // (random 16-byte salt, 100k iterations); Finalize() writes a plaintext
+    // "vxpc_crypto" keycheck entry so a reader can verify the password.
+    // Encryption runs after compression (per entry). Returns false if this
+    // build has no crypto backend (non-Windows) or key setup fails.
+    bool SetEncryption(const std::string& password);
+
     // High level Add APIs
     enum class Compression { None = 0, ZSTD = 1 };
     bool AddFile(const std::string& filename, const std::string& sourcePath, Compression comp = Compression::None);
@@ -125,6 +138,12 @@ private:
     std::vector<VXPCDirectoryEntry> directory_;
     VXPCHeader header_{};
     std::vector<std::pair<std::string, std::string>> customMetadata_;
+
+    // Phase 18: encryption state (set by SetEncryption). key_ empty = disabled.
+    bool                 encrypt_ = false;
+    std::vector<uint8_t> key_;        // 32-byte AES-256 key
+    std::vector<uint8_t> salt_;       // 16-byte PBKDF2 salt
+    uint32_t             iterations_ = 0;
 };
 
 class PackageReader : public VirtualFileSystem {
@@ -158,11 +177,19 @@ public:
     // Convenience: entries under the reserved "plugins/" namespace.
     std::vector<std::string> ListPlugins() const { return ListEntries("plugins/"); }
 
+    // Phase 18: this package carries an AES-256-GCM keycheck ("vxpc_crypto").
+    bool isEncrypted() const;
+    // Derive the key from `password` and verify it against the stored keycheck.
+    // Must be called before Read()-ing any VXPC_FLAG_ENCRYPTED entry. Returns
+    // false on wrong password, missing keycheck, or no crypto backend.
+    bool SetPassword(const std::string& password);
+
 private:
     std::string path_;
     std::vector<VXPCDirectoryEntry> directory_;
     VXPCHeader header_{};
     bool valid_ = false;
+    mutable std::vector<uint8_t> key_;   // Phase 18: set by SetPassword (32 bytes)
     // Phase 13: reads route through this (local file or HTTP), so Open() works
     // for a path or an http(s):// URL. mutable — reads don't change logical state.
     mutable std::unique_ptr<ByteSource> src_;
