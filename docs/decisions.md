@@ -19,6 +19,32 @@ This document records major design decisions.
 - **Decision**: The executable is built as a WIN32 subsystem application (on Windows) rather than a Console App.
 - **Reason**: This prevents a persistent and ugly DOS prompt terminal window from opening alongside the ViitorX Viewer application.
 
+## Encryption not wired into the viewer/CLI (deferred, on purpose)
+- **Decision**: Did NOT add `pfconvert --encrypt` or a viewer password prompt, even though
+  Phase 18 shipped an at-rest AES-256-GCM API in `PackageFormat`.
+- **Reason**: The viewer streams `octree.bin` (the point payloads) by seeking to a raw byte
+  offset inside the `.vxpc` container (`OctreeStore::readNodeInto`), never through the
+  decrypting `PackageReader::Read`. Encryption in `PackageWriter` only applies to `AddMemory`
+  entries (meta/hierarchy/sidecars), not the streamed `octree.bin` (raw `Write`). So a
+  `--encrypt` cloud would leave the actual points **plaintext** on disk while presenting as
+  "encrypted" — a misleading, weak security guarantee, which the org security guidelines say
+  to avoid. Per-entry GCM (one IV/tag per whole entry) is also incompatible with random
+  per-node seeking.
+- **Consequence**: Real at-rest protection of the points requires per-node payload
+  encryption (per-node IV/tag or a seekable CTR scheme) plus a decrypt step in the streaming
+  path — a larger format/streaming change. Left as a scoped follow-up rather than shipping a
+  half-measure.
+
+## Cache auto-purge → orphaned chunk-dir cleanup (roadmap item reinterpreted)
+- **Decision**: There is no on-disk "cache" concept in this repo to auto-purge (the
+  `PointForgeCache_*` name in docs is UE-plugin/test-data naming, never created here). Instead
+  of scanning+deleting arbitrary user directories (dangerous), `buildOctree` now removes a
+  stale `<workDir>/chunks` directory left by a previously crashed/killed conversion to the
+  same target, at the start of the next run.
+- **Reason**: A leftover chunk dir would otherwise mix stale chunk files into the new run and
+  corrupt output. The cleanup is scoped to the exact path buildOctree owns and creates, so it
+  can't touch unrelated user data.
+
 ## Guided Conversion Wizard (fullscreen modal)
 - **Decision**: The Convert flow is a step-by-step fullscreen wizard rendered as an
   ImGui `BeginPopupModal` sized to the whole viewport (Source → Quality → Destination

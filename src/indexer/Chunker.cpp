@@ -31,7 +31,9 @@ bool runChunker(const std::string& inputPath,
                 int gridDepth,
                 ChunkSet& out,
                 uint64_t flushPointBudget,
-                std::function<void(float, const std::string&)> progressCb) {
+                std::function<void(float, const std::string&)> progressCb,
+                const std::atomic<bool>* cancel) {
+    auto canceled = [&]() { return cancel && cancel->load(); };
     // ---- determine bounds (and count if available) -----------------------
     AABB bounds;
     {
@@ -47,6 +49,7 @@ bool runChunker(const std::string& inputPath,
             uint64_t seen = 0;
             uint64_t expectedPoints = r->pointCount();
             while ((n = r->read(buf.data(), buf.size())) > 0) {
+                if (canceled()) { logWarn("Chunker: canceled during bounds scan"); return false; }
                 for (size_t i = 0; i < n; ++i) bounds.expand(buf[i].position);
                 seen += n;
                 if (progressCb && (seen % (1024 * 1024) < buf.size() || seen == expectedPoints)) {
@@ -105,6 +108,7 @@ bool runChunker(const std::string& inputPath,
     std::vector<Point> buf(kReadBatch);
     size_t n;
     while ((n = r->read(buf.data(), buf.size())) > 0) {
+        if (canceled()) { logWarn("Chunker: canceled during chunking"); return false; }
         for (size_t i = 0; i < n; ++i) {
             const Point& p = buf[i];
             if (p.hasColor) anyColor = true;

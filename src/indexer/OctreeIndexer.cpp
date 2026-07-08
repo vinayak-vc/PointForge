@@ -342,12 +342,24 @@ bool buildOctree(const std::string& inputPath,
     
     fs::create_directories(workDir, ec);
     const std::string chunkDir = workDir + "/chunks";
+    // Purge a stale chunk dir left over from a previously crashed/killed
+    // conversion to the same target — mixing its files with this run would
+    // corrupt the output. Scoped to the dir buildOctree owns.
+    if (fs::exists(chunkDir, ec)) {
+        logWarn("buildOctree: removing stale chunk dir from a prior run: " + chunkDir);
+        fs::remove_all(chunkDir, ec);
+    }
     fs::create_directories(chunkDir, ec);
 
     // ---- phase A+B: chunking ---------------------------------------------
     ChunkSet cs;
-    if (!runChunker(inputPath, chunkDir, opts.gridDepth, cs, opts.flushBudget, opts.progressCb)) {
-        logError("buildOctree: chunking failed");
+    if (!runChunker(inputPath, chunkDir, opts.gridDepth, cs, opts.flushBudget, opts.progressCb, opts.cancel)) {
+        if (opts.cancel && opts.cancel->load()) {
+            logWarn("buildOctree: cancelled by user during chunking");
+            if (!opts.keepChunks) fs::remove_all(chunkDir, ec);
+        } else {
+            logError("buildOctree: chunking failed");
+        }
         return false;
     }
 
