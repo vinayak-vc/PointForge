@@ -1731,7 +1731,9 @@ int main(int argc, char** argv) {
         if (!sourceFile.empty()) {
             convInputs = {sourceFile};
             std::filesystem::path p(sourceFile);
-            convOutput = (p.parent_path() / (p.stem().string() + "_octree")).string();
+            // Default to a single-file .vxpc package (buildOctree writes the
+            // folder layout only when the path lacks the .vxpc extension).
+            convOutput = (p.parent_path() / (p.stem().string() + ".vxpc")).string();
         }
         showConvertDialog = true;
     };
@@ -1751,15 +1753,33 @@ int main(int argc, char** argv) {
         if (!folder.empty()) loadOctree(folder);
     };
 
+    // Ensure the output is a single-file .vxpc package. buildOctree writes the
+    // legacy loose-folder layout when the path lacks the .vxpc extension, so the
+    // viewer (which took a folder-style path) always produced folders. If the
+    // path is a directory (e.g. picked via Browse), drop <stem>.vxpc inside it.
+    auto ensureVxpcPath = [](std::string out, const std::string& stem) -> std::string {
+        auto ends = [](const std::string& s, const char* suf) {
+            const size_t n = std::strlen(suf);
+            return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+        };
+        if (ends(out, ".vxpc")) return out;
+        std::error_code ec;
+        const bool isDir = std::filesystem::is_directory(out, ec) ||
+                           (!out.empty() && (out.back() == '/' || out.back() == '\\'));
+        if (isDir) return (std::filesystem::path(out) / (stem + ".vxpc")).string();
+        return out + ".vxpc";
+    };
+
     auto enqueueConvert = [&]() {
         if (convInputs.empty() || convOutput.empty()) return;
         if (convInputs.size() == 1) {
-            jobs.enqueue(convInputs[0], convOutput, customOpts, convLoadWhenDone);
+            std::string out = ensureVxpcPath(convOutput, std::filesystem::path(convInputs[0]).stem().string());
+            jobs.enqueue(convInputs[0], out, customOpts, convLoadWhenDone);
             addToast("Queued: " + baseName(convInputs[0]));
         } else {
             for (const auto& in : convInputs) {
                 std::filesystem::path p(in);
-                std::string out = (std::filesystem::path(convOutput) / (p.stem().string() + "_octree")).string();
+                std::string out = (std::filesystem::path(convOutput) / (p.stem().string() + ".vxpc")).string();
                 jobs.enqueue(in, out, customOpts, /*loadWhenDone=*/false);
             }
             addToast("Queued " + std::to_string(convInputs.size()) + " conversions");
