@@ -28,10 +28,18 @@ its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
 - pftest `testRepack` (verbatim copy + round-trip + upsert-replace + removal);
   live: real Tikal-13 .vxpc loads through the new hook and still exports video
   (v1041). Full build + CTest green.
-- Planned next, in order: 8 Measurements, 9 Annotations (both reuse
-  RepackPackage), 20 Documentation (spec rewrite — docs/vxpc.md is stale:
-  16-byte header/var names vs actual 128-byte/fixed-64). Phase 13 (HTTP range
-  streaming) needs libcurl/WinHTTP — assess after.
+### Phase 8 — Measurements (branch `vxpc/measurements`) — DONE
+- `measurements.json` (polyline schema) written via RepackPackage. File menu
+  action renamed "Save Project Data to Package" (bookmarks + campath +
+  measurements in one repack). Loaded on open only for the first cloud
+  (measurePts is scene-global). pftest round-trips measurements.json.
+  Build + CTest green (v1042).
+- Planned next: 9 Annotations (same repack path — move package copy of
+  annotations.json in, authoritative on open, add to the save action), then
+  20 Documentation (rewrite docs/vxpc.md — stale 16-byte/var-name spec vs
+  actual 128-byte/fixed-64). Phase 13 (HTTP range streaming) needs
+  libcurl/WinHTTP — assess after. Deferred (multi-month, per plan): 10, 14,
+  17, 18, 19.
 
 ## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
 

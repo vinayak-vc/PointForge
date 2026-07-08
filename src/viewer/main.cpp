@@ -1041,6 +1041,19 @@ int main(int argc, char** argv) {
         root["keys"] = std::move(keys);   // single path per cloud (matches CamPath)
         return root.dump();
     };
+    // Phase 8: measurements. measurePts is a single scene-global world-space
+    // polyline, so measurements.json carries one polyline object.
+    auto measurementsToJson = [&]() -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json arr = nlohmann::json::array();
+        if (!measurePts.empty()) {
+            nlohmann::json pts = nlohmann::json::array();
+            for (const glm::dvec3& p : measurePts) pts.push_back({p.x, p.y, p.z});
+            arr.push_back({{"type", "polyline"}, {"points", std::move(pts)}});
+        }
+        root["measurements"] = std::move(arr);
+        return root.dump();
+    };
     auto loadCameraDataFromPackage = [&](const std::string& dir) {
         if (!isVxpc(dir)) return;
         pf::PackageReader r;
@@ -1076,6 +1089,24 @@ int main(int argc, char** argv) {
                 path.sortKeys();
                 allCamPaths[dir] = std::move(path);
             } catch (...) { pf::logWarn("campaths.json in package is malformed"); }
+        }
+        // Phase 8: measurePts is scene-global, so only adopt a package's
+        // measurements when this is the first/only cloud (avoid clobbering an
+        // existing measurement when a second cloud is added).
+        if (scene.size() == 1 && r.Contains("measurements.json")) {
+            auto buf = r.Read("measurements.json");
+            try {
+                auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                std::vector<glm::dvec3> pts;
+                for (const auto& m : j.value("measurements", nlohmann::json::array())) {
+                    if (m.value("type", std::string()) != "polyline") continue;
+                    for (const auto& p : m.value("points", nlohmann::json::array()))
+                        if (p.is_array() && p.size() >= 3)
+                            pts.emplace_back(p[0].get<double>(), p[1].get<double>(), p[2].get<double>());
+                    break;   // one polyline for now
+                }
+                measurePts = std::move(pts);
+            } catch (...) { pf::logWarn("measurements.json in package is malformed"); }
         }
     };
 
@@ -1324,32 +1355,35 @@ int main(int argc, char** argv) {
         if (toasts.size() > 5) toasts.erase(toasts.begin());
     };
 
-    // Phase 7: embed the active cloud's bookmarks + camera path into its .vxpc
-    // package. The package file is held open by the streaming store, so the
-    // cloud is closed (releasing the handle), repacked, and reloaded — the
-    // camera pose is preserved across the round-trip. (Defined here, after
-    // addToast/loadOctree/closeCloud; invoked from the File menu.)
-    auto saveCameraDataToPackage = [&]() {
+    // Phases 7-9: embed the active cloud's project data (bookmarks + camera
+    // path + measurements) into its .vxpc package. The package file is held
+    // open by the streaming store, so the cloud is closed (releasing the
+    // handle), repacked, and reloaded — the camera pose is preserved across
+    // the round-trip. (Defined here, after addToast/loadOctree/closeCloud;
+    // invoked from the File menu.)
+    auto saveProjectDataToPackage = [&]() {
         if (!octreeLoaded) return;
         const std::string dir = activeCloud().dir;
         if (!isVxpc(dir)) {
-            addToast("Camera data can only be embedded in a .vxpc package", "", true);
+            addToast("Project data can only be embedded in a .vxpc package", "", true);
             return;
         }
         const std::string bm = bookmarksToJson(dir);
         const std::string cp = campathsToJson(dir);
+        const std::string ms = measurementsToJson();
         const glm::vec3 sp = cam.position; const float sy = cam.yaw, spi = cam.pitch;
         const bool so = cam.isOrtho; const float ss = cam.orthoSize;
 
         closeCloud(activeCloudIndex);       // releases the file handle
         const bool ok = pf::RepackPackage(dir, {
-            {"bookmarks.json", std::vector<uint8_t>(bm.begin(), bm.end())},
-            {"campaths.json",  std::vector<uint8_t>(cp.begin(), cp.end())},
+            {"bookmarks.json",    std::vector<uint8_t>(bm.begin(), bm.end())},
+            {"campaths.json",     std::vector<uint8_t>(cp.begin(), cp.end())},
+            {"measurements.json", std::vector<uint8_t>(ms.begin(), ms.end())},
         });
         loadOctree(dir);                    // re-adds + reloads embedded data
         cam.position = sp; cam.yaw = sy; cam.pitch = spi; cam.isOrtho = so; cam.orthoSize = ss;
-        if (ok) addToast("Camera data saved into " + baseName(dir), "", false, dir);
-        else    addToast("Failed to save camera data into package", "", true);
+        if (ok) addToast("Project data saved into " + baseName(dir), "", false, dir);
+        else    addToast("Failed to save project data into package", "", true);
     };
 
     auto startSliceCpuExport = [&](const std::string& output, SliceExportFormat format,
@@ -3003,11 +3037,11 @@ int main(int argc, char** argv) {
                     ImGui::Separator();
                     if (ImGui::MenuItem("Convert a Scan...", "Ctrl+I")) openConvertDialog("");
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Save Camera Data to Package",
+                    if (ImGui::MenuItem("Save Project Data to Package",
                                         nullptr, false,
                                         octreeLoaded && isVxpc(activeCloud().dir)))
-                        saveCameraDataToPackage();
-                    ImGui::SetItemTooltip("Embed this cloud's bookmarks + camera path into its .vxpc file");
+                        saveProjectDataToPackage();
+                    ImGui::SetItemTooltip("Embed this cloud's bookmarks, camera path + measurements into its .vxpc file");
                     ImGui::Separator();
                     if (ImGui::MenuItem("Screenshot", "F12")) pendingShot = true;
                     ImGui::Separator();

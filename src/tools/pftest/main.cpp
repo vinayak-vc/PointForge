@@ -256,9 +256,13 @@ static void testRepack(const std::string& pkgPath) {
 
     const std::string bm = "{\"version\":1,\"bookmarks\":[{\"name\":\"A\",\"px\":1.5}]}";
     const std::string cp = "{\"version\":1,\"keys\":[]}";
+    // Phase 8: a measurements.json entry rides the same repack path.
+    const std::string ms = "{\"version\":1,\"measurements\":[{\"type\":\"polyline\","
+                           "\"points\":[[1.0,2.0,3.0],[4.0,5.0,6.0]]}]}";
     CHECK(pf::RepackPackage(pkgPath, {
-              {"bookmarks.json", std::vector<uint8_t>(bm.begin(), bm.end())},
-              {"campaths.json",  std::vector<uint8_t>(cp.begin(), cp.end())},
+              {"bookmarks.json",    std::vector<uint8_t>(bm.begin(), bm.end())},
+              {"campaths.json",     std::vector<uint8_t>(cp.begin(), cp.end())},
+              {"measurements.json", std::vector<uint8_t>(ms.begin(), ms.end())},
           }),
           "repack: add upserts failed");
 
@@ -274,6 +278,8 @@ static void testRepack(const std::string& pkgPath) {
         auto gotBm = r.Read("bookmarks.json");
         CHECK(std::string(gotBm.begin(), gotBm.end()) == bm, "repack: bookmarks.json round-trip mismatch");
         CHECK(r.Contains("campaths.json"), "repack: campaths.json missing after add");
+        auto gotMs = r.Read("measurements.json");
+        CHECK(std::string(gotMs.begin(), gotMs.end()) == ms, "repack: measurements.json round-trip mismatch");
         entriesAfterAdd = r.ListEntries().size();
         // core still loads from the repacked package.
         pf::OctreeStore s;

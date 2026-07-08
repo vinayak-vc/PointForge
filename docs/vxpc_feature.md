@@ -14,7 +14,7 @@
 | 5 | Thumbnails | DONE | CLI accepts --thumbnail <path>, falls back to synthetic 256x256 RGB projection block inside .vxpc |
 | 6 | Project Metadata | DONE | ProjectMetadata struct implemented in OctreeFormat.h and embedded inside the .vxpc container via MetadataWriter |
 | 7 | Camera Data | DONE | bookmarks.json + campaths.json in the package; `RepackPackage` (verbatim copy + upsert/remove); viewer File > "Save Camera Data to Package" + load-on-open; pftest `testRepack` |
-| 8 | Measurements | PLANNED | Distance, Area, Volume, Polyline |
+| 8 | Measurements | DONE | measurements.json (polyline) in the package via the shared repack; loaded for the first cloud; folded into File > "Save Project Data to Package"; pftest measurements round-trip |
 | 9 | Annotations | PLANNED | Text, Image, Audio, Pins |
 | 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
 | 11 | Plugin Data | DONE | `plugins/` namespace via `AddPluginData`; reader `ListEntries`/`ListPlugins`; core ignores non-fixed names; over-long filename guard; pftest `testPluginData` |
@@ -101,12 +101,23 @@
 - **Note**: single camera path per cloud (`campaths.json` stores the `keys`
   array directly), matching the viewer's one-`CamPath`-per-cloud model.
 
-## Phase 8: Measurements
+## Phase 8: Measurements — DONE
 **Goal**: Save engineering measurement artifacts inside the package.
-- **Research & Implementation**: 
-  - Measurements (distance, area, polyline) are currently transient or saved to CSV. 
-  - Implementation: Define a unified `Measurement` JSON schema. Store as `measurements.json` via `PackageWriter`.
-  - Requires the `PackageWriter` to support in-place updates or the application must rewrite the `.vxpc` footer when measurements are added. A simpler approach is storing edits in an external sidecar file until "Save Project" is hit, triggering a repack.
+- **Implemented**:
+  - `measurements.json` schema `{version, measurements:[{type:"polyline",
+    points:[[x,y,z],...]}]}`. The viewer's `measurePts` is a single scene-
+    global world-space polyline, so one polyline object is written; the schema
+    is an array so area/volume types can be added later without a break.
+  - Written via the Phase 7 `RepackPackage` — no new writer plumbing. The
+    File > "Save Project Data to Package" action (renamed from "Save Camera
+    Data") now packs bookmarks + campath + measurements in a single repack.
+  - Loaded on open, but only when it is the first/only cloud (measurePts is
+    scene-global — a second cloud must not clobber an active measurement).
+  - Tests: `pftest testRepack` upserts + round-trips a `measurements.json`
+    alongside the camera JSON, proving multi-entry repack and octree-verbatim
+    coexistence. Full build + CTest green.
+- **Deferred**: area/volume measurement types (the viewer only has the
+  distance polyline today).
 
 ## Phase 9: Annotations
 **Goal**: Embed collaboration markers directly in the package.
