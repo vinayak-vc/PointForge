@@ -60,6 +60,39 @@ Manual acceptance walk of the wizard (above). Optional: fix the stale
 but the code uses `"PointForge"` — doc-only drift, no code change unless a settings
 migration is wanted).
 
+## Session (2026-07-08, cont.) - Phase 18 Encryption + GitHub cleanup
+
+### GitHub/branch cleanup (done first)
+User merged all VXPC PRs and asked to keep only `main`. main was behind (PR #17);
+merged `vxpc/measurements` (the branch carrying phases 1–13 + all features) into
+main with a merge commit (`-X theirs`; verified merged tree == measurements,
+build v1046 + CTest green), fast-forwarded origin/main, then deleted every other
+local + remote branch after confirming each had **0 unmerged commits**
+(`git cherry`). Repo is now `main`-only.
+
+### Phase 18 — Encryption (branch `vxpc/encryption`, off main) — DONE (at-rest, pfcore)
+- Per-entry **AES-256-GCM** via Windows CNG/BCrypt (OS-native, no new dep).
+  Key = PBKDF2-HMAC-SHA256(password, random 16B salt, 100k iters) → 32B.
+  Compress→encrypt per entry; stored = `IV(12)|tag(16)|ciphertext`; entry
+  `flags` bit0 `VXPC_FLAG_ENCRYPTED`; `compressedSize` = pre-encryption len;
+  CRC over stored bytes.
+- `PackageWriter::SetEncryption(pw)` (entries after it are encrypted);
+  `Finalize` writes plaintext `vxpc_crypto` keycheck. `PackageReader::
+  SetPassword(pw)` validates + enables decrypt; `Read` decrypts flagged entries
+  (refuses without password). `isEncrypted()`. Encrypted entries survive
+  RepackPackage/combineClouds (verbatim copy — needed a frame-aware stored-size
+  fix in both).
+- pftest `testEncryption`: flagged+framed storage, plaintext absent from
+  ciphertext, read-without-password refused, wrong-password rejected (GCM),
+  correct-password round-trip (both compression modes), survives repack.
+  Full build v1046 + CTest green.
+- **Deferred (the plan's real concern):** encrypting the STREAMED octree.bin
+  payload (OctreeStore streams via raw ifstream, not PackageReader::Read — needs
+  block-aligned per-node decrypt) + a viewer password UI + `pfconvert --encrypt`.
+  This phase does metadata/sidecar-at-rest only.
+- **Remaining deferred phases: 14 (chunked octree), 17 (recovery/atomic saves),
+  19 (hierarchical VFS).** Everything else (1–13, 15, 16, 18, 20) is DONE.
+
 ## Session (2026-07-08) - VXPC phases, small→big, branch-per-phase
 
 Implementing the remaining PLANNED VXPC phases (docs/vxpc_feature.md), each on
