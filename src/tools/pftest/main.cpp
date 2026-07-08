@@ -240,6 +240,63 @@ static void testPluginData(const std::string& work) {
     fs::remove(pkgPath, ec);
 }
 
+// Phase 7: RepackPackage — verbatim copy of existing entries (octree.bin must
+// be byte-identical, not re-(de)compressed) + add/replace/remove of small
+// JSON entries. `pkgPath` is a real converted package; its store must already
+// be closed (Windows can't rename over an open file).
+static void testRepack(const std::string& pkgPath) {
+    std::vector<uint8_t> octreeBefore;
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "repack: pre-open failed");
+        pf::VXPCDirectoryEntry e;
+        octreeBefore = r.ReadRaw("octree.bin", e);
+        CHECK(!octreeBefore.empty(), "repack: octree.bin empty pre-repack");
+    }
+
+    const std::string bm = "{\"version\":1,\"bookmarks\":[{\"name\":\"A\",\"px\":1.5}]}";
+    const std::string cp = "{\"version\":1,\"keys\":[]}";
+    CHECK(pf::RepackPackage(pkgPath, {
+              {"bookmarks.json", std::vector<uint8_t>(bm.begin(), bm.end())},
+              {"campaths.json",  std::vector<uint8_t>(cp.begin(), cp.end())},
+          }),
+          "repack: add upserts failed");
+
+    size_t entriesAfterAdd = 0;
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "repack: reopen after add failed");
+        // octree.bin copied verbatim (no re-(de)compression).
+        pf::VXPCDirectoryEntry e;
+        auto after = r.ReadRaw("octree.bin", e);
+        CHECK(after == octreeBefore, "repack: octree.bin bytes changed by repack");
+        // new entries round-trip through the CRC-checked/decompressing Read().
+        auto gotBm = r.Read("bookmarks.json");
+        CHECK(std::string(gotBm.begin(), gotBm.end()) == bm, "repack: bookmarks.json round-trip mismatch");
+        CHECK(r.Contains("campaths.json"), "repack: campaths.json missing after add");
+        entriesAfterAdd = r.ListEntries().size();
+        // core still loads from the repacked package.
+        pf::OctreeStore s;
+        CHECK(s.load(pkgPath), "repack: octree unloadable after repack");
+    } // store closed here (handle released before next repack)
+
+    // Replace bookmarks.json (upsert existing, not add) + remove campaths.json.
+    const std::string bm2 = "{\"version\":1,\"bookmarks\":[]}";
+    CHECK(pf::RepackPackage(pkgPath,
+                            {{"bookmarks.json", std::vector<uint8_t>(bm2.begin(), bm2.end())}},
+                            {"campaths.json"}),
+          "repack: replace+remove failed");
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "repack: reopen after replace failed");
+        auto gotBm = r.Read("bookmarks.json");
+        CHECK(std::string(gotBm.begin(), gotBm.end()) == bm2, "repack: replacement did not win");
+        CHECK(!r.Contains("campaths.json"), "repack: removal did not drop campaths.json");
+        // replace is net-zero, remove drops one -> exactly one fewer entry.
+        CHECK(r.ListEntries().size() == entriesAfterAdd - 1, "repack: entry count wrong after replace+remove");
+    }
+}
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -292,6 +349,12 @@ int main(int argc, char** argv) {
         uint64_t payloadSize = pkg.GetSize("octree.bin");
         
         verifyStructure(store, nPoints, payloadSize);
+
+        // Phase 7: repack the freshly-built package. Close the store first so
+        // the .vxpc handle is released (Windows rename-over-open guard).
+        store.clear();
+        std::printf("pftest: [phase 7] repack (verbatim copy + upsert/remove)...\n");
+        testRepack(parFile);
 
         fs::remove(seqFile, ec);
         fs::remove(parFile, ec);

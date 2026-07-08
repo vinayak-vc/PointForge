@@ -52,6 +52,7 @@
 #include "common/OctreeFormat.h"
 #include "common/FileDialog.h"
 #include "io/DxfWriter.h"
+#include "io/PackageFormat.h"
 #include "indexer/OctreeIndexer.h"
 #include <thread>
 #include <atomic>
@@ -1008,6 +1009,76 @@ int main(int argc, char** argv) {
         pivot = glm::vec3(0.0f);
     };
 
+    // ---- Phase 7: camera data embedded in the .vxpc package ----------------
+    // Bookmarks + the camera path serialize to bookmarks.json / campaths.json
+    // inside the package so a cloud carries its navigation state when shared.
+    // (AppData TSV remains the per-machine store; the package copy is loaded
+    // when present and is authoritative for that cloud.)
+    auto isVxpc = [](const std::string& dir) {
+        return dir.size() >= 5 && dir.compare(dir.size() - 5, 5, ".vxpc") == 0;
+    };
+    auto bookmarksToJson = [&](const std::string& dir) -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json arr = nlohmann::json::array();
+        auto it = allBookmarks.find(dir);
+        if (it != allBookmarks.end())
+            for (const CamBookmark& b : it->second)
+                arr.push_back({{"name", b.name}, {"px", b.px}, {"py", b.py}, {"pz", b.pz},
+                               {"yaw", b.yaw}, {"pitch", b.pitch}, {"ortho", b.ortho},
+                               {"orthoSize", b.orthoSize}});
+        root["bookmarks"] = std::move(arr);
+        return root.dump();
+    };
+    auto campathsToJson = [&](const std::string& dir) -> std::string {
+        nlohmann::json root; root["version"] = 1;
+        nlohmann::json keys = nlohmann::json::array();
+        auto it = allCamPaths.find(dir);
+        if (it != allCamPaths.end())
+            for (const CamKey& k : it->second.keys)
+                keys.push_back({{"t", k.t}, {"px", k.px}, {"py", k.py}, {"pz", k.pz},
+                               {"yaw", k.yaw}, {"pitch", k.pitch}, {"ortho", k.ortho},
+                               {"orthoSize", k.orthoSize}});
+        root["keys"] = std::move(keys);   // single path per cloud (matches CamPath)
+        return root.dump();
+    };
+    auto loadCameraDataFromPackage = [&](const std::string& dir) {
+        if (!isVxpc(dir)) return;
+        pf::PackageReader r;
+        if (!r.Open(dir)) return;
+        if (r.Contains("bookmarks.json")) {
+            auto buf = r.Read("bookmarks.json");
+            try {
+                auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                std::vector<CamBookmark> v;
+                for (const auto& e : j.value("bookmarks", nlohmann::json::array())) {
+                    CamBookmark b;
+                    b.name = e.value("name", std::string("Bookmark"));
+                    b.px = e.value("px", 0.0f); b.py = e.value("py", 0.0f); b.pz = e.value("pz", 0.0f);
+                    b.yaw = e.value("yaw", 0.0f); b.pitch = e.value("pitch", 0.0f);
+                    b.ortho = e.value("ortho", 0); b.orthoSize = e.value("orthoSize", 100.0f);
+                    v.push_back(std::move(b));
+                }
+                allBookmarks[dir] = std::move(v);   // package is authoritative for this cloud
+            } catch (...) { pf::logWarn("bookmarks.json in package is malformed"); }
+        }
+        if (r.Contains("campaths.json")) {
+            auto buf = r.Read("campaths.json");
+            try {
+                auto j = nlohmann::json::parse(std::string(buf.begin(), buf.end()));
+                CamPath path;
+                for (const auto& e : j.value("keys", nlohmann::json::array())) {
+                    CamKey k;
+                    k.t = e.value("t", 0.0); k.px = e.value("px", 0.0f); k.py = e.value("py", 0.0f);
+                    k.pz = e.value("pz", 0.0f); k.yaw = e.value("yaw", 0.0f); k.pitch = e.value("pitch", 0.0f);
+                    k.ortho = e.value("ortho", 0); k.orthoSize = e.value("orthoSize", 100.0f);
+                    path.keys.push_back(k);
+                }
+                path.sortKeys();
+                allCamPaths[dir] = std::move(path);
+            } catch (...) { pf::logWarn("campaths.json in package is malformed"); }
+        }
+    };
+
     auto annotationsPath = [&]() -> std::string {
         std::string p = "annotations.json";
         if (char* pref = SDL_GetPrefPath("ViitorX", "PointForge")) {
@@ -1146,6 +1217,7 @@ int main(int argc, char** argv) {
             setActiveCloud((int)scene.size() - 1);
             if (scene.size() == 1) setupCamera();
             else frameAllReq = true;
+            loadCameraDataFromPackage(dir);   // .vxpc-embedded bookmarks/campath win
             addRecent(dir);
             saveSettings();
             navHintT = 6.0f;   // brief fading nav hint over the fresh viewport
@@ -1250,6 +1322,34 @@ int main(int argc, char** argv) {
         t.ttl = isError ? 10.0f : 6.0f;
         toasts.push_back(std::move(t));
         if (toasts.size() > 5) toasts.erase(toasts.begin());
+    };
+
+    // Phase 7: embed the active cloud's bookmarks + camera path into its .vxpc
+    // package. The package file is held open by the streaming store, so the
+    // cloud is closed (releasing the handle), repacked, and reloaded — the
+    // camera pose is preserved across the round-trip. (Defined here, after
+    // addToast/loadOctree/closeCloud; invoked from the File menu.)
+    auto saveCameraDataToPackage = [&]() {
+        if (!octreeLoaded) return;
+        const std::string dir = activeCloud().dir;
+        if (!isVxpc(dir)) {
+            addToast("Camera data can only be embedded in a .vxpc package", "", true);
+            return;
+        }
+        const std::string bm = bookmarksToJson(dir);
+        const std::string cp = campathsToJson(dir);
+        const glm::vec3 sp = cam.position; const float sy = cam.yaw, spi = cam.pitch;
+        const bool so = cam.isOrtho; const float ss = cam.orthoSize;
+
+        closeCloud(activeCloudIndex);       // releases the file handle
+        const bool ok = pf::RepackPackage(dir, {
+            {"bookmarks.json", std::vector<uint8_t>(bm.begin(), bm.end())},
+            {"campaths.json",  std::vector<uint8_t>(cp.begin(), cp.end())},
+        });
+        loadOctree(dir);                    // re-adds + reloads embedded data
+        cam.position = sp; cam.yaw = sy; cam.pitch = spi; cam.isOrtho = so; cam.orthoSize = ss;
+        if (ok) addToast("Camera data saved into " + baseName(dir), "", false, dir);
+        else    addToast("Failed to save camera data into package", "", true);
     };
 
     auto startSliceCpuExport = [&](const std::string& output, SliceExportFormat format,
@@ -2902,6 +3002,12 @@ int main(int argc, char** argv) {
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Convert a Scan...", "Ctrl+I")) openConvertDialog("");
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Save Camera Data to Package",
+                                        nullptr, false,
+                                        octreeLoaded && isVxpc(activeCloud().dir)))
+                        saveCameraDataToPackage();
+                    ImGui::SetItemTooltip("Embed this cloud's bookmarks + camera path into its .vxpc file");
                     ImGui::Separator();
                     if (ImGui::MenuItem("Screenshot", "F12")) pendingShot = true;
                     ImGui::Separator();

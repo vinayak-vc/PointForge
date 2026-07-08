@@ -16,10 +16,22 @@ its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
   trip, over-long-name rejection, core-ignore. Full build + CTest green (v1039).
 - Deferred: Unity `PF_Package_WritePluginData` C-API (pfunity doesn't link
   PackageWriter yet).
-- Planned next, in order: 7 Camera Data (builds the repack helper), 8
-  Measurements, 9 Annotations, 20 Documentation (spec rewrite — docs/vxpc.md
-  is stale: 16-byte header/var names vs actual 128-byte/fixed-64). Phase 13
-  (HTTP range streaming) needs libcurl/WinHTTP — assess after.
+### Phase 7 — Camera Data (branch `vxpc/camera-data`) — DONE
+- Built the shared **repack** primitive `pf::RepackPackage(path, upserts,
+  removals)`: `PackageReader::ReadRaw` + `PackageWriter::AddRawEntry` copy
+  entries verbatim (octree.bin byte-identical), upserts ZSTD-compressed,
+  tmp+atomic-rename. `InheritHeader` keeps uuid/created/converter fields.
+- Camera data → `bookmarks.json` / `campaths.json` (nlohmann). Viewer File >
+  "Save Camera Data to Package" (close active cloud → repack → reload → restore
+  pose, since the store holds octree.bin open). Load-on-open makes package data
+  authoritative for that cloud.
+- pftest `testRepack` (verbatim copy + round-trip + upsert-replace + removal);
+  live: real Tikal-13 .vxpc loads through the new hook and still exports video
+  (v1041). Full build + CTest green.
+- Planned next, in order: 8 Measurements, 9 Annotations (both reuse
+  RepackPackage), 20 Documentation (spec rewrite — docs/vxpc.md is stale:
+  16-byte header/var names vs actual 128-byte/fixed-64). Phase 13 (HTTP range
+  streaming) needs libcurl/WinHTTP — assess after.
 
 ## Latest Session (2026-07-07, evening) - Six-feature audit + Multi-cloud scene DONE (newdev.md #6)
 

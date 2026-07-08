@@ -13,7 +13,7 @@
 | 4 | Loader Integration | DONE | OctreeStore transparently routes paths to folder or .vxpc PackageReader |
 | 5 | Thumbnails | DONE | CLI accepts --thumbnail <path>, falls back to synthetic 256x256 RGB projection block inside .vxpc |
 | 6 | Project Metadata | DONE | ProjectMetadata struct implemented in OctreeFormat.h and embedded inside the .vxpc container via MetadataWriter |
-| 7 | Camera Data | PLANNED | Bookmarks, Views, Paths, Animation |
+| 7 | Camera Data | DONE | bookmarks.json + campaths.json in the package; `RepackPackage` (verbatim copy + upsert/remove); viewer File > "Save Camera Data to Package" + load-on-open; pftest `testRepack` |
 | 8 | Measurements | PLANNED | Distance, Area, Volume, Polyline |
 | 9 | Annotations | PLANNED | Text, Image, Audio, Pins |
 | 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
@@ -73,13 +73,33 @@
 - **Fields**: Project Name, Author, Company, Description, Tags, Creation Date, Modified Date, Units, Coordinate System, EPSG, Source File, Converter Version, Build Version, UUID.
 - Retain JSON export purely for debugging. Store as binary natively.
 
-## Phase 7: Camera Data
+## Phase 7: Camera Data — DONE
 **Goal**: Pack user navigation states into the `.vxpc` container.
-- **Research & Implementation**: 
-  - Data structures: `CameraBookmark` (pos, yaw, pitch, ortho), `CameraPath` (spline control points, timestamps).
-  - Currently stored in loose `bookmarks.txt` and `campaths.txt`.
-  - To implement: In `PackageWriter`, add an `AddJsonList("bookmarks.json", bookmarks)` API. 
-  - During `PackageReader::Open()`, read these blocks into memory. The Viewer UI needs a "Save to VXPC" button, which implies we need an "Append to VXPC" functionality in `PackageWriter` (or a shadow file that gets repacked later).
+- **Implemented**:
+  - **Repack infrastructure (shared by phases 8/9)** — `pf::RepackPackage(path,
+    upserts, removals)`: copies every surviving entry VERBATIM via
+    `PackageReader::ReadRaw` + `PackageWriter::AddRawEntry` (no decompress/
+    recompress, so `octree.bin` bytes are byte-identical), applies ZSTD-
+    compressed upserts (add-or-replace) and removals, writes `path + ".tmp"`
+    then atomically renames over the original. `InheritHeader` preserves the
+    uuid/created-time/converter-version identity fields.
+  - **Camera data** — bookmarks serialize to `bookmarks.json`, the camera path
+    to `campaths.json` (nlohmann::json). On loading a `.vxpc`, the viewer reads
+    these (if present) and they are AUTHORITATIVE for that cloud; the AppData
+    TSV files remain the per-machine store.
+  - **Viewer** — File > "Save Camera Data to Package" (enabled only for a
+    loaded `.vxpc`): closes the active cloud to release the OS file handle,
+    repacks with the current bookmarks/campath JSON, reloads, and restores the
+    camera pose. (The streaming store holds `octree.bin` open, so an in-place
+    rewrite of the loaded package requires releasing it first — hence the
+    close/repack/reload cycle rather than a live append.)
+  - Tests: `pftest testRepack` — on a real converted package, asserts
+    `octree.bin` is copied byte-identically, added JSON entries round-trip
+    (CRC-checked), the octree still loads, then a second repack verifies
+    upsert-replace (net-zero count) and removal (−1). Live: a real Tikal-13
+    `.vxpc` loads through the new hook and still exports video.
+- **Note**: single camera path per cloud (`campaths.json` stores the `keys`
+  array directly), matching the viewer's one-`CamPath`-per-cloud model.
 
 ## Phase 8: Measurements
 **Goal**: Save engineering measurement artifacts inside the package.

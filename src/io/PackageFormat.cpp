@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <filesystem>
+#include <unordered_set>
 
 #ifdef PF_WITH_ZSTD
 #include <zstd.h>
@@ -289,6 +291,37 @@ void PackageWriter::AddCustomMeta(const std::string& key, const std::string& val
     customMetadata_.push_back({key, value});
 }
 
+void PackageWriter::InheritHeader(const VXPCHeader& src) {
+    if (!valid_) return;
+    std::memcpy(header_.uuid, src.uuid, sizeof(header_.uuid));
+    header_.createdTime = src.createdTime;
+    header_.converterVersion = src.converterVersion;
+    header_.packageFlags = src.packageFlags;
+    WriteHeader();   // persist now; Finalize() rewrites it again with dir info
+}
+
+bool PackageWriter::AddRawEntry(const VXPCDirectoryEntry& templ, const void* storedBytes, size_t storedSize) {
+    if (!valid_ || writingFile_) return false;
+    FILE* f = (FILE*)file_;
+
+    VXPCDirectoryEntry e = templ;
+#ifdef _WIN32
+    _fseeki64(f, 0, SEEK_END);
+    e.offset = (uint64_t)_ftelli64(f);
+#else
+    fseeko(f, 0, SEEK_END);
+    e.offset = (uint64_t)ftello(f);
+#endif
+    if (storedSize > 0) {
+        if (std::fwrite(storedBytes, 1, storedSize, f) != storedSize) {
+            logError("PackageWriter: failed to append raw entry");
+            return false;
+        }
+    }
+    directory_.push_back(e);
+    return true;
+}
+
 bool PackageWriter::Finalize() {
     if (!valid_) return false;
     if (writingFile_) EndFile();
@@ -387,6 +420,29 @@ uint64_t PackageReader::GetSize(const std::string& name) const {
     return GetEntry(name).originalSize;
 }
 
+std::vector<uint8_t> PackageReader::ReadRaw(const std::string& name, VXPCDirectoryEntry& outEntry) const {
+    std::vector<uint8_t> buffer;
+    outEntry = VXPCDirectoryEntry{};
+    if (!valid_ || !Contains(name)) return buffer;
+
+    outEntry = GetEntry(name);
+    const uint64_t storedSize = (outEntry.compression == 1) ? outEntry.compressedSize
+                                                            : outEntry.originalSize;
+    if (storedSize == 0) return buffer;   // valid empty entry
+
+    FILE* f = std::fopen(path_.c_str(), "rb");
+    if (!f) return buffer;
+#ifdef _WIN32
+    _fseeki64(f, outEntry.offset, SEEK_SET);
+#else
+    fseeko(f, outEntry.offset, SEEK_SET);
+#endif
+    buffer.resize(storedSize);
+    if (std::fread(buffer.data(), 1, storedSize, f) != storedSize) buffer.clear();
+    std::fclose(f);
+    return buffer;
+}
+
 std::vector<std::string> PackageReader::ListEntries(const std::string& prefix) const {
     std::vector<std::string> names;
     if (!valid_) return names;
@@ -457,6 +513,80 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
     }
 
     return buffer;
+}
+
+// --- Repack (Phase 7 support) ---
+
+bool RepackPackage(const std::string& path,
+                   const std::vector<std::pair<std::string, std::vector<uint8_t>>>& upserts,
+                   const std::vector<std::string>& removals) {
+    PackageReader reader;
+    if (!reader.Open(path)) {
+        logError("RepackPackage: cannot open " + path);
+        return false;
+    }
+
+    std::unordered_set<std::string> upsertNames, removeNames;
+    for (const auto& u : upserts) upsertNames.insert(u.first);
+    for (const auto& r : removals) removeNames.insert(r);
+
+    const std::string tmp = path + ".tmp";
+    {
+        PackageWriter writer;
+        if (!writer.Create(tmp)) {
+            logError("RepackPackage: cannot create " + tmp);
+            return false;
+        }
+        writer.InheritHeader(reader.GetHeader());
+
+        // 1. Copy every surviving existing entry VERBATIM (no re-(de)compress).
+        //    Skip ones being replaced by an upsert or dropped by a removal.
+        for (const std::string& name : reader.ListEntries()) {
+            if (removeNames.count(name) || upsertNames.count(name)) continue;
+            VXPCDirectoryEntry e;
+            std::vector<uint8_t> raw = reader.ReadRaw(name, e);
+            const uint64_t storedSize = (e.compression == 1) ? e.compressedSize : e.originalSize;
+            if (raw.size() != storedSize) {
+                logError("RepackPackage: raw read short for " + name);
+                std::error_code ec; std::filesystem::remove(tmp, ec);
+                return false;
+            }
+            if (!writer.AddRawEntry(e, raw.data(), raw.size())) {
+                std::error_code ec; std::filesystem::remove(tmp, ec);
+                return false;
+            }
+        }
+
+        // 2. Apply upserts (add-or-replace), ZSTD-compressed.
+        for (const auto& u : upserts) {
+            if (!writer.AddMemory(u.first, u.second.data(), u.second.size(),
+                                  PackageWriter::Compression::ZSTD)) {
+                std::error_code ec; std::filesystem::remove(tmp, ec);
+                return false;
+            }
+        }
+
+        if (!writer.Finalize()) {
+            std::error_code ec; std::filesystem::remove(tmp, ec);
+            return false;
+        }
+    } // writer closed here
+
+    // 3. Atomic replace. std::filesystem::rename replaces an existing dest on
+    //    both Windows (MoveFileEx semantics) and POSIX.
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        // Fallback: remove-then-rename (some filesystems reject cross-replace).
+        std::filesystem::remove(path, ec);
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            logError("RepackPackage: rename failed: " + ec.message());
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace pf
