@@ -18,6 +18,11 @@
 - `[x]` Renamed remaining user-facing "PointForge" strings to "ViitorX PointCloud Viewer"
         (welcome panel title, Help > About menu item + About dialog). Internal names
         (pfcore/pf::/format magic) and the AppData settings folder are unchanged.
+- `[x]` Premium brand watermark — vx.svg rasterized (cairosvg) + alpha-aware 2px
+        Gaussian blur (PIL) into an embedded RGBA header (`src/viewer/EmbeddedWatermark.h`,
+        regen via `scratch/gen_watermark.py`). Drawn centred at ~70% height, ~6% opacity,
+        original colours, behind everything (no interaction) with a subtle dark vignette,
+        on the empty/welcome state and inside the conversion wizard.
 - `[x]` Build Viewer as a standard WIN32 executable to hide the console terminal
 - `[x]` Add system SFX / Beeps on load completion
 - `[x]` Persistent saving and loading of Viewer UI settings locally

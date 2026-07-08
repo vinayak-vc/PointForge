@@ -38,8 +38,20 @@
   screen, Cancel mid-convert, and the Done → Open in Viewer / Convert Another paths.
   Run this manually before merging (drop `C:\UnrealProject\model\NTPC.laz`, walk all steps).
 
+- **Premium brand watermark**: `vx.svg` rasterized via cairosvg + alpha-aware
+  (premultiplied) 2px Gaussian blur via PIL/numpy, embedded as raw RGBA in
+  `src/viewer/EmbeddedWatermark.h` (465×384; regenerate with `scratch/gen_watermark.py`
+  whenever the logo changes). Uploaded straight to a GL texture (no image decoder /
+  no zstd / no BMP-alpha gamble). `drawBrandWatermark()` renders it centred at ~70%
+  of the area height, ~6% opacity (white tint preserves the original white/#E5E5E5
+  colours), CLAMP+LINEAR, plus a subtle 4-edge dark vignette — on the background draw
+  list for the empty state (`!octreeLoaded && !showConvertDialog`) and on the wizard
+  window's draw list (over the opaque modal bg, under the widgets).
+
 ### Modified files
-- `src/viewer/main.cpp` (wizard + enqueue path + smoke hook + rename)
+- `src/viewer/main.cpp` (wizard + enqueue path + smoke hook + rename + watermark)
+- `src/viewer/EmbeddedWatermark.h` (new, generated), `scratch/gen_watermark.py` (new),
+  `images/vx_watermark.png` (new, generated reference)
 - `docs/tasks.md`, `docs/decisions.md`, `docs/ai_handoff.md`
 
 ### Next Recommended Task
