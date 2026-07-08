@@ -442,6 +442,42 @@ static void testHttpStreaming(const std::string& pkgPath) {
 static void testHttpStreaming(const std::string&) {}
 #endif
 
+// Phase 10: combine two single-cloud .vxpc into one multi-cloud package, then
+// load each namespaced cloud back and verify it matches its source.
+static void testMultiCloudPackage(const std::string& a, const std::string& b, const std::string& work) {
+    const std::string scenePkg = work + "/scene.vxpc";
+    CHECK(pf::combineClouds(scenePkg, {{a, "alpha"}, {b, "beta"}}), "combine: combineClouds failed");
+
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(scenePkg), "combine: reopen scene.vxpc failed");
+        CHECK(r.Contains("scene.json"), "combine: scene.json missing");
+        CHECK(r.Contains("clouds/0/meta.bin") && r.Contains("clouds/0/octree.bin"), "combine: cloud 0 entries missing");
+        CHECK(r.Contains("clouds/1/meta.bin") && r.Contains("clouds/1/octree.bin"), "combine: cloud 1 entries missing");
+        auto sj = r.Read("scene.json");
+        std::string s(sj.begin(), sj.end());
+        CHECK(s.find("clouds/0/") != std::string::npos && s.find("alpha") != std::string::npos, "combine: manifest cloud 0 wrong");
+        CHECK(s.find("clouds/1/") != std::string::npos && s.find("beta") != std::string::npos, "combine: manifest cloud 1 wrong");
+
+        // Cloud 0 must match its source; then full structural verification
+        // through the namespaced octree offset (DFS + boxed query + pick).
+        pf::OctreeStore src;
+        CHECK(src.load(a), "combine: source load failed");
+        pf::OctreeStore c0;
+        CHECK(c0.load(scenePkg, "clouds/0/"), "combine: cloud 0 namespaced load failed");
+        CHECK(c0.meta().pointCount == src.meta().pointCount, "combine: cloud 0 point count mismatch vs source");
+        CHECK(c0.nodes().size() == src.nodes().size(), "combine: cloud 0 node count mismatch vs source");
+        verifyStructure(c0, c0.meta().pointCount, r.GetSize("clouds/0/octree.bin"));
+
+        pf::OctreeStore c1;
+        CHECK(c1.load(scenePkg, "clouds/1/"), "combine: cloud 1 namespaced load failed");
+        verifyStructure(c1, c1.meta().pointCount, r.GetSize("clouds/1/octree.bin"));
+    } // stores + reader closed before removing the file
+
+    std::error_code ec;
+    fs::remove(scenePkg, ec);
+}
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -508,6 +544,8 @@ int main(int argc, char** argv) {
         if (!compress) {
             std::printf("pftest: [phase 13] open .vxpc over http (range reads)...\n");
             testHttpStreaming(parFile);
+            std::printf("pftest: [phase 10] combine clouds into one multi-cloud .vxpc...\n");
+            testMultiCloudPackage(seqFile, parFile, work);
         }
 
         fs::remove(seqFile, ec);

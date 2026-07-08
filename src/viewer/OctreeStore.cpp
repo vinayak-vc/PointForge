@@ -39,7 +39,7 @@ void OctreeStore::clear() {
     stop_ = false; // Reset for next load
 }
 
-bool OctreeStore::load(const std::string& dir) {
+bool OctreeStore::load(const std::string& dir, const std::string& prefix) {
     bool isPackage = (dir.length() >= 5 && dir.substr(dir.length() - 5) == ".vxpc");
     if (isPackage) {
         pkgReader_ = std::make_unique<PackageReader>();
@@ -47,29 +47,33 @@ bool OctreeStore::load(const std::string& dir) {
             logError("OctreeStore: cannot open package " + dir);
             return false;
         }
-        
-        // meta.bin
-        auto metaData = pkgReader_->Read("meta.bin");
+
+        // Phase 10: a multi-cloud package namespaces each cloud under
+        // "clouds/<i>/"; `prefix` selects one. Empty = single-cloud layout.
+        const std::string meta = prefix + "meta.bin";
+        const std::string hier = prefix + "hierarchy.bin";
+        const std::string octr = prefix + "octree.bin";
+
+        auto metaData = pkgReader_->Read(meta);
         if (metaData.size() < 104 || metaData.size() > sizeof(meta_)) {
-            logError("OctreeStore: bad meta.bin size in package"); return false;
+            logError("OctreeStore: bad " + meta + " size in package"); return false;
         }
         std::memset(&meta_, 0, sizeof(meta_));
         std::memcpy(&meta_, metaData.data(), metaData.size());
         if (std::memcmp(meta_.magic, "PFO1", 4) != 0) {
-            logError("OctreeStore: bad meta.bin magic in package"); return false;
+            logError("OctreeStore: bad " + meta + " magic in package"); return false;
         }
-        
-        // hierarchy.bin
-        auto hierData = pkgReader_->Read("hierarchy.bin");
-        if (hierData.empty()) { logError("OctreeStore: missing hierarchy.bin in package"); return false; }
+
+        auto hierData = pkgReader_->Read(hier);
+        if (hierData.empty()) { logError("OctreeStore: missing " + hier + " in package"); return false; }
         nodes_.resize(hierData.size() / sizeof(NodeRecord));
         std::memcpy(nodes_.data(), hierData.data(), hierData.size());
         if (nodes_.size() != meta_.nodeCount) {
             logWarn("OctreeStore: nodeCount mismatch");
         }
-        
+
         octreePath_ = dir;
-        octreePackageOffset_ = pkgReader_->GetOffset("octree.bin");
+        octreePackageOffset_ = pkgReader_->GetOffset(octr);
     } else {
         // meta.bin
         {

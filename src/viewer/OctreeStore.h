@@ -56,7 +56,10 @@ public:
     // Reset store and stop worker threads to allow loading a new point cloud safely
     void clear();
 
-    bool load(const std::string& dir);
+    // Load a cloud. For a .vxpc `dir`, `prefix` selects a namespaced sub-cloud
+    // (e.g. "clouds/0/") inside a multi-cloud package; empty = the top-level
+    // single-cloud layout. Ignored for folder loads (single-cloud only).
+    bool load(const std::string& dir, const std::string& prefix = "");
 
     const FileMetadata&            meta()  const { return meta_; }
     const std::vector<NodeRecord>& nodes() const { return nodes_; }

@@ -179,4 +179,13 @@ bool RepackPackage(const std::string& path,
                    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& upserts,
                    const std::vector<std::string>& removals = {});
 
+// Phase 10 (multi-cloud package): pack several single-cloud `.vxpc` files into
+// ONE multi-cloud package at `outPath`. Each source's entries are copied
+// VERBATIM under a `clouds/<i>/` namespace (no re-(de)compression), and a
+// top-level `scene.json` manifest lists them. `sources` is (path, displayName);
+// an empty name falls back to the source's file stem. Returns false if any
+// source can't be opened or is itself multi-cloud (nested scenes unsupported).
+bool combineClouds(const std::string& outPath,
+                   const std::vector<std::pair<std::string, std::string>>& sources);
+
 } // namespace pf
