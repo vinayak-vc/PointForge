@@ -2604,6 +2604,12 @@ int main(int argc, char** argv) {
                     addToast("Annotation added: " + a.label);
                 }
             }
+            // Composite the offscreen scene (edlFbo) onto the WINDOW backbuffer.
+            // The scene was rendered into edlFbo (bound at the top of this
+            // block); this pass — and ImGui afterwards — must target the default
+            // framebuffer, or the whole window stays black (regression fix).
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, winW, winH);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glDisable(GL_DEPTH_TEST);
             edlShader.use();
@@ -2876,7 +2882,14 @@ int main(int argc, char** argv) {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, streamFbo);
             glBlitFramebuffer(0, 0, winW, winH, 0, 0, sw, sh,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
-                        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            // Read the downscaled frame back into streamPixels BEFORE publishing
+            // — the refactor dropped this, leaving publishFrame reading an empty
+            // buffer (out-of-bounds -> crash when a remote client subscribed).
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, streamFbo);
+            streamPixels.resize((size_t)sw * sh * 3);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, streamPixels.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
             remote.publishFrame(streamPixels.data(), sw, sh);
         }
 
