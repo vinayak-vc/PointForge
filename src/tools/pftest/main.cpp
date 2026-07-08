@@ -28,7 +28,15 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#include <algorithm>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -309,6 +317,131 @@ static void testRepack(const std::string& pkgPath) {
     }
 }
 
+// Phase 13: open a .vxpc over http:// and verify range reads match the local
+// file. A minimal loopback HTTP/1.1 server (WinSock) serves the package with
+// Range support. Windows-only (matches the WinHTTP client); no-op elsewhere.
+#ifdef _WIN32
+struct RangeHttpServer {
+    std::vector<uint8_t> body;
+    SOCKET listenSock = INVALID_SOCKET;
+    int port = 0;
+    std::thread th;
+    std::atomic<bool> stop{false};
+
+    bool start(const std::string& file) {
+        std::ifstream in(file, std::ios::binary | std::ios::ate);
+        if (!in) return false;
+        std::streamsize n = in.tellg(); in.seekg(0);
+        body.resize((size_t)n);
+        if (n > 0) in.read((char*)body.data(), n);
+
+        WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
+        listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listenSock == INVALID_SOCKET) return false;
+        sockaddr_in addr{}; addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = 0;
+        if (bind(listenSock, (sockaddr*)&addr, sizeof(addr)) != 0) return false;
+        int len = sizeof(addr);
+        getsockname(listenSock, (sockaddr*)&addr, &len);
+        port = ntohs(addr.sin_port);
+        if (listen(listenSock, 8) != 0) return false;
+        th = std::thread([this] { serve(); });
+        return true;
+    }
+    void serve() {
+        while (!stop.load()) {
+            fd_set fds; FD_ZERO(&fds); FD_SET(listenSock, &fds);
+            timeval tv{0, 200000};
+            if (select(0, &fds, nullptr, nullptr, &tv) <= 0) continue;
+            SOCKET c = accept(listenSock, nullptr, nullptr);
+            if (c == INVALID_SOCKET) continue;
+            handle(c);
+            closesocket(c);
+        }
+    }
+    void handle(SOCKET c) {
+        std::string req; char buf[2048];
+        for (;;) {
+            int r = recv(c, buf, sizeof(buf), 0);
+            if (r <= 0) return;
+            req.append(buf, r);
+            if (req.find("\r\n\r\n") != std::string::npos || req.size() > 65536) break;
+        }
+        uint64_t start = 0, end = body.empty() ? 0 : body.size() - 1;
+        bool ranged = false;
+        size_t rp = req.find("Range: bytes=");
+        if (rp == std::string::npos) rp = req.find("range: bytes=");
+        if (rp != std::string::npos) {
+            ranged = true;
+            const char* p = req.c_str() + rp + 13;
+            start = strtoull(p, (char**)&p, 10);
+            if (*p == '-') { ++p; if (*p >= '0' && *p <= '9') end = strtoull(p, nullptr, 10); }
+        }
+        if (!body.empty()) {
+            if (start >= body.size()) start = body.size() - 1;
+            if (end >= body.size()) end = body.size() - 1;
+        }
+        uint64_t clen = (end >= start) ? (end - start + 1) : 0;
+
+        std::string hdr = ranged ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n";
+        if (ranged)
+            hdr += "Content-Range: bytes " + std::to_string(start) + "-" + std::to_string(end) +
+                   "/" + std::to_string(body.size()) + "\r\n";
+        hdr += "Accept-Ranges: bytes\r\n";
+        hdr += "Content-Length: " + std::to_string(clen) + "\r\n";
+        hdr += "Connection: close\r\n\r\n";
+        send(c, hdr.data(), (int)hdr.size(), 0);
+        uint64_t sent = 0;
+        while (sent < clen) {
+            int chunk = (int)std::min<uint64_t>(clen - sent, 65536);
+            int wn = send(c, (const char*)body.data() + start + sent, chunk, 0);
+            if (wn <= 0) break;
+            sent += (uint64_t)wn;
+        }
+    }
+    void shutdownServer() {
+        stop = true;
+        if (th.joinable()) th.join();
+        if (listenSock != INVALID_SOCKET) closesocket(listenSock);
+        WSACleanup();
+    }
+};
+
+static void testHttpStreaming(const std::string& pkgPath) {
+    std::vector<uint8_t> refOctree;
+    size_t refEntries = 0;
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(pkgPath), "http: local open failed");
+        refEntries = r.ListEntries().size();
+        pf::VXPCDirectoryEntry e;
+        refOctree = r.ReadRaw("octree.bin", e);
+    }
+
+    RangeHttpServer srv;
+    CHECK(srv.start(pkgPath), "http: loopback server failed to start");
+    if (srv.port == 0) return;
+
+    const std::string url = "http://127.0.0.1:" + std::to_string(srv.port) + "/scan.vxpc";
+    {
+        pf::PackageReader r;
+        CHECK(r.Open(url), "http: PackageReader::Open(url) failed");
+        CHECK(r.Validate(), "http: package invalid over http");
+        CHECK(r.ListEntries().size() == refEntries, "http: entry count differs over http");
+        // meta.bin: exercises decompress + CRC over a ranged read.
+        auto meta = r.Read("meta.bin");
+        CHECK(!meta.empty(), "http: meta.bin unreadable over http");
+        // octree.bin raw span must match the local bytes exactly (multi-block).
+        pf::VXPCDirectoryEntry e;
+        auto got = r.ReadRaw("octree.bin", e);
+        CHECK(got == refOctree, "http: octree.bin raw bytes differ over http");
+    }
+    srv.shutdownServer();
+}
+#else
+static void testHttpStreaming(const std::string&) {}
+#endif
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -355,18 +488,27 @@ int main(int argc, char** argv) {
 
         pf::OctreeStore store;
         CHECK(store.load(parFile), "OctreeStore failed to load parallel output");
-        
-        pf::PackageReader pkg;
-        CHECK(pkg.Open(parFile), "PackageReader failed to open vxpc");
-        uint64_t payloadSize = pkg.GetSize("octree.bin");
-        
-        verifyStructure(store, nPoints, payloadSize);
+
+        {
+            // Scope the reader: it holds parFile open (Phase 13 ByteSource), so
+            // it must be closed before the repack below renames over parFile.
+            pf::PackageReader pkg;
+            CHECK(pkg.Open(parFile), "PackageReader failed to open vxpc");
+            uint64_t payloadSize = pkg.GetSize("octree.bin");
+            verifyStructure(store, nPoints, payloadSize);
+        }
 
         // Phase 7: repack the freshly-built package. Close the store first so
         // the .vxpc handle is released (Windows rename-over-open guard).
         store.clear();
         std::printf("pftest: [phase 7] repack (verbatim copy + upsert/remove)...\n");
         testRepack(parFile);
+
+        // Phase 13: stream the repacked package over http:// (once).
+        if (!compress) {
+            std::printf("pftest: [phase 13] open .vxpc over http (range reads)...\n");
+            testHttpStreaming(parFile);
+        }
 
         fs::remove(seqFile, ec);
         fs::remove(parFile, ec);

@@ -19,7 +19,7 @@
 | 10 | Multi Cloud | PLANNED | Support multiple point clouds inside one package |
 | 11 | Plugin Data | DONE | `plugins/` namespace via `AddPluginData`; reader `ListEntries`/`ListPlugins`; core ignores non-fixed names; over-long filename guard; pftest `testPluginData` |
 | 12 | Custom Metadata | DONE | PackageWriter supports dynamic Key/Value addition serialized as custom_meta.json |
-| 13 | Streaming Support | PLANNED | Range-request friendly layout |
+| 13 | Streaming Support | DONE (reader) | `PackageReader` opens `http(s)://` URLs via WinHTTP Range requests + 64 KiB LRU block cache (`ByteSource` abstraction; file + HTTP). pftest loopback-server round-trip. Remote octree PAYLOAD streaming in the viewer = documented follow-up |
 | 14 | Chunked Octree | PLANNED | Multi-chunk octree layout support |
 | 15 | Compression | DONE | ZSTD compression added to PackageWriter AddMemory/AddFile APIs |
 | 16 | Checksums | DONE | Implemented CRC32 computation per-file, computed by Writer, validated by Reader on Read() |
@@ -156,13 +156,34 @@
   binding — `pfunity` doesn't currently link `PackageWriter`; wire it when a
   plugin actually needs write access. The pfcore API above is the foundation.
 
-## Phase 13: Streaming Support
+## Phase 13: Streaming Support — DONE (reader level)
 **Goal**: Cloud-native access via HTTP Range Requests.
-- **Research & Implementation**: 
-  - The `.vxpc` layout (Header -> Data -> Directory) is already streaming-friendly.
-  - Implementation: Modify `PackageReader` to accept a `URL` instead of a local file path.
-  - Use `libcurl` or Windows HTTP APIs to fetch the last 4KB (to read the directory offset), then fetch the directory, then fulfill `PackageReader::Read(offset, size)` with HTTP `Range: bytes=offset-(offset+size-1)` requests.
-  - Needs a caching layer to coalesce small byte reads.
+- **Implemented**:
+  - `ByteSource` abstraction behind `PackageReader` (`openByteSource(path)`
+    factory): `FileByteSource` for local paths, `HttpByteSource` for
+    `http(s)://` URLs. `PackageReader::Open` routes by scheme; `Read`/`ReadRaw`/
+    `ListEntries`/`OpenStream` all work over either source unchanged.
+  - `HttpByteSource` uses **WinHTTP** (OS-native, no new external/vcpkg dep,
+    `#pragma comment(lib,"winhttp.lib")` — same pattern as VideoExporter's
+    Media Foundation). It discovers total size from a 1-byte ranged GET's
+    `Content-Range`, then serves reads from a **64 KiB block LRU cache** (≤256
+    blocks / 16 MiB); a miss fetches the covering span in ONE ranged GET and
+    serves directly from it (correct even for spans larger than the cache).
+  - `OpenStream` reimplemented as a source-agnostic `MemoryStream` (the old
+    file-only stream had no callers and mis-handled compressed entries).
+  - Tests: `pftest testHttpStreaming` — a minimal WinSock loopback HTTP/1.1
+    server serves the real converted `.vxpc` with `Range` support; open over
+    `http://127.0.0.1:<port>/…`, assert directory count matches, `meta.bin`
+    decompress+CRC over a ranged read, and `octree.bin` raw bytes byte-match
+    the local file. Windows-only (matches the WinHTTP client).
+- **Behavioural note**: `PackageReader` now holds its source open for its
+  lifetime (was per-call `fopen`). Callers that rename/repack a file must close
+  any reader on it first — `RepackPackage` and the viewer save path already do.
+- **Deferred follow-up**: streaming the octree PAYLOAD over HTTP in the viewer
+  (loading a remote cloud end-to-end). The reader supports URL range reads
+  today; the remaining work is routing `OctreeStore`'s streaming worker
+  (its own `ifstream` on `octree.bin`) through a `ByteSource` — intentionally
+  left out of this phase to avoid touching the crash-sensitive streaming path.
 
 ## Phase 20: Documentation — DONE
 **Goal**: Formal specification.

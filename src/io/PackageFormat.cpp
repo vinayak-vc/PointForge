@@ -6,9 +6,21 @@
 #include <stdexcept>
 #include <filesystem>
 #include <unordered_set>
+#include <deque>
+#include <map>
+#include <algorithm>
 
 #ifdef PF_WITH_ZSTD
 #include <zstd.h>
+#endif
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 #endif
 
 namespace pf {
@@ -39,57 +51,244 @@ static uint32_t computeCrc32(uint32_t crc, const void* buf, size_t size) {
     return crc ^ ~0U;
 }
 
-// --- PackageStream Implementation (Phase 1) ---
-class FileReaderStream : public PackageStream {
+// --- PackageStream: in-memory (source-agnostic; Phase 13) ---
+// Holds a fully-materialised entry; works whether the bytes came from a file
+// or an HTTP range. OpenStream had no callers, so this replaces the old
+// file-only stream without affecting anything downstream.
+class MemoryStream : public PackageStream {
 public:
-    FileReaderStream(const std::string& path, uint64_t offset, uint64_t size) 
-        : size_(size), baseOffset_(offset) {
+    explicit MemoryStream(std::vector<uint8_t> data) : data_(std::move(data)) {}
+    uint64_t Read(void* buffer, uint64_t size) override {
+        uint64_t maxRead = data_.size() - pos_;
+        uint64_t toRead = (size > maxRead) ? maxRead : size;
+        if (toRead == 0) return 0;
+        std::memcpy(buffer, data_.data() + pos_, (size_t)toRead);
+        pos_ += toRead;
+        return toRead;
+    }
+    uint64_t GetSize() const override { return data_.size(); }
+    uint64_t GetOffset() const override { return pos_; }
+    void Seek(uint64_t offset) override { pos_ = (offset > data_.size()) ? data_.size() : offset; }
+private:
+    std::vector<uint8_t> data_;
+    uint64_t pos_ = 0;
+};
+
+// --- ByteSource: local file (Phase 13) ---
+class FileByteSource : public ByteSource {
+public:
+    explicit FileByteSource(const std::string& path) {
         f_ = std::fopen(path.c_str(), "rb");
         if (f_) {
 #ifdef _WIN32
-            _fseeki64(f_, baseOffset_, SEEK_SET);
+            _fseeki64(f_, 0, SEEK_END); size_ = (uint64_t)_ftelli64(f_);
 #else
-            fseeko(f_, baseOffset_, SEEK_SET);
+            fseeko(f_, 0, SEEK_END); size_ = (uint64_t)ftello(f_);
 #endif
         }
     }
-    
-    ~FileReaderStream() override {
-        if (f_) std::fclose(f_);
-    }
-
-    uint64_t Read(void* buffer, uint64_t size) override {
-        if (!f_) return 0;
-        
-        // Prevent reading past the entry's size
-        uint64_t maxRead = size_ - currentOffset_;
-        uint64_t toRead = (size > maxRead) ? maxRead : size;
-        if (toRead == 0) return 0;
-
-        size_t readCount = std::fread(buffer, 1, (size_t)toRead, f_);
-        currentOffset_ += readCount;
-        return readCount;
-    }
-
-    uint64_t GetSize() const override { return size_; }
-    uint64_t GetOffset() const override { return currentOffset_; }
-    
-    void Seek(uint64_t offset) override {
-        if (!f_) return;
-        currentOffset_ = (offset > size_) ? size_ : offset;
+    ~FileByteSource() override { if (f_) std::fclose(f_); }
+    bool valid() const override { return f_ != nullptr; }
+    uint64_t size() const override { return size_; }
+    uint64_t read(uint64_t offset, void* buffer, uint64_t len) override {
+        if (!f_ || len == 0) return 0;
 #ifdef _WIN32
-        _fseeki64(f_, baseOffset_ + currentOffset_, SEEK_SET);
+        _fseeki64(f_, (long long)offset, SEEK_SET);
 #else
-        fseeko(f_, baseOffset_ + currentOffset_, SEEK_SET);
+        fseeko(f_, (off_t)offset, SEEK_SET);
 #endif
+        return (uint64_t)std::fread(buffer, 1, (size_t)len, f_);
     }
-
 private:
     FILE* f_ = nullptr;
     uint64_t size_ = 0;
-    uint64_t baseOffset_ = 0;
-    uint64_t currentOffset_ = 0;
 };
+
+#ifdef _WIN32
+// --- ByteSource: HTTP(S) via WinHTTP with a fixed-block LRU cache (Phase 13) ---
+// The .vxpc layout (header -> payload -> trailing directory) is range-friendly:
+// fetch the header, then the directory, then entries on demand. Reads are
+// served from 64 KiB blocks; a miss fetches the covering span in one ranged
+// GET (coalescing) and caches each block. Requires the server to honour
+// `Range` (206 + Content-Range).
+class HttpByteSource : public ByteSource {
+public:
+    explicit HttpByteSource(const std::string& url) { open(url); }
+    ~HttpByteSource() override {
+        if (hConnect_) WinHttpCloseHandle(hConnect_);
+        if (hSession_) WinHttpCloseHandle(hSession_);
+    }
+    bool valid() const override { return valid_; }
+    uint64_t size() const override { return total_; }
+
+    uint64_t read(uint64_t offset, void* buffer, uint64_t len) override {
+        if (!valid_ || len == 0 || offset >= total_) return 0;
+        if (offset + len > total_) len = total_ - offset;
+
+        const uint64_t b0 = offset / kBlock;
+        const uint64_t b1 = (offset + len - 1) / kBlock;
+
+        // Fast path: every covering block already cached -> assemble from cache.
+        bool allCached = true;
+        for (uint64_t b = b0; b <= b1; ++b) if (!cache_.count(b)) { allCached = false; break; }
+        if (allCached) {
+            uint8_t* out = (uint8_t*)buffer; uint64_t done = 0;
+            while (done < len) {
+                const uint64_t pos = offset + done, b = pos / kBlock;
+                auto it = cache_.find(b);
+                const uint64_t within = pos - b * kBlock;
+                if (it == cache_.end() || within >= it->second.size()) break;
+                const uint64_t n = std::min<uint64_t>(len - done, it->second.size() - within);
+                std::memcpy(out + done, it->second.data() + within, (size_t)n);
+                done += n;
+            }
+            return done;
+        }
+
+        // Slow path: fetch the whole covering span in ONE ranged GET and serve
+        // directly from it. Serving from `span` (not the cache) is correct even
+        // when the span exceeds the cache ceiling — caching happens after and
+        // any eviction can't corrupt this read.
+        const uint64_t spanStart = b0 * kBlock;
+        const uint64_t spanEnd = std::min(total_, (b1 + 1) * kBlock);   // exclusive
+        std::vector<uint8_t> span;
+        if (!fetchRange(spanStart, spanEnd - spanStart, span)) return 0;
+
+        const uint64_t within = offset - spanStart;
+        uint64_t n = (within < span.size()) ? std::min<uint64_t>(len, span.size() - within) : 0;
+        if (n > 0) std::memcpy(buffer, span.data() + within, (size_t)n);
+
+        // Opportunistically cache the covered blocks for future small reads.
+        for (uint64_t b = b0; b <= b1; ++b) {
+            const uint64_t s = b * kBlock - spanStart;
+            if (s >= span.size()) break;
+            const uint64_t e = std::min<uint64_t>(s + kBlock, span.size());
+            putBlock(b, std::vector<uint8_t>(span.begin() + s, span.begin() + e));
+        }
+        return n;
+    }
+
+private:
+    static constexpr uint64_t kBlock = 65536;
+    static constexpr size_t   kMaxBlocks = 256;   // ~16 MiB cache ceiling
+
+    static std::wstring widen(const std::string& s) {
+        if (s.empty()) return L"";
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+        std::wstring w(n, 0);
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+        return w;
+    }
+
+    void open(const std::string& url) {
+        std::wstring wurl = widen(url);
+        URL_COMPONENTS uc; std::memset(&uc, 0, sizeof(uc)); uc.dwStructSize = sizeof(uc);
+        wchar_t host[256] = {0}, path[2048] = {0};
+        uc.lpszHostName = host; uc.dwHostNameLength = 255;
+        uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
+        if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) { logError("HttpByteSource: bad URL"); return; }
+        host_ = host; path_ = path; port_ = uc.nPort;
+        secure_ = (uc.nScheme == INTERNET_SCHEME_HTTPS);
+
+        hSession_ = WinHttpOpen(L"PointForge/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession_) { logError("HttpByteSource: WinHttpOpen failed"); return; }
+        hConnect_ = WinHttpConnect(hSession_, host_.c_str(), port_, 0);
+        if (!hConnect_) { logError("HttpByteSource: WinHttpConnect failed"); return; }
+
+        // Discover total size via a 1-byte ranged GET -> Content-Range: .../TOTAL.
+        std::vector<uint8_t> probe;
+        uint64_t total = 0;
+        if (!fetchRange(0, 1, probe, &total) || total == 0) {
+            logError("HttpByteSource: server did not report a ranged size (Range unsupported?)");
+            return;
+        }
+        total_ = total;
+        valid_ = true;
+    }
+
+    void putBlock(uint64_t idx, std::vector<uint8_t> data) {
+        if (cache_.count(idx)) return;
+        cache_[idx] = std::move(data);
+        order_.push_back(idx);
+        while (order_.size() > kMaxBlocks) {
+            uint64_t old = order_.front(); order_.pop_front();
+            cache_.erase(old);
+        }
+    }
+
+    // One ranged GET of [start, start+len). Fills `out`; if `totalOut`, parses
+    // the Content-Range total. Returns false on transport/status failure.
+    bool fetchRange(uint64_t start, uint64_t len, std::vector<uint8_t>& out, uint64_t* totalOut = nullptr) {
+        out.clear();
+        HINTERNET hReq = WinHttpOpenRequest(hConnect_, L"GET", path_.c_str(), nullptr,
+                                            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                            secure_ ? WINHTTP_FLAG_SECURE : 0);
+        if (!hReq) return false;
+        struct ReqGuard { HINTERNET h; ~ReqGuard(){ if (h) WinHttpCloseHandle(h);} } guard{hReq};
+
+        wchar_t range[96];
+        swprintf(range, 96, L"Range: bytes=%llu-%llu",
+                 (unsigned long long)start, (unsigned long long)(start + len - 1));
+        if (!WinHttpAddRequestHeaders(hReq, range, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD)) return false;
+        if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) return false;
+        if (!WinHttpReceiveResponse(hReq, nullptr)) return false;
+
+        DWORD status = 0, sz = sizeof(status);
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+        if (status != 206 && status != 200) { logError("HttpByteSource: HTTP status " + std::to_string(status)); return false; }
+
+        if (totalOut) {
+            *totalOut = 0;
+            wchar_t cr[128]; DWORD crlen = sizeof(cr);
+            if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CONTENT_RANGE, WINHTTP_HEADER_NAME_BY_INDEX,
+                                    cr, &crlen, WINHTTP_NO_HEADER_INDEX)) {
+                const wchar_t* slash = wcsrchr(cr, L'/');   // "bytes a-b/TOTAL"
+                if (slash && slash[1]) *totalOut = _wcstoui64(slash + 1, nullptr, 10);
+            }
+        }
+
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(hReq, &avail) || avail == 0) break;
+            size_t base = out.size();
+            out.resize(base + avail);
+            DWORD got = 0;
+            if (!WinHttpReadData(hReq, out.data() + base, avail, &got)) return false;
+            out.resize(base + got);
+            if (got == 0) break;
+        }
+        return true;
+    }
+
+    HINTERNET hSession_ = nullptr, hConnect_ = nullptr;
+    std::wstring host_, path_;
+    INTERNET_PORT port_ = 0;
+    bool secure_ = false, valid_ = false;
+    uint64_t total_ = 0;
+    std::map<uint64_t, std::vector<uint8_t>> cache_;
+    std::deque<uint64_t> order_;
+};
+#endif // _WIN32
+
+std::unique_ptr<ByteSource> openByteSource(const std::string& path) {
+    const bool isUrl = path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0;
+    if (isUrl) {
+#ifdef _WIN32
+        auto s = std::make_unique<HttpByteSource>(path);
+        if (s->valid()) return s;
+        return nullptr;
+#else
+        logError("openByteSource: HTTP not supported on this platform: " + path);
+        return nullptr;
+#endif
+    }
+    auto s = std::make_unique<FileByteSource>(path);
+    if (s->valid()) return s;
+    return nullptr;
+}
 
 // --- PackageWriter ---
 
@@ -354,36 +553,26 @@ PackageReader::~PackageReader() {}
 
 bool PackageReader::Open(const std::string& path) {
     path_ = path;
-    
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
+    valid_ = false;
+    directory_.clear();
 
-    if (std::fread(&header_, sizeof(header_), 1, f) != 1) {
-        std::fclose(f);
-        return false;
-    }
+    // Phase 13: route through a ByteSource (local file or http(s):// URL).
+    src_ = openByteSource(path);
+    if (!src_ || !src_->valid()) { src_.reset(); return false; }
 
-    if (std::memcmp(header_.magic, "VXPC", 4) != 0 || header_.version != 1) {
-        std::fclose(f);
-        return false;
-    }
+    if (src_->read(0, &header_, sizeof(header_)) != sizeof(header_)) { src_.reset(); return false; }
+    if (std::memcmp(header_.magic, "VXPC", 4) != 0 || header_.version != 1) { src_.reset(); return false; }
 
     if (header_.entryCount > 0) {
         directory_.resize(header_.entryCount);
-        
-#ifdef _WIN32
-        _fseeki64(f, header_.directoryOffset, SEEK_SET);
-#else
-        fseeko(f, header_.directoryOffset, SEEK_SET);
-#endif
-        if (std::fread(directory_.data(), sizeof(VXPCDirectoryEntry), header_.entryCount, f) != header_.entryCount) {
-            std::fclose(f);
+        const uint64_t want = (uint64_t)header_.entryCount * sizeof(VXPCDirectoryEntry);
+        if (src_->read(header_.directoryOffset, directory_.data(), want) != want) {
             directory_.clear();
+            src_.reset();
             return false;
         }
     }
 
-    std::fclose(f);
     valid_ = true;
     return true;
 }
@@ -429,17 +618,10 @@ std::vector<uint8_t> PackageReader::ReadRaw(const std::string& name, VXPCDirecto
     const uint64_t storedSize = (outEntry.compression == 1) ? outEntry.compressedSize
                                                             : outEntry.originalSize;
     if (storedSize == 0) return buffer;   // valid empty entry
+    if (!src_) return buffer;
 
-    FILE* f = std::fopen(path_.c_str(), "rb");
-    if (!f) return buffer;
-#ifdef _WIN32
-    _fseeki64(f, outEntry.offset, SEEK_SET);
-#else
-    fseeko(f, outEntry.offset, SEEK_SET);
-#endif
     buffer.resize(storedSize);
-    if (std::fread(buffer.data(), 1, storedSize, f) != storedSize) buffer.clear();
-    std::fclose(f);
+    if (src_->read(outEntry.offset, buffer.data(), storedSize) != storedSize) buffer.clear();
     return buffer;
 }
 
@@ -456,8 +638,10 @@ std::vector<std::string> PackageReader::ListEntries(const std::string& prefix) c
 
 std::unique_ptr<PackageStream> PackageReader::OpenStream(const std::string& name) const {
     if (!valid_ || !Contains(name)) return nullptr;
-    VXPCDirectoryEntry entry = GetEntry(name);
-    return std::make_unique<FileReaderStream>(path_, entry.offset, entry.originalSize);
+    // Materialise the (decompressed, CRC-checked) entry and stream it from
+    // memory — source-agnostic (file or HTTP) and correct for compressed
+    // entries (the old file stream read originalSize bytes of compressed data).
+    return std::make_unique<MemoryStream>(Read(name));
 }
 
 std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
@@ -468,24 +652,16 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
     if (entry.originalSize == 0 && entry.offset == 0 && std::strcmp(entry.filename, name.c_str()) != 0) {
         return buffer;
     }
-
-    FILE* f = std::fopen(path_.c_str(), "rb");
-    if (!f) return buffer;
-
-#ifdef _WIN32
-    _fseeki64(f, entry.offset, SEEK_SET);
-#else
-    fseeko(f, entry.offset, SEEK_SET);
-#endif
+    if (!src_) return buffer;
 
     uint64_t readSize = (entry.compression == 1) ? entry.compressedSize : entry.originalSize;
     std::vector<uint8_t> diskBuffer(readSize);
 
     if (readSize > 0) {
-        if (std::fread(diskBuffer.data(), 1, readSize, f) != readSize) {
+        if (src_->read(entry.offset, diskBuffer.data(), readSize) != readSize) {
             diskBuffer.clear();
         } else {
-            // Validate CRC32 of payload ON DISK
+            // Validate CRC32 of the stored bytes.
             uint32_t checksum = computeCrc32(0, diskBuffer.data(), diskBuffer.size());
             if (checksum != entry.crc32) {
                 logError("PackageReader: CRC32 mismatch for " + name);
@@ -493,7 +669,6 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
             }
         }
     }
-    std::fclose(f);
 
     if (diskBuffer.empty()) return buffer;
 
@@ -520,18 +695,20 @@ std::vector<uint8_t> PackageReader::Read(const std::string& name) const {
 bool RepackPackage(const std::string& path,
                    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& upserts,
                    const std::vector<std::string>& removals) {
-    PackageReader reader;
-    if (!reader.Open(path)) {
-        logError("RepackPackage: cannot open " + path);
-        return false;
-    }
-
     std::unordered_set<std::string> upsertNames, removeNames;
     for (const auto& u : upserts) upsertNames.insert(u.first);
     for (const auto& r : removals) removeNames.insert(r);
 
     const std::string tmp = path + ".tmp";
     {
+        // The reader holds `path` open (its ByteSource), so it MUST be
+        // destroyed before the rename below — on Windows a rename over a file
+        // with any open handle fails ("Access is denied"). Scope both here.
+        PackageReader reader;
+        if (!reader.Open(path)) {
+            logError("RepackPackage: cannot open " + path);
+            return false;
+        }
         PackageWriter writer;
         if (!writer.Create(tmp)) {
             logError("RepackPackage: cannot create " + tmp);
@@ -570,7 +747,7 @@ bool RepackPackage(const std::string& path,
             std::error_code ec; std::filesystem::remove(tmp, ec);
             return false;
         }
-    } // writer closed here
+    } // reader + writer both closed here -> `path` handle released
 
     // 3. Atomic replace. std::filesystem::rename replaces an existing dest on
     //    both Windows (MoveFileEx semantics) and POSIX.
