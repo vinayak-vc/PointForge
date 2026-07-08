@@ -46,21 +46,40 @@ its own `vxpc/<phase>` branch off the prior tip, smallest first. The doc's
   table, read/write/repack APIs, folder back-compat, versioning rules). Fixes
   the stale 16-byte-header/variable-name draft. Doc-only, no build change.
 
+### Phase 13 — Streaming (branch `vxpc/streaming`) — DONE (reader level)
+- `ByteSource` abstraction behind `PackageReader`: `FileByteSource` +
+  `HttpByteSource` (WinHTTP, OS-native — no vcpkg dep, `#pragma comment(lib)`).
+  `Open` routes by URL scheme; Read/ReadRaw/ListEntries/OpenStream all work
+  over either. 64 KiB block LRU cache; a miss fetches the covering span in one
+  ranged GET and serves directly (correct for spans > cache). OpenStream is now
+  a source-agnostic MemoryStream (old file-stream was unused + mishandled
+  compressed entries).
+- pftest `testHttpStreaming`: WinSock loopback Range server serves the real
+  `.vxpc`; open over http://127.0.0.1, assert directory count, meta.bin
+  decompress+CRC over a ranged read, octree.bin raw byte-match. Full build +
+  CTest green (v1044).
+- **Behaviour change:** `PackageReader` now holds its source open for its
+  lifetime (was per-call fopen). Anything renaming/repacking a file must close
+  readers on it first — `RepackPackage` + the viewer save path already do; this
+  surfaced as a pftest handle-scope fix (product code was fine).
+- **Deferred follow-up (within 13):** streaming the octree PAYLOAD over HTTP in
+  the viewer (remote cloud load end-to-end). Reader supports URL range reads;
+  routing `OctreeStore`'s streaming worker through a `ByteSource` is the
+  remaining work — left out to avoid touching the crash-sensitive path.
+
 ### VXPC run summary — where it stands
 - DONE this run (small to big, one branch each off the prior tip):
-  11 plugin-data -> 7 camera-data -> 8 measurements -> 9 annotations -> 20 docs.
+  11 plugin-data -> 7 camera-data -> 8 measurements -> 9 annotations ->
+  20 docs -> 13 streaming.
   Chain: vxpc/plugin-data -> vxpc/camera-data -> vxpc/measurements ->
-  vxpc/annotations -> vxpc/documentation (each contains all prior).
+  vxpc/annotations -> vxpc/documentation -> vxpc/streaming (each contains all
+  prior). PRs #18–#22 opened for 11/7/8/9/20 (stacked); Phase 13 PR to follow.
 - NOT merged to main — branches await PRs (multi-cloud #6 on vxpc/thumbnails is
   also still unmerged; main tip = PR #9).
-- Remaining PLANNED, NOT started (a deliberate stop, not an omission):
-  - Phase 13 Streaming — HTTP range requests. Needs an HTTP client (WinHTTP is
-    OS-native and lighter than a libcurl/vcpkg dep) + a byte-range cache, and
-    it touches the streaming read path the June audit had to fix for crashes.
-    Next in line but a category jump in size/risk + a networking dependency —
-    flag for a go/no-go before building.
-  - Phases 10, 14, 17, 18, 19 — explicitly deferred by the plan as multi-month
-    architectural work; out of scope for this run.
+- Remaining, explicitly deferred by the plan as multi-month architectural work
+  (out of scope): Phases 10 (multi-cloud package), 14 (chunked octree),
+  17 (recovery/atomic saves), 18 (encryption), 19 (hierarchical VFS). Every
+  non-deferred VXPC phase is now DONE.
 - Live-test gap for 7/8/9: the viewer File > "Save Project Data to Package"
   action is code-verified + its repack path is pftest-proven end-to-end, but
   the menu click itself (close->repack->reload of the loaded package on

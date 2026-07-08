@@ -183,9 +183,19 @@ reading remains supported for existing datasets.
   non-zero reserved bits they don't understand rather than failing.
 - Endianness is little-endian; there is no big-endian variant.
 
-## 11. Deferred (not in v1)
+## 11. Streaming over HTTP
+
+`PackageReader::Open` accepts an `http(s)://` URL as well as a local path
+(§8). Remote reads use HTTP `Range` requests (WinHTTP) against the same layout:
+the trailing-directory design means a client fetches the header, then the
+directory, then entries on demand. Reads are served from a 64 KiB block cache
+that coalesces small requests. The server must honour `Range` (respond `206`
+with `Content-Range`). Note: streaming the octree **payload** node-by-node in
+the live viewer is not yet wired (the reader supports URL range reads; routing
+`OctreeStore`'s streaming worker through the same source is a follow-up).
+
+## 12. Deferred (not in v1)
 
 Per `docs/vxpc_feature.md` §"Long-Term / High Complexity": multi-cloud packages
 (10), chunked `octree.bin` (14), crash-recovery/atomic journaling (17),
-AES encryption (18), and a true hierarchical VFS/trie directory (19). HTTP
-range-request streaming (13) is planned but needs an HTTP client dependency.
+AES encryption (18), and a true hierarchical VFS/trie directory (19).

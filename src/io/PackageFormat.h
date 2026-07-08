@@ -34,6 +34,21 @@ struct VXPCDirectoryEntry {
     uint32_t userFlags = 0;
 };
 
+// Phase 13: random-access byte source behind PackageReader. A local file or,
+// via WinHTTP, an http(s):// URL served with Range support (+ a block cache).
+// read() fills up to `len` bytes at absolute `offset`, returning the count.
+class ByteSource {
+public:
+    virtual ~ByteSource() = default;
+    virtual bool valid() const = 0;
+    virtual uint64_t size() const = 0;
+    virtual uint64_t read(uint64_t offset, void* buffer, uint64_t len) = 0;
+};
+
+// Factory: returns an HTTP-backed source for "http://"/"https://" paths
+// (nullptr if this build has no HTTP support), else a local-file source.
+std::unique_ptr<ByteSource> openByteSource(const std::string& path);
+
 // Abstract Stream Interface for VFS
 class PackageStream {
 public:
@@ -148,6 +163,9 @@ private:
     std::vector<VXPCDirectoryEntry> directory_;
     VXPCHeader header_{};
     bool valid_ = false;
+    // Phase 13: reads route through this (local file or HTTP), so Open() works
+    // for a path or an http(s):// URL. mutable — reads don't change logical state.
+    mutable std::unique_ptr<ByteSource> src_;
 };
 
 // Phase 7 (repack support): rewrite an existing `.vxpc` applying `upserts`
