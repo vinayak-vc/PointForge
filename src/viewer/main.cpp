@@ -1860,7 +1860,13 @@ int main(int argc, char** argv) {
         showConvertDialog = true;
     };
 
+    // Primary "open": pick a single-file .vxpc package (the modern output).
     auto browseAndLoad = [&]() {
+        std::string file = pf::openFileDialog("Point Cloud Package (*.vxpc)\0*.vxpc\0All Files\0*.*\0");
+        if (!file.empty()) loadOctree(file);
+    };
+    // Legacy loose-folder octrees (meta.bin/hierarchy.bin/octree.bin in a dir).
+    auto browseFolderAndLoad = [&]() {
         std::string folder = pf::openFolderDialog();
         if (!folder.empty()) loadOctree(folder);
     };
@@ -3266,7 +3272,8 @@ int main(int argc, char** argv) {
             bool doResetSettings = false;
             if (ImGui::BeginMainMenuBar()) {
                 if (ImGui::BeginMenu("File")) {
-                    if (ImGui::MenuItem("Open Octree Folder...", "Ctrl+O")) browseAndLoad();
+                    if (ImGui::MenuItem("Open Cloud...", "Ctrl+O")) browseAndLoad();
+                    if (ImGui::MenuItem("Open Octree Folder...")) browseFolderAndLoad();
                     if (ImGui::BeginMenu("Open Recent", !recentDirs.empty())) {
                         for (size_t i = 0; i < recentDirs.size(); ++i) {
                             ImGui::PushID((int)i);
@@ -4822,8 +4829,9 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("Out-of-core point cloud viewer");
                     ImGui::Spacing();
                     float bw = 360.0f * S;
-                    if (ImGui::Button("Open Octree Folder...", ImVec2(bw, 34.0f * S))) browseAndLoad();
+                    if (ImGui::Button("Open Cloud...", ImVec2(bw, 34.0f * S))) browseAndLoad();
                     if (ImGui::Button("Convert a Scan...", ImVec2(bw, 34.0f * S))) openConvertDialog("");
+                    if (ImGui::SmallButton("Open octree folder (legacy)...")) browseFolderAndLoad();
                     if (!recentDirs.empty()) {
                         ImGui::Spacing();
                         ImGui::SeparatorText("Recent");
@@ -4895,7 +4903,8 @@ int main(int argc, char** argv) {
             if (showPalette) {
                 struct Cmd { std::string label; const char* keys; std::function<void()> fn; };
                 std::vector<Cmd> cmds;
-                cmds.push_back({"Open Octree Folder...", "Ctrl+O", [&] { browseAndLoad(); }});
+                cmds.push_back({"Open Cloud...", "Ctrl+O", [&] { browseAndLoad(); }});
+                cmds.push_back({"Open Octree Folder...", "", [&] { browseFolderAndLoad(); }});
                 cmds.push_back({"Convert a Scan...", "Ctrl+I", [&] { openConvertDialog(""); }});
                 cmds.push_back({"Frame All", "F", [&] { frameAllReq = true; }});
                 cmds.push_back({"Reset View", "", [&] { if (octreeLoaded) setupCamera(); }});
