@@ -1,5 +1,22 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-08, cont.) - Open dialog handles .vxpc + octree folders (PR #29)
+
+The "Open" action used a folder picker, so single-file `.vxpc` clouds couldn't be
+selected. Fixed in `src/viewer/main.cpp`:
+- `browseAndLoad` now uses `pf::openFileDialog` with two distinct filter choices —
+  "VXPC Package (*.vxpc)" (default) and "Octree Folder (meta.bin)". A `.vxpc` selection
+  loads directly; selecting a folder's `meta.bin`/`hierarchy.bin`/`octree.bin` loads the
+  containing folder (native dialogs can't pick a file and a folder in one picker).
+- `browseFolderAndLoad` (folder picker) added for legacy loose folders; wired as a
+  separate "Open Octree Folder..." item in the File menu + command palette, plus a small
+  welcome link. Menu tooltip explains the dual behaviour.
+- Primary labels renamed "Open Octree Folder..." -> "Open Cloud..." (Ctrl+O) at the
+  welcome button, File menu, and palette.
+
+Builds clean (`ViitorXPCViewer_v1056.exe`). Native file-dialog behaviour not driven
+headlessly. Landed on PR #29 (base main; #27/#28 already merged this day).
+
 ## Session (2026-07-08, cont.) - Housekeeping wins (cancel/ETA/recent/chunks); encryption deferred
 
 Recon first: a 6-agent parallel investigation mapped the Phase-18 encryption API, the
