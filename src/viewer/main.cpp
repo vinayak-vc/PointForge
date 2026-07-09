@@ -776,6 +776,8 @@ int main(int argc, char** argv) {
 
     // ---- loading (recent files / auto-load) -------------------------------
     std::vector<std::string> recentDirs;   // most-recent first, capped
+    struct RecentMeta { uint64_t points = 0; uint64_t bytes = 0; };
+    std::map<std::string, RecentMeta> recentMeta;  // path -> cached count/size for the Recent list
     bool autoLoadLast = false;
     // Double-clicking a .vxpc in Explorer opens this viewer. Refreshed each
     // startup because the exe filename is version-stamped per build.
@@ -850,7 +852,13 @@ int main(int argc, char** argv) {
         fprintf(f, "serialAuto=%d\n", (int)serialAuto);
         fprintf(f, "serialMac=%s\n", serialMac.c_str());
         fprintf(f, "serialPort=%s\n", serialPort.c_str());
-        for (const auto& r : recentDirs) fprintf(f, "recent=%s\n", r.c_str());
+        for (const auto& r : recentDirs) {
+            auto it = recentMeta.find(r);
+            uint64_t p = it != recentMeta.end() ? it->second.points : 0;
+            uint64_t b = it != recentMeta.end() ? it->second.bytes : 0;
+            fprintf(f, "recent=%s\t%llu\t%llu\n", r.c_str(),
+                    (unsigned long long)p, (unsigned long long)b);
+        }
         fclose(f);
     };
 
@@ -914,7 +922,20 @@ int main(int argc, char** argv) {
             else if (strncmp(line, "recent=", 7) == 0) {
                 std::string v = line + 7;
                 while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
-                if (!v.empty() && recentDirs.size() < 10) recentDirs.push_back(v);
+                // Format: path[\tpoints\tbytes] (tab fields optional — back-compat).
+                RecentMeta m;
+                std::string path = v;
+                size_t t1 = v.find('\t');
+                if (t1 != std::string::npos) {
+                    path = v.substr(0, t1);
+                    size_t t2 = v.find('\t', t1 + 1);
+                    m.points = strtoull(v.c_str() + t1 + 1, nullptr, 10);
+                    if (t2 != std::string::npos) m.bytes = strtoull(v.c_str() + t2 + 1, nullptr, 10);
+                }
+                if (!path.empty() && recentDirs.size() < 10) {
+                    recentDirs.push_back(path);
+                    recentMeta[path] = m;
+                }
             }
         }
         fclose(f);
@@ -1353,6 +1374,7 @@ int main(int argc, char** argv) {
         }
 
         const bool wasEmpty = scene.empty();
+        const size_t firstNew = scene.size();   // clouds this load appends (for Recent metadata)
         bool anyLoaded = false;
         if (!members.empty()) {
             for (const auto& m : members) anyLoaded |= appendCloud(dir, m.first, m.second);
@@ -1367,6 +1389,24 @@ int main(int argc, char** argv) {
         if (members.empty()) {   // single-cloud sidecars live at the top level
             loadCameraDataFromPackage(dir);   // .vxpc-embedded bookmarks/campath/measure win
             loadAnnotationsFromPackage(dir);  // .vxpc-embedded annotations win
+        }
+        // Cache point-count + on-disk size for the welcome Recent list.
+        {
+            uint64_t pts = 0;
+            for (size_t i = firstNew; i < scene.size(); ++i)
+                if (scene[i].store) pts += scene[i].store->meta().pointCount;
+            uint64_t bytes = 0;
+            std::error_code mec;
+            if (std::filesystem::is_regular_file(dir, mec)) {
+                bytes = (uint64_t)std::filesystem::file_size(dir, mec);
+            } else if (std::filesystem::is_directory(dir, mec)) {
+                for (const auto& e : std::filesystem::recursive_directory_iterator(
+                         dir, std::filesystem::directory_options::skip_permission_denied, mec)) {
+                    std::error_code fec;
+                    if (e.is_regular_file(fec)) bytes += (uint64_t)e.file_size(fec);
+                }
+            }
+            recentMeta[dir] = { pts, bytes };
         }
         addRecent(dir);
         saveSettings();
@@ -1440,6 +1480,7 @@ int main(int argc, char** argv) {
     pf::IndexOptions customOpts;
     // Guided conversion wizard (fullscreen modal, driven by showConvertDialog).
     int convWizStep = 0;               // 0 Source, 1 Quality, 2 Destination, 3 Converting, 4 Done
+    uint32_t convWizStartMs = 0;       // SDL_GetTicks() when conversion started (for the ETA)
     std::vector<std::shared_ptr<ConvertJob>> convWizJobs; // jobs the active wizard tracks
 
     // ---- UI state -----------------------------------------------------------
@@ -4245,6 +4286,16 @@ int main(int argc, char** argv) {
                             if (!convWizJobs.empty()) avg /= (float)convWizJobs.size();
                             ImGui::Text("Overall progress");
                             ImGui::ProgressBar(avg, ImVec2(-FLT_MIN, 26.0f * S));
+                            // Estimated time remaining from the progress rate so far.
+                            if (convWizStartMs != 0 && avg > 0.02f && avg < 0.999f) {
+                                double remainMs = (double)(SDL_GetTicks() - convWizStartMs) * (1.0 - avg) / avg;
+                                int secs = (int)(remainMs / 1000.0);
+                                int mm = secs / 60, ss = secs % 60;
+                                if (mm > 0) ImGui::TextColored(dimCol, "About %dm %02ds remaining", mm, ss);
+                                else        ImGui::TextColored(dimCol, "About %ds remaining", ss);
+                            } else {
+                                ImGui::TextColored(dimCol, "Estimating time remaining...");
+                            }
                             ImGui::Spacing(); ImGui::Spacing();
                             for (auto& j : convWizJobs) {
                                 ImGui::Text("%s", j->name.c_str());
@@ -4316,7 +4367,7 @@ int main(int argc, char** argv) {
                             ImGui::BeginDisabled(convInputs.empty() || convOutput.empty());
                             ImGui::PushStyleColor(ImGuiCol_Button,        accent);
                             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.60f, 1.0f, 1.0f));
-                            if (ImGui::Button("Start Conversion", ImVec2(200.0f * S, 0))) { enqueueConvert(); convWizStep = 3; }
+                            if (ImGui::Button("Start Conversion", ImVec2(200.0f * S, 0))) { enqueueConvert(); convWizStep = 3; convWizStartMs = SDL_GetTicks(); }
                             ImGui::PopStyleColor(2);
                             ImGui::EndDisabled();
                         } else if (convWizStep == 3) {
@@ -4778,9 +4829,26 @@ int main(int argc, char** argv) {
                         ImGui::SeparatorText("Recent");
                         for (size_t i = 0; i < recentDirs.size() && i < 6; ++i) {
                             ImGui::PushID((int)i);
-                            if (ImGui::Selectable(baseName(recentDirs[i]).c_str(), false, 0, ImVec2(bw, 0)))
-                                loadOctree(recentDirs[i]);
-                            ImGui::SetItemTooltip("%s", recentDirs[i].c_str());
+                            const std::string& rp = recentDirs[i];
+                            if (ImGui::Selectable(baseName(rp).c_str(), false, 0, ImVec2(bw, 0)))
+                                loadOctree(rp);
+                            ImGui::SetItemTooltip("%s", rp.c_str());
+                            auto mit = recentMeta.find(rp);
+                            if (mit != recentMeta.end() && (mit->second.points || mit->second.bytes)) {
+                                char pbuf[32] = "", bbuf[32] = "";
+                                double p = (double)mit->second.points;
+                                if      (p >= 1e9) snprintf(pbuf, sizeof(pbuf), "%.1fB pts", p / 1e9);
+                                else if (p >= 1e6) snprintf(pbuf, sizeof(pbuf), "%.1fM pts", p / 1e6);
+                                else if (p >= 1e3) snprintf(pbuf, sizeof(pbuf), "%.0fK pts", p / 1e3);
+                                else if (p > 0)    snprintf(pbuf, sizeof(pbuf), "%.0f pts", p);
+                                double b = (double)mit->second.bytes;
+                                if      (b >= 1024.0 * 1024 * 1024) snprintf(bbuf, sizeof(bbuf), "%.2f GB", b / (1024.0 * 1024 * 1024));
+                                else if (b > 0)                     snprintf(bbuf, sizeof(bbuf), "%.0f MB", b / (1024.0 * 1024));
+                                ImGui::Indent(12.0f * S);
+                                if (pbuf[0] && bbuf[0]) ImGui::TextDisabled("%s  -  %s", pbuf, bbuf);
+                                else                    ImGui::TextDisabled("%s", pbuf[0] ? pbuf : bbuf);
+                                ImGui::Unindent(12.0f * S);
+                            }
                             ImGui::PopID();
                         }
                     }

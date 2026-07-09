@@ -23,6 +23,20 @@
         regen via `scratch/gen_watermark.py`). Drawn centred at ~70% height, ~6% opacity,
         original colours, behind everything (no interaction) with a subtle dark vignette,
         on the empty/welcome state and inside the conversion wizard.
+- `[x]` Conversion cancel now covers Phase A/B — `runChunker` takes an optional
+        `cancel` flag (checked per read batch in the bounds + chunking loops); buildOctree
+        forwards `opts.cancel` and distinguishes user-cancel from error. The wizard's
+        Cancel button now stops during Scanning/Chunking, not only the final index phase.
+- `[x]` Conversion wizard shows an estimated time remaining on the Converting step
+        (SDL_GetTicks rate on overall progress).
+- `[x]` Welcome "Recent" list caches + shows each cloud's point count and on-disk size
+        (persisted in `pfview_config.txt` as `recent=path\tpoints\tbytes`, back-compatible).
+- `[x]` Orphaned `<out>/chunks` temp dirs from a crashed/killed conversion are purged at
+        the start of the next conversion to the same target (scoped to the dir buildOctree owns).
+- `[ ]` Finish at-rest encryption in the viewer — DEFERRED by decision: `octree.bin` (the
+        points) can't be encrypted with the current per-entry-GCM + raw-seek streaming design,
+        so `--encrypt` would protect metadata only (misleading). Needs per-node payload
+        encryption first (a larger format/streaming change). See decisions.md.
 - `[x]` Build Viewer as a standard WIN32 executable to hide the console terminal
 - `[x]` Add system SFX / Beeps on load completion
 - `[x]` Persistent saving and loading of Viewer UI settings locally

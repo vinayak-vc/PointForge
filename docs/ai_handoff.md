@@ -1,5 +1,54 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-08, cont.) - Housekeeping wins (cancel/ETA/recent/chunks); encryption deferred
+
+Recon first: a 6-agent parallel investigation mapped the Phase-18 encryption API, the
+viewer streaming path, the convert CLI, the indexer cancel points, and the cache/recent
+hooks (see the workflow transcript). Key finding that drove scope: `OctreeStore` streams
+`octree.bin` by raw byte-offset seek, bypassing `PackageReader::Read`, and encryption only
+covers `AddMemory` entries — so the point payload cannot be encrypted with the current
+design. **User chose to skip encryption** (shipping metadata-only "encryption" would be
+misleading) and take the housekeeping wins.
+
+### What was built
+- **Phase A/B conversion cancel** (`src/indexer/Chunker.{h,cpp}`, `OctreeIndexer.cpp`):
+  `runChunker` gained an optional `const std::atomic<bool>* cancel` param, checked per read
+  batch in the bounds-scan and chunking loops (returns false on cancel with a `logWarn`).
+  `buildOctree` forwards `opts.cancel` and distinguishes user-cancel (logWarn + drop chunks)
+  from a real error (logError). The wizard's existing Cancel button already sets the flag, so
+  it now stops during Scanning/Chunking, not just Phase C.
+- **Orphaned chunk-dir cleanup** (`OctreeIndexer.cpp`): buildOctree removes a stale
+  `<workDir>/chunks` left by a prior crashed run to the same target before creating a fresh
+  one. (This is the honest interpretation of the roadmap "cache auto-purge" item — there is
+  no cache concept in this repo; see decisions.md.)
+- **Wizard ETA** (`src/viewer/main.cpp`): `convWizStartMs = SDL_GetTicks()` on Start; the
+  Converting step shows "About Xm Ys remaining" from `elapsed*(1-avg)/avg`.
+- **Recent point-count + size** (`src/viewer/main.cpp`): `recentMeta` map (path -> points/
+  bytes), computed in `loadOctree` (sum of newly-loaded clouds' `store->meta().pointCount`
+  + file/dir size), persisted as `recent=path\tpoints\tbytes` (back-compatible parse), shown
+  as a dim second line under each welcome Recent entry.
+
+### Verified
+- `pfconvert` + `pfcore` build clean; `pfview` clean (`ViitorXPCViewer_v1052.exe`); `pftest`
+  clean; **CTest `octree_roundtrip` PASS** (3.6s) — the indexer cancel/cleanup changes are
+  regression-free (byte-identical conversion preserved).
+- Recent metadata **end-to-end**: launched the viewer on the real `Tikal-13.vxpc`; the
+  rewritten `pfview_config.txt` line reads `...Tikal-13.vxpc\t12416792\t147962725` (12.4M pts,
+  ~141 MB — correct), and pre-existing no-tab lines parsed back as 0/0 (back-compat OK).
+- ETA is pure arithmetic on SDL_GetTicks (GUI-only, not driven headlessly) — code-reviewed.
+- **NOT driven headlessly:** the wizard ETA text and the Recent second-line rendering in the
+  live GUI. Walk them manually (open a cloud; start a conversion) before merging.
+
+### Modified files
+- `src/indexer/Chunker.h`, `src/indexer/Chunker.cpp`, `src/indexer/OctreeIndexer.cpp`
+- `src/viewer/main.cpp`
+- `docs/tasks.md`, `docs/decisions.md`, `docs/roadmap.md`, `docs/ai_handoff.md`
+
+### Next Recommended Task
+Manual GUI walk of ETA + Recent metadata. If real at-rest encryption is wanted, the scoped
+follow-up is per-node payload encryption in the format + a decrypt step in
+`OctreeStore::readNodeInto` (see decisions.md "Encryption not wired into the viewer/CLI").
+
 ## Session (2026-07-08, cont.) - Guided Conversion Wizard + rebrand cleanup
 
 ### What was built

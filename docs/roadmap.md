@@ -34,13 +34,14 @@
   clipped off-screen at some desktop window sizes.
 - **On-disk cache management**: auto-purge old `PointForgeCache_*` converted dirs.
 - **Color-by attribute polish**: editable elevation/intensity ranges + ramps.
-- **Convert cancel coverage**: extend cooperative cancel to Phase A/B.
+- **Convert cancel coverage**: extend cooperative cancel to Phase A/B. *(**done** — `runChunker` cancel flag; wizard Cancel stops during Scanning/Chunking)*
 - **Multi-select batch conversion**: Convert dialog accepts multiple source files,
   enqueues one job per file (the `JobQueue` already supports N jobs — UI-only work).
 - **Workspace layout presets**: save/restore named `DockBuilder` layouts
   (e.g. Viewing / Measuring / Converting) from the Window menu.
 - **Recent-files polish**: pin/unpin entries, point-count + size metadata cached
-  alongside each recent path.
+  alongside each recent path. *(point-count + size **done** — shown in the welcome
+  Recent list, persisted in pfview_config.txt; pin/unpin still open)*
 
 ## Mid-term Goals
 > Six of these now have a detailed, code-anchored implementation plan with a

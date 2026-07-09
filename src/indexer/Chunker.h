@@ -1,6 +1,7 @@
 #pragma once
 #include "common/AABB.h"
 #include "common/PointFormat.h"
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -40,11 +41,15 @@ struct ChunkSet {
 //
 // `gridDepth` (L) controls chunk granularity: larger L => more, smaller chunks
 // (so each chunk fits in RAM for the indexing phase). Returns false on error.
+// `cancel` (optional): if set and it becomes true, the bounds (Phase A) and
+// chunking (Phase B) passes stop at the next read batch and runChunker returns
+// false — the caller distinguishes a cancel from a real error via the same flag.
 bool runChunker(const std::string& inputPath,
                 const std::string& chunkDir,
                 int gridDepth,
                 ChunkSet& out,
                 uint64_t flushPointBudget = 16u * 1024u * 1024u,
-                std::function<void(float, const std::string&)> progressCb = nullptr);
+                std::function<void(float, const std::string&)> progressCb = nullptr,
+                const std::atomic<bool>* cancel = nullptr);
 
 } // namespace pf
