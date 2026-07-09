@@ -33,9 +33,11 @@
         (persisted in `pfview_config.txt` as `recent=path\tpoints\tbytes`, back-compatible).
 - `[x]` Orphaned `<out>/chunks` temp dirs from a crashed/killed conversion are purged at
         the start of the next conversion to the same target (scoped to the dir buildOctree owns).
-- `[x]` Open dialog now lists `.vxpc` files — the primary "Open Cloud..." (Ctrl+O) uses a
-        file picker filtered to `*.vxpc` (converted clouds are single files now); legacy
-        loose-folder octrees stay reachable via a separate "Open Octree Folder..." item.
+- `[x]` Open dialog handles both `.vxpc` packages and octree folders — the primary
+        "Open Cloud..." (Ctrl+O) file picker filters to `*.vxpc` plus octree marker files;
+        picking a `.vxpc` loads it directly, picking a folder's `meta.bin`/`metadata.json`
+        loads that folder (native dialogs can't select a file and a folder in one picker).
+        A dedicated "Open Octree Folder..." folder picker also remains.
 - `[ ]` Finish at-rest encryption in the viewer — DEFERRED by decision: `octree.bin` (the
         points) can't be encrypted with the current per-entry-GCM + raw-seek streaming design,
         so `--encrypt` would protect metadata only (misleading). Needs per-node payload

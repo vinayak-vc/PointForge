@@ -1860,12 +1860,29 @@ int main(int argc, char** argv) {
         showConvertDialog = true;
     };
 
-    // Primary "open": pick a single-file .vxpc package (the modern output).
+    // Primary "open": one file dialog that accepts EITHER a single-file .vxpc
+    // package OR a legacy loose-folder octree. Native dialogs can't pick a file
+    // and a folder in the same picker, so for a folder the user selects its
+    // marker file (meta.bin / metadata.json) and we load the containing folder.
     auto browseAndLoad = [&]() {
-        std::string file = pf::openFileDialog("Point Cloud Package (*.vxpc)\0*.vxpc\0All Files\0*.*\0");
-        if (!file.empty()) loadOctree(file);
+        std::string sel = pf::openFileDialog(
+            "Point Cloud (.vxpc or octree meta.bin)\0*.vxpc;meta.bin;metadata.json\0"
+            "VXPC Package (*.vxpc)\0*.vxpc\0All Files\0*.*\0");
+        if (sel.empty()) return;
+        auto lower = [](std::string s) { for (char& c : s) if (c >= 'A' && c <= 'Z') c += 32; return s; };
+        std::string low = lower(sel);
+        if (low.size() >= 5 && low.compare(low.size() - 5, 5, ".vxpc") == 0) {
+            loadOctree(sel);                       // .vxpc package -> load directly
+            return;
+        }
+        std::filesystem::path p(sel);
+        std::string fn = lower(p.filename().string());
+        if (fn == "meta.bin" || fn == "metadata.json" || fn == "hierarchy.bin" || fn == "octree.bin")
+            loadOctree(p.parent_path().string());  // octree marker file -> load its folder
+        else
+            loadOctree(sel);                       // last resort: try the path as-is
     };
-    // Legacy loose-folder octrees (meta.bin/hierarchy.bin/octree.bin in a dir).
+    // Explicit folder picker for legacy loose-folder octrees.
     auto browseFolderAndLoad = [&]() {
         std::string folder = pf::openFolderDialog();
         if (!folder.empty()) loadOctree(folder);
@@ -3273,6 +3290,7 @@ int main(int argc, char** argv) {
             if (ImGui::BeginMainMenuBar()) {
                 if (ImGui::BeginMenu("File")) {
                     if (ImGui::MenuItem("Open Cloud...", "Ctrl+O")) browseAndLoad();
+                    ImGui::SetItemTooltip("Open a .vxpc package, or an octree folder's meta.bin to open that folder");
                     if (ImGui::MenuItem("Open Octree Folder...")) browseFolderAndLoad();
                     if (ImGui::BeginMenu("Open Recent", !recentDirs.empty())) {
                         for (size_t i = 0; i < recentDirs.size(); ++i) {
