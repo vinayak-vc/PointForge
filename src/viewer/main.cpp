@@ -1866,8 +1866,7 @@ int main(int argc, char** argv) {
     // marker file (meta.bin / metadata.json) and we load the containing folder.
     auto browseAndLoad = [&]() {
         std::string sel = pf::openFileDialog(
-            "Point Cloud (.vxpc or octree meta.bin)\0*.vxpc;meta.bin;metadata.json\0"
-            "VXPC Package (*.vxpc)\0*.vxpc\0All Files\0*.*\0");
+            "VXPC Package (*.vxpc)\0*.vxpc\0Octree Folder (meta.bin)\0meta.bin\0All Files\0*.*\0");
         if (sel.empty()) return;
         auto lower = [](std::string s) { for (char& c : s) if (c >= 'A' && c <= 'Z') c += 32; return s; };
         std::string low = lower(sel);
@@ -1877,8 +1876,8 @@ int main(int argc, char** argv) {
         }
         std::filesystem::path p(sel);
         std::string fn = lower(p.filename().string());
-        if (fn == "meta.bin" || fn == "metadata.json" || fn == "hierarchy.bin" || fn == "octree.bin")
-            loadOctree(p.parent_path().string());  // octree marker file -> load its folder
+        if (fn == "meta.bin" || fn == "hierarchy.bin" || fn == "octree.bin")
+            loadOctree(p.parent_path().string());  // octree .bin marker -> load its folder
         else
             loadOctree(sel);                       // last resort: try the path as-is
     };
