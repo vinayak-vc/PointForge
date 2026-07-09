@@ -1860,7 +1860,29 @@ int main(int argc, char** argv) {
         showConvertDialog = true;
     };
 
+    // Primary "open": one file dialog that accepts EITHER a single-file .vxpc
+    // package OR a legacy loose-folder octree. Native dialogs can't pick a file
+    // and a folder in the same picker, so for a folder the user selects its
+    // marker file (meta.bin / metadata.json) and we load the containing folder.
     auto browseAndLoad = [&]() {
+        std::string sel = pf::openFileDialog(
+            "VXPC Package (*.vxpc)\0*.vxpc\0Octree Folder (meta.bin)\0meta.bin\0All Files\0*.*\0");
+        if (sel.empty()) return;
+        auto lower = [](std::string s) { for (char& c : s) if (c >= 'A' && c <= 'Z') c += 32; return s; };
+        std::string low = lower(sel);
+        if (low.size() >= 5 && low.compare(low.size() - 5, 5, ".vxpc") == 0) {
+            loadOctree(sel);                       // .vxpc package -> load directly
+            return;
+        }
+        std::filesystem::path p(sel);
+        std::string fn = lower(p.filename().string());
+        if (fn == "meta.bin" || fn == "hierarchy.bin" || fn == "octree.bin")
+            loadOctree(p.parent_path().string());  // octree .bin marker -> load its folder
+        else
+            loadOctree(sel);                       // last resort: try the path as-is
+    };
+    // Explicit folder picker for legacy loose-folder octrees.
+    auto browseFolderAndLoad = [&]() {
         std::string folder = pf::openFolderDialog();
         if (!folder.empty()) loadOctree(folder);
     };
@@ -3266,7 +3288,9 @@ int main(int argc, char** argv) {
             bool doResetSettings = false;
             if (ImGui::BeginMainMenuBar()) {
                 if (ImGui::BeginMenu("File")) {
-                    if (ImGui::MenuItem("Open Octree Folder...", "Ctrl+O")) browseAndLoad();
+                    if (ImGui::MenuItem("Open Cloud...", "Ctrl+O")) browseAndLoad();
+                    ImGui::SetItemTooltip("Open a .vxpc package, or an octree folder's meta.bin to open that folder");
+                    if (ImGui::MenuItem("Open Octree Folder...")) browseFolderAndLoad();
                     if (ImGui::BeginMenu("Open Recent", !recentDirs.empty())) {
                         for (size_t i = 0; i < recentDirs.size(); ++i) {
                             ImGui::PushID((int)i);
@@ -4822,8 +4846,9 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("Out-of-core point cloud viewer");
                     ImGui::Spacing();
                     float bw = 360.0f * S;
-                    if (ImGui::Button("Open Octree Folder...", ImVec2(bw, 34.0f * S))) browseAndLoad();
+                    if (ImGui::Button("Open Cloud...", ImVec2(bw, 34.0f * S))) browseAndLoad();
                     if (ImGui::Button("Convert a Scan...", ImVec2(bw, 34.0f * S))) openConvertDialog("");
+                    if (ImGui::SmallButton("Open octree folder (legacy)...")) browseFolderAndLoad();
                     if (!recentDirs.empty()) {
                         ImGui::Spacing();
                         ImGui::SeparatorText("Recent");
@@ -4895,7 +4920,8 @@ int main(int argc, char** argv) {
             if (showPalette) {
                 struct Cmd { std::string label; const char* keys; std::function<void()> fn; };
                 std::vector<Cmd> cmds;
-                cmds.push_back({"Open Octree Folder...", "Ctrl+O", [&] { browseAndLoad(); }});
+                cmds.push_back({"Open Cloud...", "Ctrl+O", [&] { browseAndLoad(); }});
+                cmds.push_back({"Open Octree Folder...", "", [&] { browseFolderAndLoad(); }});
                 cmds.push_back({"Convert a Scan...", "Ctrl+I", [&] { openConvertDialog(""); }});
                 cmds.push_back({"Frame All", "F", [&] { frameAllReq = true; }});
                 cmds.push_back({"Reset View", "", [&] { if (octreeLoaded) setupCamera(); }});
