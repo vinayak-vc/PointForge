@@ -1,5 +1,60 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-13) - Photogrammetry: photos -> octree via ODM/COLMAP (branch `feat/photogrammetry`)
+
+Convert wizard now accepts a folder of photos ("Or start from photos" on the
+Source step; photo-folder drag & drop routes there too). Design: Level-2
+orchestration - external engines driven as child processes, nothing linked in
+(see decisions.md "Photogrammetry: Orchestrated External Engines").
+
+- `src/viewer/Photogrammetry.{h,cpp}` (new): own EXIF GPS sniffer (bounded
+  128 KB head reads, requires GPS IFD lat/lon, samples <=24 JPEGs); engine
+  probe (COLMAP install / Docker CLI / daemon / ODM image / nvidia-smi /
+  VT-x-or-hypervisor); consent-gated auto-install (COLMAP 4.1.0 pinned release
+  zip via system curl+tar into `%LOCALAPPDATA%\ViitorX\PointForge\engines`;
+  Docker Desktop via winget; `docker pull opendronemap/odm`); reconstruction
+  runner (ODM: images dir mounted read-only into the dataset mount,
+  `--skip-3dmodel --end-with odm_georeferencing`, cancel = `docker rm -f`;
+  COLMAP: `automatic_reconstructor`, dense with CUDA else sparse +
+  `model_converter` PLY; glog prefixes stripped from progress lines).
+- `src/viewer/Jobs.h`: `ConvertJob::Kind` {Convert, Photogrammetry,
+  EngineSetup}; photogrammetry jobs run reconstruction (0-70% of the bar) then
+  chain into `buildOctree` (70-100%); `enqueuePhotogrammetry` /
+  `enqueueEngineSetup`.
+- `src/viewer/main.cpp`: wizard photo mode (scan summary line, recommendation
+  + reason, Auto/ODM/COLMAP picker, per-engine readiness, consent modal,
+  inline setup progress); engine status probed on a background thread (docker
+  info can block); recommendation: GPS -> ODM, no GPS or no CUDA -> COLMAP,
+  virtualization off -> COLMAP always (ODM blocked, BIOS steps shown in-UI).
+
+Verified: v1057/v1058 dynamic builds clean; wizard scan of the real
+`C:\ShareC\yyvg-1157_photogrammetry_aerial` set (271 DJI JPGs) shows "GPS tags
+found -> ODM recommended"; COLMAP auto-install ran end-to-end on this machine
+(download + unpack to engines dir). This machine currently has VT-x DISABLED
+in BIOS (Docker Desktop shows "Virtualization support not detected") - which
+exercised the fallback path: ODM soft-skip + COLMAP recommendation confirmed.
+NOT yet verified: a full ODM or COLMAP reconstruction run to completion
+(hours), and COLMAP 4.1.0 `automatic_reconstructor` flag names are assumed
+stable from 3.x (a rename would surface as a nonzero exit in the Console).
+
+Committed `ebbfe16` on `feat/photogrammetry` (based on `fix/render-regressions`
+tip - rebase onto main before PR if the render fixes land separately). glog
+strip + virtualization fallback are working-tree changes on top, uncommitted
+at the time of writing along with this docs update.
+
+### Modified files
+- src/viewer/Photogrammetry.h, src/viewer/Photogrammetry.cpp (new)
+- src/viewer/Jobs.h, src/viewer/main.cpp, CMakeLists.txt
+- docs/{tasks,decisions,ai_handoff}.md
+
+### Next Recommended Task
+Run one real reconstruction end-to-end (COLMAP works today on this machine:
+Convert wizard -> photos folder -> COLMAP) and confirm the produced
+PLY chains into a loadable .vxpc. Then enable VT-x in BIOS and re-run setup to
+verify the ODM path + georeferenced LAZ. Consider `colmap model_aligner
+--ref_is_gps` afterwards to give the COLMAP path metric scale from EXIF GPS
+(would soften its biggest limitation vs ODM).
+
 ## Session (2026-07-08, cont.) - Open dialog handles .vxpc + octree folders (PR #29)
 
 The "Open" action used a folder picker, so single-file `.vxpc` clouds couldn't be

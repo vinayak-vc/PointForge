@@ -39,6 +39,16 @@
         directly; picking a folder's `meta.bin` (or `hierarchy.bin`/`octree.bin`) loads that
         folder (native dialogs can't select a file and a folder in one picker). A dedicated
         "Open Octree Folder..." folder picker also remains.
+- `[x]` Photogrammetry input — Convert wizard gains "Or start from photos": pick a folder
+        of drone/camera photos, an own EXIF GPS sniffer recommends the engine (GPS tags →
+        ODM, georeferenced metric LAZ via Docker; no GPS or no CUDA GPU → COLMAP 4.1.0,
+        native), both always selectable. One consent dialog auto-installs both engines
+        (COLMAP release zip via system curl/tar into `%LOCALAPPDATA%\ViitorX\PointForge\
+        engines`; Docker Desktop via winget + `docker pull opendronemap/odm`) — no manual
+        steps. Reconstruction runs as a background job chaining into the normal octree
+        convert (one progress bar, cancelable). CPU virtualization disabled in BIOS →
+        ODM soft-skipped with in-UI enable instructions, COLMAP used instead. Dropping a
+        photo folder onto the window opens the wizard in photo mode. See decisions.md.
 - `[ ]` Finish at-rest encryption in the viewer — DEFERRED by decision: `octree.bin` (the
         points) can't be encrypted with the current per-entry-GCM + raw-seek streaming design,
         so `--encrypt` would protect metadata only (misleading). Needs per-node payload

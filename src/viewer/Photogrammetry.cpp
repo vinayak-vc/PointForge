@@ -591,6 +591,17 @@ namespace {
 
 const char* qualityWord(int q) { return q <= 0 ? "low" : q >= 2 ? "high" : "medium"; }
 
+// COLMAP logs through glog: "I0713 18:03:37.123456 12492 feature_extraction.cc:315] msg".
+// The wizard shows only the message; the raw line still reaches the Console.
+std::string stripGlogPrefix(const std::string& l) {
+    if (l.size() > 5 && (l[0] == 'I' || l[0] == 'W' || l[0] == 'E' || l[0] == 'F') &&
+        l[1] >= '0' && l[1] <= '9') {
+        const size_t b = l.find("] ");
+        if (b != std::string::npos && b < 80) return l.substr(b + 2);
+    }
+    return l;
+}
+
 // stage keyword -> progress fraction; message shows the raw line
 struct Stage { const char* needle; float progress; };
 
@@ -695,8 +706,9 @@ bool runColmap(const std::string& imagesDir, const std::string& workDir, int qua
     o.pathPrepend = pathPrepend;
     o.onLine = [&](const std::string& l) {
         logDebug("[colmap] " + l);
-        cur = stageProgress(l, stages, sizeof(stages) / sizeof(stages[0]), cur);
-        if (progress) progress(cur, l.substr(0, 160));
+        const std::string msg = stripGlogPrefix(l);
+        cur = stageProgress(msg, stages, sizeof(stages) / sizeof(stages[0]), cur);
+        if (progress) progress(cur, msg.substr(0, 160));
     };
     const int rc = runProcess(cmd, o);
     if (rc == kExitCanceled) { err = "Canceled"; return false; }
