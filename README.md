@@ -18,6 +18,8 @@ It deliberately mirrors the technology stack of *Axiom Present*:
 | PLY I/O            | own parser (no external dep)                 |
 | PTS/XYZ I/O        | own text parser                              |
 | Node compression   | zstd (optional, `--compress` / Convert dialog)|
+| Web remote         | civetweb + libdatachannel (WebRTC) + libjpeg-turbo |
+| Photogrammetry     | ODM (Docker) / COLMAP — external engines, orchestrated (not linked in) |
 
 PointForge is split into two programs that share a common core (`pfcore`):
 
@@ -27,6 +29,11 @@ PointForge is split into two programs that share a common core (`pfcore`):
 * **`pfview`** (built as `ViitorXPCViewer.exe`) — the *viewer*. Streams octree
   nodes on demand using frustum culling and screen-space-error LOD selection,
   so only the visible/relevant detail is ever resident on the GPU.
+
+The viewer can also start from **plain photos** (drone/camera): the Convert
+wizard reconstructs a point cloud with an external photogrammetry engine
+(ODM or COLMAP, auto-installed on first consent) and then converts it like
+any other scan — see §3.
 
 Builds and runs on MSVC 2022 + vcpkg. See `CLAUDE.md` and `docs/ARCHITECTURE.md`
 for the deeper why/how; this file is the quick-start.
@@ -64,7 +71,8 @@ cmake --build build --config Release
 ```
 
 The vcpkg manifest (`vcpkg.json`) pulls in `sdl2`, `glew`, `glm`, `laszip`,
-`libe57format`, and `zstd`. Binaries land in `build\Release\`
+`libe57format`, `zstd`, `civetweb`, `nlohmann-json`, `libjpeg-turbo`, and
+`libdatachannel` (web remote / WebRTC). Binaries land in `build\Release\`
 (`pfconvert.exe`, `ViitorXPCViewer.exe` — plus `shaders\`, copied next to the
 exe for the dynamic build only).
 
@@ -103,9 +111,9 @@ pfconvert input.laz --out scans\mysite --chunk-depth 4 --spacing 0.0
 * `--keep-chunks`      keep intermediate chunk files (debugging)
 * `--verbose`          debug logging
 
-> The indexing pass is single-threaded in v1 for correctness and reproducibility.
-> Chunks are spatially independent, so parallelising Phase C is the natural next
-> optimisation (see `docs/ARCHITECTURE.md` §6).
+> The subtree-build phase (Phase C) runs on a worker pool (one thread per core
+> by default, `--threads`/wizard-configurable) with byte-identical output to
+> the sequential build — see `docs/decisions.md`.
 
 Produces:
 
@@ -117,7 +125,30 @@ scans/mysite/
   octree.bin        concatenated per-node point payloads
 ```
 
-Conversion can also be started from inside the viewer — see below.
+Conversion can also be started from inside the viewer — see below. (From the
+viewer the default output is a single-file **`.vxpc` package** instead of the
+loose folder; both load identically.)
+
+### From photos (photogrammetry)
+
+The Convert wizard's Source step has **"Or start from photos"**: pick a folder
+of overlapping drone/camera photos (JPG/PNG/TIFF, 60–80% overlap) — or just
+drag the folder onto the window. The wizard scans the images and recommends an
+engine:
+
+* **GPS EXIF tags found → ODM** — georeferenced, metric-scale LAZ straight
+  from the tags. Runs via Docker.
+* **No GPS (or no NVIDIA GPU) → COLMAP** — densest per-pixel reconstruction
+  for ground-level/object captures; output has arbitrary scale/origin.
+  Dense stereo needs CUDA. (Pinned 4.1.0, native install.)
+
+Both engines stay external — nothing is linked into the exe. On first use one
+consent dialog installs everything automatically (COLMAP release zip into app
+data; Docker Desktop via winget + the ODM image), no manual steps.
+Reconstruction runs as a cancelable background job that chains straight into
+the octree conversion. If CPU virtualization is disabled in the BIOS (Docker
+can't run), the wizard detects it, falls back to COLMAP and shows
+board-specific BIOS steps to unlock ODM.
 
 ### View
 
@@ -188,9 +219,16 @@ PointForge/
 
 ## 5. Tests / lint
 
-None yet. No test suite, no linter, no CI. MSVC builds with `/W3 /permissive-
-/MP`; GCC/Clang with `-Wall -Wextra`. A synthetic `.xyz` generator + octree
-round-trip test is the suggested first addition — see `docs/tasks.md`.
+`pftest` (built with the project) generates a synthetic `.xyz` cloud and
+round-trips it through the indexer + `OctreeStore`, checking sequential vs
+parallel byte-identity and hierarchy invariants:
+
+```powershell
+ctest --test-dir build-static -C Release --output-on-failure
+```
+
+No linter/CI yet. MSVC builds with `/W3 /permissive- /MP`; GCC/Clang with
+`-Wall -Wextra`.
 
 ## 6. License of dependencies
 
