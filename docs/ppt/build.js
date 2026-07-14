@@ -87,7 +87,7 @@ function caption(slide, x, y, w, text) {
   s.addText("Complete Feature Guide", { x: 0.7, y: 3.55, w: 6, h: 0.5, margin: 0, fontFace: "Arial", fontSize: 20, color: MUT });
   // version chip
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 0.7, y: 4.25, w: 1.5, h: 0.5, fill: { color: CARD2 }, rectRadius: 0.25 });
-  s.addText("v1.0.56", { x: 0.7, y: 4.25, w: 1.5, h: 0.5, align: "center", valign: "middle", margin: 0, fontFace: "Arial", fontSize: 14, bold: true, color: ACC });
+  s.addText("v1.0.61", { x: 0.7, y: 4.25, w: 1.5, h: 0.5, align: "center", valign: "middle", margin: 0, fontFace: "Arial", fontSize: 14, bold: true, color: ACC });
   s.addText("Out-of-core viewer for billion-point clouds", { x: 0.7, y: 5.05, w: 5.7, h: 0.4, margin: 0, fontFace: "Arial", fontSize: 13.5, color: TXT });
   s.addText("LAS · LAZ · E57 · PLY · PTS · XYZ", { x: 0.7, y: 5.42, w: 5.7, h: 0.4, margin: 0, fontFace: "Arial", fontSize: 12.5, bold: true, color: MUT, charSpacing: 1 });
   caption(s, 6.7, 6.55, 6.2, "Tikal-13 — 12.4M points, streamed live in ViitorX");
@@ -468,7 +468,14 @@ function caption(slide, x, y, w, text) {
   s.addText("Billion-point clouds, streamed interactively — with measurement, clipping, slice export, camera-path video, stereoscopic 3D and a phone web-remote.",
     { x: 0.7, y: 4.0, w: 9.6, h: 0.9, margin: 0, fontFace: "Arial", fontSize: 15, color: MUT });
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 0.7, y: 5.1, w: 1.5, h: 0.5, fill: { color: CARD2 }, rectRadius: 0.25 });
-  s.addText("v1.0.56", { x: 0.7, y: 5.1, w: 1.5, h: 0.5, align: "center", valign: "middle", margin: 0, fontFace: "Arial", fontSize: 14, bold: true, color: ACC });
+  s.addText("v1.0.61", { x: 0.7, y: 5.1, w: 1.5, h: 0.5, align: "center", valign: "middle", margin: 0, fontFace: "Arial", fontSize: 14, bold: true, color: ACC });
+  // download call-to-action -> GitHub release with the compiled package
+  const REL = "https://github.com/vinayak-vc/ViitorX-PointCloud-Viewer/releases/tag/1.0.61";
+  s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 2.45, y: 5.1, w: 3.6, h: 0.5, fill: { color: ACC }, rectRadius: 0.25, shadow: shadow() });
+  s.addText([{ text: "Download the compiled package", options: { hyperlink: { url: REL, tooltip: "ViitorX PointCloud Viewer 1.0.61 - GitHub release" } } }],
+    { x: 2.45, y: 5.1, w: 3.6, h: 0.5, align: "center", valign: "middle", margin: 0, fontFace: "Arial", fontSize: 13.5, bold: true, color: BG2 });
+  s.addText([{ text: REL, options: { hyperlink: { url: REL } } }],
+    { x: 0.7, y: 5.85, w: 9.6, h: 0.35, margin: 0, fontFace: "Arial", fontSize: 12, color: MUT });
 }
 
 pres.writeFile({ fileName: path.join(__dirname, "ViitorXPC_Feature_Guide.pptx") }).then((f) => console.log("WROTE", f));
