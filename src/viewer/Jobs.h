@@ -6,6 +6,7 @@
 // for the same resources. The UI polls job state each frame (all cross-thread
 // fields are atomics or mutex-guarded).
 #include "indexer/OctreeIndexer.h"
+#include "viewer/Photogrammetry.h"
 
 #include <algorithm>
 #include <atomic>
@@ -20,12 +21,22 @@ namespace pf {
 
 struct ConvertJob {
     enum class State { Queued, Running, Succeeded, Failed, Canceled };
+    // Convert: input scan -> octree. Photogrammetry: image folder -> external
+    // reconstruction engine -> octree (input is filled with the produced point
+    // file mid-job). EngineSetup: one-time ODM+COLMAP auto-install.
+    enum class Kind { Convert, Photogrammetry, EngineSetup };
 
+    Kind         kind = Kind::Convert;
     std::string  input;               // source scan file
     std::string  output;              // destination octree directory
     std::string  name;                // display name (input basename)
     IndexOptions opts;                // cancel/progressCb are overwritten by the worker
     bool         loadWhenDone = true; // main thread loads the result on success
+    // Photogrammetry only:
+    std::string     imagesDir;        // source image folder
+    std::string     workDir;          // engine workspace (kept for inspection)
+    PhotogramEngine engine  = PhotogramEngine::ODM;
+    int             quality = 1;      // 0 draft, 1 balanced, 2 high
 
     std::atomic<State> state{State::Queued};
     std::atomic<float> progress{0.0f};
@@ -58,12 +69,41 @@ public:
         job->loadWhenDone = loadWhenDone;
         size_t slash = input.find_last_of("/\\");
         job->name = (slash == std::string::npos) ? input : input.substr(slash + 1);
-        {
-            std::lock_guard<std::mutex> lk(mMutex);
-            mJobs.push_back(job);
-            if (!mWorker.joinable()) mWorker = std::thread([this] { workerLoop(); });
-        }
-        mCv.notify_one();
+        submit(job);
+        return job;
+    }
+
+    // Photogrammetry: reconstruct `imagesDir` with the given engine, then
+    // convert the produced point file into `output` (workspace kept in
+    // `workDir` so the raw reconstruction survives for inspection).
+    std::shared_ptr<ConvertJob> enqueuePhotogrammetry(const std::string& imagesDir,
+                                                      const std::string& workDir,
+                                                      const std::string& output,
+                                                      PhotogramEngine engine, int quality,
+                                                      const IndexOptions& opts, bool loadWhenDone) {
+        auto job = std::make_shared<ConvertJob>();
+        job->kind = ConvertJob::Kind::Photogrammetry;
+        job->imagesDir = imagesDir;
+        job->workDir = workDir;
+        job->output = output;
+        job->engine = engine;
+        job->quality = quality;
+        job->opts = opts;
+        job->loadWhenDone = loadWhenDone;
+        size_t slash = imagesDir.find_last_of("/\\");
+        job->name = ((slash == std::string::npos) ? imagesDir : imagesDir.substr(slash + 1)) +
+                    " (" + engineName(engine) + ")";
+        submit(job);
+        return job;
+    }
+
+    // One-time automatic ODM + COLMAP setup (user consented in the wizard).
+    std::shared_ptr<ConvertJob> enqueueEngineSetup() {
+        auto job = std::make_shared<ConvertJob>();
+        job->kind = ConvertJob::Kind::EngineSetup;
+        job->name = "Photogrammetry setup";
+        job->loadWhenDone = false;
+        submit(job);
         return job;
     }
 
@@ -117,6 +157,15 @@ public:
     }
 
 private:
+    void submit(const std::shared_ptr<ConvertJob>& job) {
+        {
+            std::lock_guard<std::mutex> lk(mMutex);
+            mJobs.push_back(job);
+            if (!mWorker.joinable()) mWorker = std::thread([this] { workerLoop(); });
+        }
+        mCv.notify_one();
+    }
+
     void workerLoop() {
         for (;;) {
             std::shared_ptr<ConvertJob> job;
@@ -129,16 +178,47 @@ private:
                 job->state = ConvertJob::State::Running;
             }
             job->setMessage("Starting...");
-            IndexOptions opts = job->opts;
-            opts.cancel = &job->cancelFlag;
             ConvertJob* raw = job.get();
-            opts.progressCb = [raw](float pct, const std::string& msg) {
-                raw->progress = pct;
-                raw->setMessage(msg);
-            };
             bool ok = false;
             try {
-                ok = buildOctree(job->input, job->output, opts);
+                if (job->kind == ConvertJob::Kind::EngineSetup) {
+                    std::string err;
+                    ok = installEngines(/*wantColmap=*/true, /*wantOdm=*/true, job->cancelFlag,
+                                        [raw](float pct, const std::string& msg) {
+                                            raw->progress = pct;
+                                            raw->setMessage(msg);
+                                        },
+                                        err);
+                    if (!ok && !err.empty()) job->setMessage(err);
+                } else {
+                    // Photogrammetry first stage: reconstruction fills job->input
+                    // with the produced point file, then falls through into the
+                    // regular conversion (70% / 30% of the progress bar).
+                    bool reconOk = true;
+                    if (job->kind == ConvertJob::Kind::Photogrammetry) {
+                        std::string pointFile, err;
+                        reconOk = runReconstruction(
+                            job->engine, job->imagesDir, job->workDir, job->quality,
+                            job->cancelFlag,
+                            [raw](float pct, const std::string& msg) {
+                                raw->progress = pct * 0.7f;
+                                raw->setMessage(msg);
+                            },
+                            pointFile, err);
+                        if (reconOk) job->input = pointFile;
+                        else if (!err.empty()) job->setMessage(err);
+                    }
+                    if (reconOk) {
+                        const bool isPhoto = job->kind == ConvertJob::Kind::Photogrammetry;
+                        IndexOptions opts = job->opts;
+                        opts.cancel = &job->cancelFlag;
+                        opts.progressCb = [raw, isPhoto](float pct, const std::string& msg) {
+                            raw->progress = isPhoto ? 0.7f + pct * 0.3f : pct;
+                            raw->setMessage(msg);
+                        };
+                        ok = buildOctree(job->input, job->output, opts);
+                    }
+                }
             } catch (const std::exception& ex) {
                 job->setMessage(std::string("Exception: ") + ex.what());
                 ok = false;

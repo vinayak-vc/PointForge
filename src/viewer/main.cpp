@@ -1483,6 +1483,52 @@ int main(int argc, char** argv) {
     uint32_t convWizStartMs = 0;       // SDL_GetTicks() when conversion started (for the ETA)
     std::vector<std::shared_ptr<ConvertJob>> convWizJobs; // jobs the active wizard tracks
 
+    // ---- photogrammetry (Convert wizard image-folder mode) -----------------
+    std::string convImagesDir;         // "" = normal point-file mode
+    ImageSetInfo convImageInfo;        // scan of convImagesDir (count + GPS sample)
+    int convEngineChoice = -1;         // -1 = auto (recommendation), else PhotogramEngine
+    std::mutex engineStMx;             // guards engineSt/engineStReady
+    EngineStatus engineSt;
+    bool engineStReady = false;
+    std::atomic<bool> engineProbeBusy{false};
+    std::thread engineProbeThread;     // joined on shutdown
+    std::shared_ptr<ConvertJob> engineSetupJob;   // active auto-install job (or null)
+    bool engineConsentReq = false;     // open the consent modal this frame
+    BoardInfo convBoard;               // motherboard identity for BIOS-steps help
+    bool convBoardQueried = false;     // lazy one-time registry read
+
+    // Re-probe engine availability off the render thread (docker info can
+    // block for seconds when the daemon is cold).
+    auto refreshEngineStatus = [&] {
+        if (engineProbeBusy.exchange(true)) return;   // probe already in flight
+        if (engineProbeThread.joinable()) engineProbeThread.join();
+        engineProbeThread = std::thread([&] {
+            EngineStatus st = queryEngines();
+            {
+                std::lock_guard<std::mutex> lk(engineStMx);
+                engineSt = st;
+                engineStReady = true;
+            }
+            engineProbeBusy = false;
+        });
+    };
+    // Engine the conversion will actually use: explicit user choice, else the
+    // GPS/GPU-based recommendation.
+    auto effectiveEngine = [&]() -> PhotogramEngine {
+        if (convEngineChoice >= 0) return (PhotogramEngine)convEngineChoice;
+        std::lock_guard<std::mutex> lk(engineStMx);
+        return recommendEngine(convImageInfo, engineSt);
+    };
+    // Image mode can proceed only once the chosen engine is actually usable.
+    auto photoModeReady = [&]() -> bool {
+        if (convImagesDir.empty() || convImageInfo.imageCount == 0) return false;
+        std::lock_guard<std::mutex> lk(engineStMx);
+        if (!engineStReady) return false;
+        PhotogramEngine e = convEngineChoice >= 0 ? (PhotogramEngine)convEngineChoice
+                                                  : recommendEngine(convImageInfo, engineSt);
+        return engineSt.ready(e);
+    };
+
     // ---- UI state -----------------------------------------------------------
     bool showUI = true;                // F5 / Shift+Space zen toggle (hides everything)
     bool showScenePanel = true;
@@ -1843,9 +1889,25 @@ int main(int argc, char** argv) {
             // folder layout only when the path lacks the .vxpc extension).
             convOutput = (p.parent_path() / (p.stem().string() + ".vxpc")).string();
         }
+        convImagesDir.clear();
         convWizStep = 0;
         convWizJobs.clear();
         showConvertDialog = true;
+        refreshEngineStatus();   // so availability is known by the time photos are picked
+    };
+
+    // Open the Convert dialog in photogrammetry mode for a folder of photos.
+    auto openConvertDialogForImages = [&](const std::string& dir) {
+        convImagesDir = dir;
+        convImageInfo = scanImageFolder(dir);
+        convInputs.clear();
+        convEngineChoice = -1;
+        std::filesystem::path p(dir);
+        convOutput = (p.parent_path() / (p.filename().string() + ".vxpc")).string();
+        convWizStep = 0;
+        convWizJobs.clear();
+        showConvertDialog = true;
+        refreshEngineStatus();
     };
 
     // Multi-select: one job per file. convOutput becomes the PARENT dir —
@@ -1853,6 +1915,7 @@ int main(int argc, char** argv) {
     auto setConvertSources = [&](std::vector<std::string> files) {
         if (files.empty()) return;
         if (files.size() == 1) { openConvertDialog(files[0]); return; }
+        convImagesDir.clear();
         convInputs = std::move(files);
         convOutput = std::filesystem::path(convInputs[0]).parent_path().string();
         convWizStep = 0;
@@ -1908,8 +1971,23 @@ int main(int argc, char** argv) {
     // which owns progress display + post-conversion loading (loadWhenDone=false
     // here so the global finished-job handler doesn't also auto-load).
     auto enqueueConvert = [&]() {
-        if (convInputs.empty() || convOutput.empty()) return;
+        if ((convInputs.empty() && convImagesDir.empty()) || convOutput.empty()) return;
         convWizJobs.clear();
+        if (!convImagesDir.empty()) {
+            // Photogrammetry: reconstruction workspace sits beside the output
+            // package; the raw engine output is kept there for inspection.
+            const std::string stem = baseName(convImagesDir);
+            const std::string out = ensureVxpcPath(convOutput, stem);
+            const std::string work =
+                (std::filesystem::path(out).parent_path() / (stem + "_photogrammetry")).string();
+            const int quality = convPreset == 3 ? 1 : convPreset;   // Custom -> balanced engine preset
+            convWizJobs.push_back(jobs.enqueuePhotogrammetry(
+                convImagesDir, work, out, effectiveEngine(), quality, customOpts,
+                /*loadWhenDone=*/false));
+            addToast("Queued: " + stem + " (" + engineName(effectiveEngine()) + " photogrammetry)");
+            if (!firstJobRevealed) { firstJobRevealed = true; showJobsPanel = true; }
+            return;
+        }
         if (convInputs.size() == 1) {
             std::string out = ensureVxpcPath(convOutput, std::filesystem::path(convInputs[0]).stem().string());
             convWizJobs.push_back(jobs.enqueue(convInputs[0], out, customOpts, /*loadWhenDone=*/false));
@@ -2014,7 +2092,11 @@ int main(int argc, char** argv) {
                 std::string dropFile = e.drop.file;
                 SDL_free(e.drop.file);
                 std::error_code ec;
-                if (std::filesystem::is_directory(dropFile, ec) || isVxpc(dropFile)) {
+                if (std::filesystem::is_directory(dropFile, ec) && !isVxpc(dropFile) &&
+                    !std::filesystem::exists(std::filesystem::path(dropFile) / "meta.bin", ec) &&
+                    scanImageFolder(dropFile).imageCount > 0) {
+                    openConvertDialogForImages(dropFile);   // photo folder -> photogrammetry
+                } else if (std::filesystem::is_directory(dropFile, ec) || isVxpc(dropFile)) {
                     loadOctree(dropFile);           // converted octree/package -> open it
                 } else if (std::filesystem::is_regular_file(dropFile, ec)) {
                     openConvertDialog(dropFile);    // raw scan -> Convert, pre-filled
@@ -3253,6 +3335,19 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
             MessageBeep(MB_ICONINFORMATION);
 #endif
+            if (job->kind == ConvertJob::Kind::EngineSetup) {
+                refreshEngineStatus();   // pick up whatever the installer achieved
+                switch (job->state.load()) {
+                    case ConvertJob::State::Succeeded:
+                        addToast("Photogrammetry engines are ready"); break;
+                    case ConvertJob::State::Failed:
+                        addToast("Photogrammetry setup failed: " + job->message(), "", true); break;
+                    case ConvertJob::State::Canceled:
+                        addToast("Photogrammetry setup canceled"); break;
+                    default: break;
+                }
+                continue;
+            }
             switch (job->state.load()) {
                 case ConvertJob::State::Succeeded:
                     if (job->loadWhenDone) {
@@ -4067,6 +4162,7 @@ int main(int argc, char** argv) {
                     };
                     auto wizReset = [&]() {   // "Convert another" -> back to an empty step 1
                         convInputs.clear(); convOutput.clear(); convWizJobs.clear(); convWizStep = 0;
+                        convImagesDir.clear(); convEngineChoice = -1;
                     };
                     auto wizOpenResult = [&](const std::string& dir) {
                         showConvertDialog = false; convWizStep = 0; convWizJobs.clear();
@@ -4156,6 +4252,108 @@ int main(int argc, char** argv) {
                                     if (removeIdx >= 0) convInputs.erase(convInputs.begin() + removeIdx);
                                 }
                                 ImGui::EndChild();
+                            }
+
+                            // ----- photogrammetry: start from photos instead -----
+                            ImGui::Spacing();
+                            ImGui::SeparatorText("Or start from photos (photogrammetry)");
+                            ImGui::TextWrapped("Have drone or camera photos instead of a scan? Pick the folder "
+                                               "and ViitorX reconstructs a point cloud from them first, then "
+                                               "converts it like any other scan.");
+                            ImGui::Spacing();
+                            if (ImGui::Button("Browse image folder...", ImVec2(240.0f * S, 38.0f * S))) {
+                                std::string d = pf::openFolderDialog();
+                                if (!d.empty()) {
+                                    convImagesDir = d;
+                                    convImageInfo = scanImageFolder(d);
+                                    convInputs.clear();
+                                    convEngineChoice = -1;
+                                    std::filesystem::path p(d);
+                                    convOutput = (p.parent_path() / (p.filename().string() + ".vxpc")).string();
+                                    refreshEngineStatus();
+                                }
+                            }
+                            ImGui::SameLine();
+                            ImGui::TextColored(dimCol, "JPG / PNG / TIFF, 60-80%% overlap");
+                            if (!convImagesDir.empty()) {
+                                ImGui::Spacing();
+                                if (convImageInfo.imageCount == 0) {
+                                    ImGui::TextColored(errCol, "No images found in %s", baseName(convImagesDir).c_str());
+                                } else {
+                                    // snapshot of the async engine probe
+                                    EngineStatus st; bool stReady;
+                                    {
+                                        std::lock_guard<std::mutex> lk(engineStMx);
+                                        st = engineSt; stReady = engineStReady;
+                                    }
+                                    ImGui::Text("%d images (%s) in %s  -  %s", convImageInfo.imageCount,
+                                                fmtBytes(convImageInfo.totalBytes).c_str(),
+                                                baseName(convImagesDir).c_str(),
+                                                convImageInfo.hasGps() ? "GPS tags found" : "no GPS tags");
+                                    if (stReady)
+                                        ImGui::TextWrapped("%s", recommendReason(convImageInfo, st).c_str());
+
+                                    // engine picker: Auto follows the recommendation
+                                    const PhotogramEngine rec = stReady ? recommendEngine(convImageInfo, st)
+                                                                        : PhotogramEngine::ODM;
+                                    char autoLbl[64];
+                                    snprintf(autoLbl, sizeof(autoLbl), "Auto  (%s)",
+                                             stReady ? engineName(rec) : "...");
+                                    if (ImGui::RadioButton(autoLbl, convEngineChoice < 0)) convEngineChoice = -1;
+                                    ImGui::SameLine();
+                                    if (ImGui::RadioButton("ODM", convEngineChoice == (int)PhotogramEngine::ODM))
+                                        convEngineChoice = (int)PhotogramEngine::ODM;
+                                    ImGui::SetItemTooltip("Aerial/drone specialist. Uses the photos' GPS tags for a\n"
+                                                          "georeferenced, metric-scale LAZ. Runs via Docker.");
+                                    ImGui::SameLine();
+                                    if (ImGui::RadioButton("COLMAP", convEngineChoice == (int)PhotogramEngine::COLMAP))
+                                        convEngineChoice = (int)PhotogramEngine::COLMAP;
+                                    ImGui::SetItemTooltip("Densest per-pixel reconstruction for ground-level and object\n"
+                                                          "captures. Needs an NVIDIA GPU for dense stereo; output has\n"
+                                                          "arbitrary scale and origin (no GPS used).");
+
+                                    if (!stReady) {
+                                        ImGui::TextColored(dimCol, "Checking reconstruction engines...");
+                                    } else {
+                                        ImGui::TextColored(st.odmReady() ? okCol
+                                                           : !st.virtualizationOk() ? warnCol : dimCol,
+                                                           "ODM: %s",
+                                                           st.odmReady() ? "ready"
+                                                           : !st.virtualizationOk() ? "blocked (virtualization disabled in BIOS)"
+                                                           : !st.dockerCli ? "not set up (needs Docker)"
+                                                           : !st.dockerRunning ? "Docker installed, engine not running"
+                                                                               : "engine image not downloaded");
+                                        ImGui::SameLine(); ImGui::TextColored(dimCol, "  |  ");
+                                        ImGui::SameLine();
+                                        ImGui::TextColored(st.colmapReady() ? okCol : dimCol, "COLMAP: %s%s",
+                                                           st.colmapReady() ? "ready" : "not set up",
+                                                           st.cudaGpu ? "" : "  (no NVIDIA GPU - dense stereo unavailable)");
+
+                                        if (!st.virtualizationOk()) {
+                                            ImGui::Spacing();
+                                            if (!convBoardQueried) { convBoard = queryBoard(); convBoardQueried = true; }
+                                            ImGui::TextColored(warnCol, "To unlock ODM, enable virtualization on this PC (%s %s, BIOS %s):",
+                                                               convBoard.vendor.c_str(), convBoard.product.c_str(),
+                                                               convBoard.bios.empty() ? "?" : convBoard.bios.c_str());
+                                            ImGui::TextWrapped("%s", biosVirtSteps(convBoard).c_str());
+                                            if (ImGui::SmallButton("Search the web for these steps..."))
+                                                openVirtSearch(convBoard);
+                                            ImGui::TextColored(dimCol, "COLMAP works today without it - it is selected automatically.");
+                                        }
+                                        const bool setupRunning = engineSetupJob && !engineSetupJob->finished();
+                                        if (setupRunning) {
+                                            ImGui::Spacing();
+                                            ImGui::ProgressBar(engineSetupJob->progress.load(), ImVec2(-FLT_MIN, 0.0f));
+                                            ImGui::TextColored(dimCol, "%s", engineSetupJob->message().c_str());
+                                        } else if (!st.ready(effectiveEngine())) {
+                                            ImGui::Spacing();
+                                            ImGui::TextColored(warnCol, "%s is not set up on this machine yet.",
+                                                               engineName(effectiveEngine()));
+                                            if (ImGui::Button("Set up engines automatically...", ImVec2(280.0f * S, 32.0f * S)))
+                                                engineConsentReq = true;
+                                        }
+                                    }
+                                }
                             }
                         } else if (convWizStep == 1) {
                             // ----- Step 2: Quality -----
@@ -4257,7 +4455,8 @@ int main(int argc, char** argv) {
                                 if (ImGui::Button("Choose location...", ImVec2(200.0f * S, 34.0f * S))) {
                                     std::string d = pf::openFolderDialog();
                                     if (!d.empty()) {
-                                        std::string stem = convInputs.empty() ? std::string("cloud")
+                                        std::string stem = !convImagesDir.empty() ? baseName(convImagesDir)
+                                                          : convInputs.empty() ? std::string("cloud")
                                                           : std::filesystem::path(convInputs[0]).stem().string();
                                         convOutput = (std::filesystem::path(d) / (stem + ".vxpc")).string();
                                     }
@@ -4291,7 +4490,11 @@ int main(int argc, char** argv) {
                             }
                             ImGui::Spacing();
                             ImGui::SeparatorText("Review");
-                            if (convInputs.size() == 1)
+                            if (!convImagesDir.empty())
+                                ImGui::BulletText("Source: %d photos in %s  ->  %s reconstruction",
+                                                  convImageInfo.imageCount, baseName(convImagesDir).c_str(),
+                                                  engineName(effectiveEngine()));
+                            else if (convInputs.size() == 1)
                                 ImGui::BulletText("Source: %s", baseName(convInputs[0]).c_str());
                             else
                                 ImGui::BulletText("Source: %d files (%s)", (int)convInputs.size(), fmtBytes(totalBytes).c_str());
@@ -4378,7 +4581,7 @@ int main(int argc, char** argv) {
                         if (convWizStep == 0) {
                             if (ImGui::Button("Cancel", ImVec2(bw, 0))) wizClose();
                             ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - bw);
-                            ImGui::BeginDisabled(convInputs.empty());
+                            ImGui::BeginDisabled(convInputs.empty() && !photoModeReady());
                             if (ImGui::Button("Next", ImVec2(bw, 0))) convWizStep = 1;
                             ImGui::EndDisabled();
                         } else if (convWizStep == 1) {
@@ -4388,7 +4591,7 @@ int main(int argc, char** argv) {
                         } else if (convWizStep == 2) {
                             if (ImGui::Button("Back", ImVec2(bw, 0))) convWizStep = 1;
                             ImGui::SameLine(); ImGui::SetCursorPosX(leftPad + contentW - 200.0f * S);
-                            ImGui::BeginDisabled(convInputs.empty() || convOutput.empty());
+                            ImGui::BeginDisabled((convInputs.empty() && !photoModeReady()) || convOutput.empty());
                             ImGui::PushStyleColor(ImGuiCol_Button,        accent);
                             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.60f, 1.0f, 1.0f));
                             if (ImGui::Button("Start Conversion", ImVec2(200.0f * S, 0))) { enqueueConvert(); convWizStep = 3; convWizStartMs = SDL_GetTicks(); }
@@ -4415,6 +4618,48 @@ int main(int argc, char** argv) {
                             }
                             if (ImGui::Button("Close", ImVec2(bw, 0))) wizClose();
                         }
+                    }
+
+                    // ---- photogrammetry setup consent (nested modal) ---------
+                    if (engineConsentReq) { ImGui::OpenPopup("Set up photogrammetry"); engineConsentReq = false; }
+                    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f,
+                                                   vp->Pos.y + vp->Size.y * 0.45f),
+                                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                    if (ImGui::BeginPopupModal("Set up photogrammetry", nullptr,
+                                               ImGuiWindowFlags_AlwaysAutoResize)) {
+                        bool consentVirtOk;
+                        {
+                            std::lock_guard<std::mutex> lk(engineStMx);
+                            consentVirtOk = engineSt.virtualizationOk();
+                        }
+                        ImGui::TextWrapped("ViitorX can install both reconstruction engines for you - "
+                                           "no manual downloads or configuration:");
+                        ImGui::Spacing();
+                        ImGui::BulletText("COLMAP 4.1.0 - about a 120-310 MB download, installed privately\n"
+                                          "into this app's data folder.");
+                        if (consentVirtOk)
+                            ImGui::BulletText("ODM - runs on Docker. Docker Desktop is installed first if missing\n"
+                                              "(a Windows admin prompt may appear), then the ODM engine image\n"
+                                              "is downloaded (several GB, one time).");
+                        else
+                            ImGui::BulletText("ODM - SKIPPED on this PC: Docker needs CPU virtualization\n"
+                                              "(Intel VT-x / AMD-V), which is disabled in the BIOS/UEFI.\n"
+                                              "Enable it there and run setup again to add ODM later.");
+                        ImGui::Spacing();
+                        ImGui::TextWrapped("Everything runs as a background job - watch it in the Jobs panel. "
+                                           "An internet connection is required. You can keep using the app.");
+                        ImGui::Spacing();
+                        ImGui::PushStyleColor(ImGuiCol_Button, accent);
+                        if (ImGui::Button("Install Automatically", ImVec2(200.0f * S, 34.0f * S))) {
+                            engineSetupJob = jobs.enqueueEngineSetup();
+                            if (!firstJobRevealed) { firstJobRevealed = true; showJobsPanel = true; }
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine();
+                        if (ImGui::Button("Not Now", ImVec2(120.0f * S, 34.0f * S)))
+                            ImGui::CloseCurrentPopup();
+                        ImGui::EndPopup();
                     }
                     ImGui::EndPopup();
                 }
@@ -5233,6 +5478,7 @@ int main(int argc, char** argv) {
     // ---- shutdown ---------------------------------------------------------
     cancelActiveSliceExports();
     jobs.shutdown();   // cancels the running conversion (if any) and joins the worker
+    if (engineProbeThread.joinable()) engineProbeThread.join();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
