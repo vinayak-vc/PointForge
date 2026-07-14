@@ -1494,6 +1494,8 @@ int main(int argc, char** argv) {
     std::thread engineProbeThread;     // joined on shutdown
     std::shared_ptr<ConvertJob> engineSetupJob;   // active auto-install job (or null)
     bool engineConsentReq = false;     // open the consent modal this frame
+    BoardInfo convBoard;               // motherboard identity for BIOS-steps help
+    bool convBoardQueried = false;     // lazy one-time registry read
 
     // Re-probe engine availability off the render thread (docker info can
     // block for seconds when the daemon is cold).
@@ -4329,9 +4331,14 @@ int main(int argc, char** argv) {
 
                                         if (!st.virtualizationOk()) {
                                             ImGui::Spacing();
-                                            ImGui::TextColored(warnCol, "To unlock ODM: restart the PC, enter BIOS/UEFI setup and enable");
-                                            ImGui::TextColored(warnCol, "'Intel VT-x' / 'AMD-V' (often under CPU or Security settings).");
-                                            ImGui::TextColored(dimCol,  "COLMAP works today without it - it is selected automatically.");
+                                            if (!convBoardQueried) { convBoard = queryBoard(); convBoardQueried = true; }
+                                            ImGui::TextColored(warnCol, "To unlock ODM, enable virtualization on this PC (%s %s, BIOS %s):",
+                                                               convBoard.vendor.c_str(), convBoard.product.c_str(),
+                                                               convBoard.bios.empty() ? "?" : convBoard.bios.c_str());
+                                            ImGui::TextWrapped("%s", biosVirtSteps(convBoard).c_str());
+                                            if (ImGui::SmallButton("Search the web for these steps..."))
+                                                openVirtSearch(convBoard);
+                                            ImGui::TextColored(dimCol, "COLMAP works today without it - it is selected automatically.");
                                         }
                                         const bool setupRunning = engineSetupJob && !engineSetupJob->finished();
                                         if (setupRunning) {

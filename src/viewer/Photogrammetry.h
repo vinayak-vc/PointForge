@@ -67,6 +67,27 @@ struct EngineStatus {
 // nvidia-smi) — call from a background thread, not the render loop.
 EngineStatus queryEngines();
 
+// ---- BIOS virtualization help -------------------------------------------
+
+// Motherboard identity read from the registry (HKLM\HARDWARE\...\BIOS) —
+// no WMI/COM dependency. Used to give the user board-specific instructions
+// for enabling VT-x / AMD-V when Docker (ODM) is blocked.
+struct BoardInfo {
+    std::string vendor;    // e.g. "Gigabyte Technology Co., Ltd."
+    std::string product;   // e.g. "B550M DS3H"
+    std::string bios;      // e.g. "F13"
+    bool amdCpu = false;   // AuthenticAMD => the setting is called "SVM Mode"
+};
+BoardInfo queryBoard();
+
+// Vendor-specific step list (newline-separated) for enabling virtualization
+// in this board's BIOS/UEFI; generic fallback for unknown vendors.
+std::string biosVirtSteps(const BoardInfo& b);
+
+// Opens the default browser on a web search for this exact board's
+// virtualization steps ("enable SVM <vendor> <product> BIOS").
+void openVirtSearch(const BoardInfo& b);
+
 // GPS-tagged sets -> ODM (georeferenced, metric-scale LAZ straight from drone
 // GPS). Untagged ground/object captures -> COLMAP (denser per-pixel MVS) —
 // unless there is no CUDA GPU, where COLMAP cannot run dense stereo at all.

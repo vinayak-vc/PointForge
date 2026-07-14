@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -370,7 +372,81 @@ bool hypervisorPresent() {
 }
 bool virtualizationAvailable() { return virtFirmwareEnabled() || hypervisorPresent(); }
 
+std::string regStr(const char* subkey, const char* value) {
+    char buf[256] = {};
+    DWORD len = sizeof(buf);
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, subkey, value, RRF_RT_REG_SZ, nullptr, buf, &len) ==
+        ERROR_SUCCESS)
+        return buf;
+    return {};
+}
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// BIOS virtualization help
+// ---------------------------------------------------------------------------
+BoardInfo queryBoard() {
+    BoardInfo b;
+    const char* kBios = "HARDWARE\\DESCRIPTION\\System\\BIOS";
+    b.vendor  = regStr(kBios, "BaseBoardManufacturer");
+    b.product = regStr(kBios, "BaseBoardProduct");
+    b.bios    = regStr(kBios, "BIOSVersion");
+    if (b.vendor.empty()) b.vendor = regStr(kBios, "SystemManufacturer");
+    if (b.product.empty()) b.product = regStr(kBios, "SystemProductName");
+    b.amdCpu = regStr("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                      "VendorIdentifier") == "AuthenticAMD";
+    return b;
+}
+
+std::string biosVirtSteps(const BoardInfo& b) {
+    const std::string v = toLower(b.vendor);
+    const char* setting = b.amdCpu ? "SVM Mode" : "Intel Virtualization Technology (VT-x)";
+    auto steps = [&](const char* enterKey, const std::string& path) {
+        return "1. Restart the PC and tap " + std::string(enterKey) + " during boot to enter BIOS setup.\n"
+               "2. " + path + "\n"
+               "3. Set '" + setting + "' to Enabled.\n"
+               "4. Press F10 to save and exit - Windows boots with virtualization on.";
+    };
+    if (v.find("gigabyte") != std::string::npos)
+        return steps("Del", b.amdCpu
+            ? "Go to 'Tweaker' > 'Advanced CPU Settings' (older boards: 'M.I.T.' > 'Advanced Frequency Settings' > 'Advanced CPU Core Settings')."
+            : "Go to 'Tweaker' (or 'BIOS Features') > CPU settings.");
+    if (v.find("asus") != std::string::npos)
+        return steps("Del or F2", "Press F7 for Advanced Mode, then 'Advanced' > 'CPU Configuration'.");
+    if (v.find("micro-star") != std::string::npos || v.find("msi") != std::string::npos)
+        return steps("Del", "Press F7 for Advanced Mode, then 'OC' > 'Advanced CPU Configuration' (or 'Advanced' > 'CPU Features').");
+    if (v.find("asrock") != std::string::npos)
+        return steps("Del or F2", "Go to 'Advanced' > 'CPU Configuration'.");
+    if (v.find("dell") != std::string::npos)
+        return steps("F2", "Expand 'Virtualization Support' > 'Virtualization'.");
+    if (v.find("hewlett") != std::string::npos || v.find("hp") == 0)
+        return steps("Esc then F10", "Go to 'Advanced' (or 'Security') > 'System Options' / 'Device Configuration'.");
+    if (v.find("lenovo") != std::string::npos)
+        return steps("F1 or F2", "Go to 'Security' (or 'Advanced') > 'Virtualization'.");
+    if (v.find("acer") != std::string::npos)
+        return steps("F2", "Go to 'Advanced' > 'CPU Configuration'.");
+    return steps("Del or F2", std::string("Look for '") + setting +
+                 "' - usually under 'Advanced', 'CPU Configuration' or 'Tweaker'.");
+}
+
+void openVirtSearch(const BoardInfo& b) {
+    std::string q = "enable " + std::string(b.amdCpu ? "SVM virtualization" : "Intel VT-x") +
+                    " BIOS " + b.vendor + " " + b.product;
+    std::string url = "https://www.bing.com/search?q=";
+    for (char c : q) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+            url += c;
+        else if (c == ' ')
+            url += '+';
+        else {
+            char esc[8];
+            snprintf(esc, sizeof(esc), "%%%02X", (unsigned char)c);
+            url += esc;
+        }
+    }
+    ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
 
 // ---------------------------------------------------------------------------
 // engine status
@@ -763,6 +839,12 @@ bool runReconstruction(PhotogramEngine engine, const std::string& imagesDir,
 #else // !_WIN32 — graceful stubs (same pattern as VideoExporter)
 
 EngineStatus queryEngines() { return {}; }
+
+BoardInfo queryBoard() { return {}; }
+std::string biosVirtSteps(const BoardInfo&) {
+    return "Enable CPU virtualization in your machine's firmware settings.";
+}
+void openVirtSearch(const BoardInfo&) {}
 
 bool installEngines(bool, bool, std::atomic<bool>&, const PhotoProgressFn&, std::string& err) {
     err = "Photogrammetry engine setup is only supported on Windows.";
