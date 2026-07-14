@@ -49,6 +49,16 @@
         convert (one progress bar, cancelable). CPU virtualization disabled in BIOS →
         ODM soft-skipped with in-UI enable instructions, COLMAP used instead. Dropping a
         photo folder onto the window opens the wizard in photo mode. See decisions.md.
+- `[x]` Photogrammetry chain validated end-to-end (25-image DJI subset): COLMAP 4.1.0
+        `automatic_reconstructor` (GPU dense) → 157,045 fused points at `dense/0/fused.ply`
+        (the exact path the job searches) → `pfconvert` → loadable 6.72 MB `.vxpc`
+        (281 nodes, zero point loss). 4.1.0 CLI flags verified against the installed
+        binary's `--help` — all match what the code sends.
+- `[x]` BIOS virtualization help — when ODM is blocked, the wizard reads the motherboard
+        identity from the registry (`HKLM\HARDWARE\DESCRIPTION\System\BIOS`, no WMI/COM),
+        shows vendor-exact enable steps (Gigabyte/ASUS/MSI/ASRock/Dell/HP/Lenovo/Acer +
+        generic; "SVM Mode" for AMD CPUs vs "Intel VT-x" picked by CPU vendor id) and a
+        "Search the web for these steps..." button (board-specific query via ShellExecute).
 - `[ ]` Finish at-rest encryption in the viewer — DEFERRED by decision: `octree.bin` (the
         points) can't be encrypted with the current per-entry-GCM + raw-seek streaming design,
         so `--encrypt` would protect metadata only (misleading). Needs per-node payload
