@@ -1,0 +1,12 @@
+{
+  "name": "viitorxpc-feature-guide-deck",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build script for the ViitorX PointCloud Viewer feature-guide PPTX",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "dependencies": {
+    "pptxgenjs": "^3.12.0"
+  }
+}
