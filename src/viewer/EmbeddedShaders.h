@@ -182,4 +182,117 @@ void main() {
 }
 )GLSL";
 
+// ---- 3D Gaussian Splatting Shaders -----------------------------------------
+inline const char* kSplatVertSrc = R"GLSL(#version 330 core
+layout(location = 0) in vec2 inQuadCorner;
+
+layout(location = 1) in vec3 inPos;
+layout(location = 2) in vec3 inScale;
+layout(location = 3) in vec4 inRot; // w, x, y, z
+layout(location = 4) in float inOpacity;
+layout(location = 5) in vec3 inColor;
+
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec2 uViewportSize;
+
+out vec3 vColor;
+out float vOpacity;
+out vec3 vConic;
+out vec2 vCoord;
+
+mat3 quaternionToRotation(vec4 q) {
+    float w = q.x, x = q.y, y = q.z, z = q.w;
+    return mat3(
+        1.0 - 2.0*(y*y + z*z), 2.0*(x*y - w*z),     2.0*(x*z + w*y),
+        2.0*(x*y + w*z),     1.0 - 2.0*(x*x + z*z), 2.0*(y*z - w*x),
+        2.0*(x*z - w*y),     2.0*(y*z + w*x),     1.0 - 2.0*(x*x + y*y)
+    );
+}
+
+void main() {
+    vColor = inColor;
+    vOpacity = inOpacity;
+
+    vec4 camPos = uView * vec4(inPos, 1.0);
+    if (camPos.z >= 0.0) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+
+    mat3 R = quaternionToRotation(inRot);
+    mat3 S = mat3(
+        inScale.x, 0.0, 0.0,
+        0.0, inScale.y, 0.0,
+        0.0, 0.0, inScale.z
+    );
+    mat3 M = R * S;
+    mat3 Sigma = M * transpose(M);
+
+    mat3 W = mat3(uView);
+
+    float focalX = uProj[0][0] * uViewportSize.x * 0.5;
+    float focalY = uProj[1][1] * uViewportSize.y * 0.5;
+
+    float z = camPos.z;
+    float invZ = 1.0 / z;
+    float invZ2 = invZ * invZ;
+
+    mat3 J = mat3(
+        focalX * invZ, 0.0, 0.0,
+        0.0, focalY * invZ, 0.0,
+        -focalX * camPos.x * invZ2, -focalY * camPos.y * invZ2, 0.0
+    );
+
+    // 2D covariance: Sigma' = J W Sigma W^T J^T. Here J and W are in true
+    // (non-transposed) form, so A = J*W and cov2D = A Sigma A^T.
+    mat3 T = J * W;
+    mat3 cov2D_3 = T * Sigma * transpose(T);
+
+    float covA = cov2D_3[0][0] + 0.3;
+    float covB = cov2D_3[0][1];
+    float covC = cov2D_3[1][1] + 0.3;
+
+    float det = covA * covC - covB * covB;
+    if (det <= 0.0) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+
+    float invDet = 1.0 / det;
+    vConic = vec3(covC * invDet, -covB * invDet, covA * invDet);
+
+    float mid = 0.5 * (covA + covC);
+    float lambda = sqrt(max(0.1, mid * mid - det));
+    float radius = ceil(3.0 * sqrt(max(mid + lambda, mid - lambda)));
+
+    vec4 clipPos = uProj * camPos;
+    vec2 pointCenter = clipPos.xy / clipPos.w;
+    vec2 offset = inQuadCorner * radius * 2.0 / uViewportSize;
+
+    vCoord = inQuadCorner * radius;
+    gl_Position = vec4(pointCenter + offset, clipPos.z / clipPos.w, 1.0);
+}
+)GLSL";
+
+inline const char* kSplatFragSrc = R"GLSL(#version 330 core
+in vec3 vColor;
+in float vOpacity;
+in vec3 vConic;
+in vec2 vCoord;
+
+out vec4 fragColor;
+
+void main() {
+    float d2 = vConic.x * vCoord.x * vCoord.x + 2.0 * vConic.y * vCoord.x * vCoord.y + vConic.z * vCoord.y * vCoord.y;
+    float power = -0.5 * d2;
+    if (power > 0.0) discard;
+
+    float alpha = min(0.99, vOpacity * exp(power));
+    if (alpha < 1.0 / 255.0) discard;
+
+    fragColor = vec4(vColor * alpha, alpha);
+}
+)GLSL";
+
 } // namespace pf

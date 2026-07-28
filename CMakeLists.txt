@@ -232,6 +232,7 @@ add_library(pfcore STATIC
     src/io/LASReader.cpp
     src/io/E57Reader.cpp
     src/io/DxfWriter.cpp
+    src/io/SplatReader.cpp
     src/io/ReaderFactory.cpp
     src/indexer/Chunker.cpp
     src/indexer/OctreeIndexer.cpp
@@ -309,6 +310,7 @@ add_executable(pfview WIN32
     src/viewer/Shader.cpp
     src/viewer/OctreeStore.cpp
     src/viewer/PointRenderer.cpp
+    src/viewer/SplatRenderer.cpp
     src/viewer/Controller.cpp
     src/viewer/SerialController.cpp
     src/viewer/RemoteServer.cpp

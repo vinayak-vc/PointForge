@@ -55,6 +55,8 @@
 #include "common/FileDialog.h"
 #include "io/DxfWriter.h"
 #include "io/PackageFormat.h"
+#include "io/SplatReader.h"
+#include "viewer/SplatRenderer.h"
 #include "indexer/OctreeIndexer.h"
 #include <thread>
 #include <atomic>
@@ -472,10 +474,14 @@ int main(int argc, char** argv) {
         ImGui::GetIO().FontGlobalScale = s;
     };
 
-    // ---- assets -----------------------------------------------------------
+    enum class CloudType { OctreeLiDAR, GaussianSplat };
+
     struct SceneCloud {
+        CloudType type = CloudType::OctreeLiDAR;
         std::unique_ptr<OctreeStore> store;
         std::unique_ptr<PointRenderer> renderer;
+        std::unique_ptr<SplatRenderer> splatRenderer;
+        pf::SplatCloudData splatData;
         std::string dir;                  // source file/folder (shared by clouds
                                           // from one multi-cloud package)
         std::string pkgPrefix;            // "clouds/<i>/" for a multi-cloud
@@ -1336,7 +1342,64 @@ int main(int argc, char** argv) {
         // multi-cloud package (Phase 10), empty for a single-cloud load.
         auto appendCloud = [&](const std::string& d, const std::string& prefix,
                                const std::string& name) -> bool {
+            if (isVxpc(d)) {
+                pf::PackageReader r;
+                if (r.Open(d)) {
+                    std::string splatKey = prefix.empty() ? "splat.bin" : (prefix + "splat.bin");
+                    if (r.Contains(splatKey)) {
+                        SceneCloud cloud;
+                        cloud.type = CloudType::GaussianSplat;
+                        cloud.splatRenderer = std::make_unique<SplatRenderer>();
+                        cloud.dir = d;
+                        cloud.pkgPrefix = prefix;
+                        cloud.name = name.empty() ? baseName(d) : name;
+                        cloud.visible = true;
+
+                        auto buf = r.Read(splatKey);
+                        cloud.splatData = pf::SplatReader::loadSplatBinaryFromMemory(buf.data(), buf.size());
+                        if (!cloud.splatData.ok) {
+                            pf::logError("Could not load Gaussian Splat from package " + d + " [" + splatKey + "]");
+                            return false;
+                        }
+
+                        cloud.splatRenderer->upload(cloud.splatData);
+
+                        glm::dvec3 splatCenter(cloud.splatData.center.x, cloud.splatData.center.y, cloud.splatData.center.z);
+                        if (scene.empty()) sceneOrigin = splatCenter;
+                        cloud.worldOffset = splatCenter - sceneOrigin;
+
+                        scene.push_back(std::move(cloud));
+                        return true;
+                    }
+                }
+            }
+
+            if (pf::SplatReader::detectFormat(d) != pf::SplatFileFormat::Unknown) {
+                SceneCloud cloud;
+                cloud.type = CloudType::GaussianSplat;
+                cloud.splatRenderer = std::make_unique<SplatRenderer>();
+                cloud.dir = d;
+                cloud.name = name.empty() ? baseName(d) : name;
+                cloud.visible = true;
+
+                cloud.splatData = pf::SplatReader::loadFromFile(d);
+                if (!cloud.splatData.ok) {
+                    pf::logError("Could not load Gaussian Splat from " + d);
+                    return false;
+                }
+
+                cloud.splatRenderer->upload(cloud.splatData);
+
+                glm::dvec3 splatCenter(cloud.splatData.center.x, cloud.splatData.center.y, cloud.splatData.center.z);
+                if (scene.empty()) sceneOrigin = splatCenter;
+                cloud.worldOffset = splatCenter - sceneOrigin;
+
+                scene.push_back(std::move(cloud));
+                return true;
+            }
+
             SceneCloud cloud;
+            cloud.type = CloudType::OctreeLiDAR;
             cloud.store = std::make_unique<OctreeStore>();
             cloud.renderer = std::make_unique<PointRenderer>();
             cloud.dir = d;
@@ -2638,7 +2701,18 @@ int main(int argc, char** argv) {
                 const double ssFactor = (vpH * 0.5) / std::tan(glm::radians(cam.fovY) * 0.5);
 
                 for (SceneCloud& cloud : scene) {
-                    if (!cloud.visible || !cloud.store || !cloud.renderer) continue;
+                    if (!cloud.visible) continue;
+
+                    if (cloud.type == CloudType::GaussianSplat) {
+                        if (cloud.splatRenderer && cloud.splatRenderer->isReady()) {
+                            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(cloud.worldOffset));
+                            glm::mat4 cloudView = cam.view() * model;
+                            cloud.splatRenderer->draw(cam.proj(), cloudView, glm::vec2((float)vpW, (float)vpH));
+                        }
+                        continue;
+                    }
+
+                    if (!cloud.store || !cloud.renderer) continue;
 
                     glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(cloud.worldOffset));
                     glm::mat4 vp = viewProj * model;

@@ -18,6 +18,7 @@
 #include "common/Log.h"
 #include "viewer/OctreeStore.h"
 #include "io/PackageFormat.h"
+#include "io/SplatReader.h"
 
 #include <chrono>
 #include <atomic>
@@ -543,6 +544,112 @@ static void testEncryption(const std::string& work) {
 static void testEncryption(const std::string&) {}
 #endif
 
+static void testSplatReader(const std::string& workDir) {
+    // 1. Synthetic 32-byte .splat binary test
+    std::string splatPath = (fs::path(workDir) / "test.splat").string();
+    {
+        std::ofstream out(splatPath, std::ios::binary);
+#pragma pack(push, 1)
+        struct RawSplat32 {
+            float x, y, z;
+            float sx, sy, sz;
+            uint8_t r, g, b, a;
+            uint8_t qx, qy, qz, qw;
+        };
+#pragma pack(pop)
+        RawSplat32 s1{ 1.0f, 2.0f, 3.0f, 0.5f, 0.5f, 0.5f, 255, 128, 64, 200, 128, 128, 128, 255 };
+        RawSplat32 s2{ -5.0f, 10.0f, 0.0f, 1.0f, 2.0f, 3.0f, 0, 255, 128, 255, 128, 128, 128, 255 };
+        out.write(reinterpret_cast<const char*>(&s1), sizeof(s1));
+        out.write(reinterpret_cast<const char*>(&s2), sizeof(s2));
+    }
+
+    pf::SplatCloudData splatData = pf::SplatReader::loadFromFile(splatPath);
+    CHECK(splatData.ok, "SplatReader binary failed to load");
+    CHECK(splatData.count() == 2, "SplatReader binary count mismatch");
+    if (splatData.count() == 2) {
+        CHECK(std::abs(splatData.splats[0].position.x - 1.0f) < 1e-4f, "Splat 0 pos x mismatch");
+        CHECK(std::abs(splatData.splats[0].color[0] - 1.0f) < 1e-4f, "Splat 0 color r mismatch");
+        CHECK(std::abs(splatData.splats[1].position.x - (-5.0f)) < 1e-4f, "Splat 1 pos x mismatch");
+    }
+
+    // 2. Synthetic 3DGS .ply header + binary records test
+    std::string plyPath = (fs::path(workDir) / "test_gsplat.ply").string();
+    {
+        std::ofstream out(plyPath, std::ios::binary);
+        std::string header = 
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            "element vertex 2\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+            "property float scale_0\n"
+            "property float scale_1\n"
+            "property float scale_2\n"
+            "property float opacity\n"
+            "property float rot_0\n"
+            "property float rot_1\n"
+            "property float rot_2\n"
+            "property float rot_3\n"
+            "property float f_dc_0\n"
+            "property float f_dc_1\n"
+            "property float f_dc_2\n"
+            "end_header\n";
+        out.write(header.c_str(), header.size());
+
+#pragma pack(push, 1)
+        struct PlySplatRec {
+            float x, y, z;
+            float s0, s1, s2;
+            float op;
+            float r0, r1, r2, r3;
+            float fdc0, fdc1, fdc2;
+        };
+#pragma pack(pop)
+        PlySplatRec p1{ 10.0f, 20.0f, 30.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f };
+        PlySplatRec p2{ -1.0f, -2.0f, -3.0f, 1.0f, 1.0f, 1.0f, 2.0f, 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, -1.0f, -1.0f };
+        out.write(reinterpret_cast<const char*>(&p1), sizeof(p1));
+        out.write(reinterpret_cast<const char*>(&p2), sizeof(p2));
+    }
+
+    pf::SplatCloudData plyData = pf::SplatReader::loadFromFile(plyPath);
+    CHECK(plyData.ok, "SplatReader PLY 3DGS failed to load");
+    CHECK(plyData.count() == 2, "SplatReader PLY 3DGS count mismatch");
+    if (plyData.count() == 2) {
+        CHECK(std::abs(plyData.splats[0].position.x - 10.0f) < 1e-4f, "PLY Splat 0 pos x mismatch");
+        CHECK(std::abs(plyData.splats[0].scale.x - 1.0f) < 1e-4f, "PLY Splat 0 exp scale x mismatch"); // exp(0) = 1
+        CHECK(std::abs(plyData.splats[1].position.x - (-1.0f)) < 1e-4f, "PLY Splat 1 pos x mismatch");
+    }
+
+    // 3. Test .vxpc container packaging of splat.bin (Phase 7)
+    std::string vxpcSplatPath = (fs::path(workDir) / "test_gsplat_package.vxpc").string();
+    {
+        pf::PackageWriter writer;
+        CHECK(writer.Create(vxpcSplatPath), "Splat vxpc create failed");
+
+        std::ifstream splatStream(splatPath, std::ios::binary);
+        std::vector<uint8_t> rawSplatData((std::istreambuf_iterator<char>(splatStream)), std::istreambuf_iterator<char>());
+        CHECK(writer.AddMemory("splat.bin", rawSplatData.data(), rawSplatData.size(), pf::PackageWriter::Compression::ZSTD), "AddMemory splat.bin failed");
+
+        std::string manifest = "{\"version\":1,\"clouds\":[{\"prefix\":\"\",\"name\":\"test_gsplat\",\"type\":\"gsplat\"}]}";
+        std::vector<uint8_t> manifestData(manifest.begin(), manifest.end());
+        CHECK(writer.AddMemory("scene.json", manifestData.data(), manifestData.size(), pf::PackageWriter::Compression::None), "AddMemory scene.json failed");
+        CHECK(writer.Finalize(), "Finalize gsplat vxpc failed");
+    }
+
+    {
+        pf::PackageReader reader;
+        CHECK(reader.Open(vxpcSplatPath), "Open gsplat vxpc package failed");
+        CHECK(reader.Contains("splat.bin"), "Package missing splat.bin");
+        CHECK(reader.Contains("scene.json"), "Package missing scene.json");
+
+        auto splatBuf = reader.Read("splat.bin");
+        pf::SplatCloudData pkgSplatData = pf::SplatReader::loadSplatBinaryFromMemory(splatBuf.data(), splatBuf.size());
+        CHECK(pkgSplatData.ok, "loadSplatBinaryFromMemory from vxpc failed");
+        CHECK(pkgSplatData.count() == 2, "loadSplatBinaryFromMemory count mismatch");
+    }
+}
+
 int main(int argc, char** argv) {
     uint64_t nPoints = 2'000'000;
     // Default to a fixed thread count > 1 so the parallel leg is never
@@ -570,6 +677,9 @@ int main(int argc, char** argv) {
 
     std::printf("pftest: [phase 18] AES-256-GCM at-rest encryption...\n");
     testEncryption(work);
+
+    std::printf("pftest: [phase 1 3dgs] SplatReader (.splat & .ply)...\n");
+    testSplatReader(work);
 
     std::printf("pftest: generating %llu synthetic points...\n", (unsigned long long)nPoints);
     if (!writeSyntheticXyz(xyz, nPoints)) {
