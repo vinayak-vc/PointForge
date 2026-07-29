@@ -1,6 +1,9 @@
 # Tasks
 
 ## Completed
+- `[x]` 3D Gaussian Splatting (3DGS) Phase 4 & 5: Registered `CloudType::GaussianSplat` in `SceneCloud`, integrated 3DGS file loading in `loadOctree`/`appendCloud`, and composited rendering into offscreen scene FBO (`edlFbo`) for seamless EDL post-processing and Web Remote video streaming.
+- `[x]` 3D Gaussian Splatting (3DGS) Phase 2 & 3: Implemented instanced `SplatRenderer` GPU pipeline (`src/viewer/SplatRenderer.{h,cpp}`) with 2D screen-space covariance projection shaders (`EmbeddedShaders.h`) and per-frame back-to-front depth sorting (`sortSplats`).
+- `[x]` 3D Gaussian Splatting (3DGS) Phase 1: Implemented `SplatReader` (`src/io/SplatReader.{h,cpp}`) for parsing 32-byte `.splat` binary files and 3DGS `.ply` files (position, log-scales, logit-opacity, quaternions, SH0..SH3); verified green in `pftest`.
 - `[x]` Basic Viewer and Importer functionality
 - `[x]` Fix CMake linking issues
 - `[x]` Implement multiple Coloring Modes (True Color, Elevation, Solid)

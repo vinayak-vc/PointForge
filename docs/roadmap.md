@@ -63,6 +63,7 @@
 - **Point/measurement tool suite growth**: area, angle, profile tools alongside
   the existing distance measure, using the same tool-mode + Properties-section
   pattern (toolbar mode button + docked options, never a modal).
+- **3D Gaussian Splatting (3DGS)**: Support `.splat` / 3DGS `.ply` files as native layers in the multi-cloud Scene panel with GPU anisotropic alpha-blending and per-frame depth sorting. *(see detailed 8-phase plan in `docs/gsplat_feature.md`)*
 
 ## Long-term Goals
 - **Multi-user Sync**: Stream point cloud states between multiple viewers simultaneously.
