@@ -1,5 +1,32 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-07-28) - 3D Gaussian Splatting (3DGS) Phases 1-8 Complete (branch `feat/3dgs-phase1`)
+
+Completed all **8 Phases of 3D Gaussian Splatting (3DGS)** in ViitorX PointCloud Viewer (`PointForge`):
+- **Phase 1 (File Parsers)**: Created **[SplatReader.h](file:///c:/UnrealProject/PointForge/src/io/SplatReader.h)** & **[SplatReader.cpp](file:///c:/UnrealProject/PointForge/src/io/SplatReader.cpp)** supporting both 32-byte `.splat` binary streams and 3DGS `.ply` files (`x,y,z`, `scale_0..2`, `opacity`, `rot_0..3`, `f_dc_0..2`, `f_rest_*`). Verified with unit test `testSplatReader()` in `pftest` (`pftest: PASS`).
+- **Phase 2 & 3 (GPU Renderer & Depth Sort)**: Created **[SplatRenderer.h](file:///c:/UnrealProject/PointForge/src/viewer/SplatRenderer.h)** & **[SplatRenderer.cpp](file:///c:/UnrealProject/PointForge/src/viewer/SplatRenderer.cpp)** and added 2D covariance projection shaders (`kSplatVertSrc`, `kSplatFragSrc`) in **[EmbeddedShaders.h](file:///c:/UnrealProject/PointForge/src/viewer/EmbeddedShaders.h)**. Implemented back-to-front depth sorting in `sortSplats()` using camera-space depth $z = (V \cdot p)_z$.
+- **Phase 4 & 5 (Scene Panel & EDL Integration)**: Registered `CloudType::GaussianSplat` in `SceneCloud`, integrated `.splat` and 3DGS `.ply` loading in `loadOctree`/`appendCloud`, and composited splats into the offscreen FBO (`edlFbo`) in **[main.cpp](file:///c:/UnrealProject/PointForge/src/viewer/main.cpp)** for seamless Eye-Dome Lighting post-processing and Web Remote video streaming.
+- **Phase 6 & 7 (Web Remote, SBS & .vxpc Memory Loading)**: Implemented in-memory splat buffer extraction (`loadSplatBinaryFromMemory`) from ZSTD-compressed `.vxpc` project files, verified SBS stereo eye-rendering and WebRTC H.264 video encoder integration.
+- **Phase 8 (Automated Suite)**: Added `.vxpc` 3DGS container round-trip testing to `testSplatReader()` in `pftest` (`pftest: PASS`).
+- Built static release binary clean: **`ViitorXPCViewer_v1066.exe`**.
+- Updated all statuses to `DONE` in **[docs/gsplat_feature.md](file:///c:/UnrealProject/PointForge/docs/gsplat_feature.md)** and **[docs/tasks.md](file:///c:/UnrealProject/PointForge/docs/tasks.md)**.
+
+### Modified files
+- `src/io/SplatReader.h` (NEW)
+- `src/io/SplatReader.cpp` (NEW)
+- `src/viewer/SplatRenderer.h` (NEW)
+- `src/viewer/SplatRenderer.cpp` (NEW)
+- `src/viewer/EmbeddedShaders.h`
+- `src/viewer/main.cpp`
+- `CMakeLists.txt`
+- `src/tools/pftest/main.cpp`
+- `docs/gsplat_feature.md`
+- `docs/tasks.md`
+- `docs/ai_handoff.md`
+
+### Next recommended task
+- Merge branch `feat/3dgs-phase1` into main or start next planned feature from `docs/roadmap.md`.
+
 ## Session (2026-07-14) - Photogrammetry follow-ups: validation + BIOS help (branch `feat/photogrammetry`)
 
 Closed the three open items from yesterday's photogrammetry session:
