@@ -493,7 +493,8 @@ int main(int argc, char** argv) {
     std::vector<SceneCloud> scene;
     int activeCloudIndex = -1;
     glm::dvec3 sceneOrigin = glm::dvec3(0.0);
-    bool octreeLoaded = false;
+    bool octreeLoaded = false;   // a cloud (any type) is active — drives render/nav
+    bool octreeActive = false;   // the ACTIVE cloud is an octree (has an OctreeStore)
     auto activeCloud = [&]() -> SceneCloud& {
         return scene[(size_t)activeCloudIndex];
     };
@@ -503,8 +504,22 @@ int main(int argc, char** argv) {
     auto activeRenderer = [&]() -> PointRenderer& {
         return *activeCloud().renderer;
     };
+    // Characteristic size of the active cloud, defined for BOTH octree and
+    // Gaussian-splat clouds (splats have no OctreeStore). Camera framing and
+    // near/far derive from it, so it must never dereference a null store.
+    auto activeCloudSize = [&]() -> double {
+        if (octreeActive) return activeStore().meta().cubeSize;
+        const SceneCloud& c = activeCloud();
+        if (c.type == CloudType::GaussianSplat && c.splatData.ok) {
+            const Vec3d d = c.splatData.boxMax - c.splatData.boxMin;
+            return std::max(std::max(d.x, d.y), std::max(d.z, 1.0));
+        }
+        return 1.0;
+    };
     auto refreshActiveCloudState = [&]() {
         octreeLoaded = activeCloudIndex >= 0 && activeCloudIndex < (int)scene.size();
+        octreeActive = octreeLoaded &&
+                       scene[(size_t)activeCloudIndex].store != nullptr;
     };
     // (initial / auto-load happens after settings + helpers are set up below)
 
@@ -669,7 +684,7 @@ int main(int argc, char** argv) {
     // ---- camera initial framing ------------------------------------------
     Camera cam;
     auto setupCamera = [&]() {
-        const double cubeSize = activeStore().meta().cubeSize;
+        const double cubeSize = activeCloudSize();
         cam.position = glm::vec3(0.0f, -(float)cubeSize, 0.0f);
         cam.yaw = 0.0f; cam.pitch = 0.0f;
         cam.nearZ = (float)std::max(0.01, cubeSize / 5000.0);
@@ -1874,7 +1889,7 @@ int main(int argc, char** argv) {
 
     auto startVideoExport = [&]() -> bool {
         const CamPath& path = allCamPaths[loadedDir];
-        if (!octreeLoaded || path.keys.size() < 2 || path.duration() <= 0.01) return false;
+        if (!octreeActive || path.keys.size() < 2 || path.duration() <= 0.01) return false;
         if (vex.active) return false;
         vex.cfg.width = kExportRes[exportResIdx][0];
         vex.cfg.height = kExportRes[exportResIdx][1];
@@ -2080,8 +2095,8 @@ int main(int argc, char** argv) {
     // cloud, start the export via the exact dialog path, quit when it ends.
     bool exportHookArmed = false;
     if (!exportVideoOnStart.empty()) {
-        if (!octreeLoaded) {
-            logError("--export-video: no cloud loaded (pass an octree dir first)");
+        if (!octreeActive) {
+            logError("--export-video: needs an octree cloud loaded (splats cannot export video)");
         } else {
             CamPath& cp = allCamPaths[loadedDir];
             cp.keys.clear();
@@ -2113,7 +2128,7 @@ int main(int argc, char** argv) {
     // offset (km for georeferenced scans), losing the model until 'F' recovered.
     auto presetView = [&](const glm::vec3& dir) {
         if (!octreeLoaded) return;
-        double cs = activeStore().cube(activeStore().rootIndex()).size;
+        double cs = activeCloudSize();
         float dist = (float)(cs * 0.5 / std::tan(glm::radians(cam.fovY * 0.5f)) * 1.4);
         pivot = glm::vec3(0.0f);
         cam.position = pivot + dir * dist;
@@ -2494,7 +2509,7 @@ int main(int argc, char** argv) {
                     toolMode = (toolMode == TOOL_CLIP) ? TOOL_NAV : TOOL_CLIP;
                 else if (rc.name == "measure_undo" && !measurePts.empty()) measurePts.pop_back();
                 else if (rc.name == "measure_clear") measurePts.clear();
-                else if (rc.name == "clip_reset" && octreeLoaded) {
+                else if (rc.name == "clip_reset" && octreeActive) {
                     float ext = (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f;
                     clipMin[0] = clipMin[1] = clipMin[2] = -ext;
                     clipMax[0] = clipMax[1] = clipMax[2] =  ext;
@@ -2534,7 +2549,7 @@ int main(int argc, char** argv) {
             // Status back to the phone HUD (throttled to ~5 Hz inside).
             float posv[3] = { (float)cam.position.x, (float)cam.position.y, (float)cam.position.z };
             remote.publishState(dt > 0 ? 1.0f / dt : 0.0f,
-                                octreeLoaded ? activeStore().meta().pointCount : 0,
+                                octreeActive ? activeStore().meta().pointCount : 0,
                                 posv, showUI, baseName(loadedDir));
 
             // Full config sync: ~1 Hz heartbeat + instant echo after changes.
@@ -2558,7 +2573,7 @@ int main(int argc, char** argv) {
                 rc.stereo = stereoSBS; rc.eyeSep = eyeSeparation; rc.focalDist = focalDistance;
                 rc.toolMode = (toolMode == TOOL_MEASURE) ? 1 : (toolMode == TOOL_CLIP) ? 2 : (toolMode == TOOL_ANNOTATE) ? 3 : 0;
                 rc.clipEnabled = enableClipping;
-                rc.clipExt = octreeLoaded ? (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f : 0.0f;
+                rc.clipExt = octreeActive ? (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f : 0.0f;
                 rc.measurePts.reserve(measurePts.size());
                 for (const auto& p : measurePts) rc.measurePts.push_back({p.x, p.y, p.z});
                 rc.measureTotal = measureTotal();
@@ -2575,7 +2590,7 @@ int main(int argc, char** argv) {
                 rc.darkTheme = darkTheme;
                 rc.recentDirs = recentDirs;
                 rc.loadedFile = baseName(loadedDir);
-                if (octreeLoaded) {
+                if (octreeActive) {
                     rc.pointCount = activeStore().meta().pointCount;
                     rc.nodeCount  = activeStore().meta().nodeCount;
                     rc.cubeSize   = (float)activeStore().meta().cubeSize;
@@ -2808,7 +2823,7 @@ int main(int argc, char** argv) {
                     std::vector<glm::vec3> pointVerts;
                     leaderVerts.reserve(annotations.size() * 2);
                     pointVerts.reserve(annotations.size());
-                    double leader = std::max(0.10, activeStore().meta().cubeSize * 0.01);
+                    double leader = std::max(0.10, activeCloudSize() * 0.01);
                     for (const Annotation& a : annotations) {
                         glm::vec3 p = glm::vec3(a.pos - sceneOrigin);
                         leaderVerts.push_back(p);
@@ -3333,7 +3348,7 @@ int main(int argc, char** argv) {
         // ---- colour legend (elevation / intensity) --------------------------
         // The ramp is scene information, not chrome: it stays visible in zen
         // (hide-UI) mode and in stereoscopic SBS it is drawn once per eye.
-        if (octreeLoaded && (colorMode == 1 || colorMode == 3)) {
+        if (octreeActive && (colorMode == 1 || colorMode == 3)) {
             ImDrawList* dl = ImGui::GetForegroundDrawList();
             auto turboCol = [](float v) {
                 v = std::clamp(v, 0.0f, 1.0f);
@@ -3696,7 +3711,9 @@ int main(int argc, char** argv) {
                                 setActiveCloud(i);
                             }
                             ImGui::SetItemTooltip("%s", cloud.dir.c_str());
-                            ImGui::TextDisabled("%s pts", prettyCount(cloud.store->meta().pointCount).c_str());
+                            const uint64_t cloudPts = cloud.store ? cloud.store->meta().pointCount
+                                                                  : cloud.splatData.count();
+                            ImGui::TextDisabled("%s pts", prettyCount(cloudPts).c_str());
                             ImGui::SameLine();
                             if (ImGui::SmallButton("Close")) closeIndex = i;
                             ImGui::Separator();
@@ -3717,7 +3734,7 @@ int main(int argc, char** argv) {
                 if (ImGui::Begin("Properties", &showProperties)) {
                     // Cloud Info
                     if (ImGui::CollapsingHeader("Cloud Info", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        if (octreeLoaded) {
+                        if (octreeActive) {
                             ImGui::Text("%s", baseName(loadedDir).c_str());
                             ImGui::SetItemTooltip("%s", loadedDir.c_str());
                             ImGui::Text("%s points, %s nodes",
@@ -3978,7 +3995,7 @@ int main(int argc, char** argv) {
                         ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
                         if (ImGui::CollapsingHeader("Clip")) {
                             if (ImGui::Checkbox("Enable Clipping", &enableClipping)) settingsChanged = true;
-                            if (enableClipping && octreeLoaded) {
+                            if (enableClipping && octreeActive) {
                                 float ext = (float)activeStore().cube(activeStore().rootIndex()).size * 2.0f;
                                 if (ImGui::SliderFloat3("Min", clipMin, -ext, ext)) settingsChanged = true;
                                 if (ImGui::SliderFloat3("Max", clipMax, -ext, ext)) settingsChanged = true;
@@ -4170,7 +4187,7 @@ int main(int argc, char** argv) {
                     char overlay[32]; snprintf(overlay, sizeof(overlay), "%.0f FPS", fps);
                     ImGui::PlotLines("##fpsplot", fpsHist, IM_ARRAYSIZE(fpsHist), fpsHistIdx,
                                      overlay, 0.0f, FLT_MAX, ImVec2(-FLT_MIN, 60.0f * S));
-                    if (octreeLoaded) {
+                    if (octreeActive) {
                         ImGui::Separator();
                         ImGui::Text("Visible nodes:  %zu", visibleNodes);
                         ImGui::Text("Drawn nodes:    %zu", drawnNodes);
@@ -4810,7 +4827,8 @@ int main(int argc, char** argv) {
                     const AABB box = currentSliceBox();
                     const int axis = sliceAxisForBox(box);
                     int maxNodeDepth = 0;
-                    for (const NodeRecord& rec : activeStore().nodes()) maxNodeDepth = std::max(maxNodeDepth, (int)rec.level);
+                    if (octreeActive)
+                        for (const NodeRecord& rec : activeStore().nodes()) maxNodeDepth = std::max(maxNodeDepth, (int)rec.level);
                     sliceDepth = std::clamp(sliceDepth, 0, std::max(0, maxNodeDepth));
                     if (sliceFormatIdx != (int)SliceExportFormat::Png) {
                         ImGui::SetNextItemWidth(180.0f * S);
@@ -4822,7 +4840,7 @@ int main(int argc, char** argv) {
                         ImGui::Combo("Image size", &slicePngResIdx, resNames, IM_ARRAYSIZE(resNames));
                     }
 
-                    const uint64_t estimate = (sliceFormatIdx == (int)SliceExportFormat::Png)
+                    const uint64_t estimate = (!octreeActive || sliceFormatIdx == (int)SliceExportFormat::Png)
                                             ? 0
                                             : activeStore().estimatePointsInBox(box, sliceDepth);
                     ImGui::TextDisabled("Slice plane: %c  -  %.3f x %.3f world units",
@@ -5320,12 +5338,14 @@ int main(int argc, char** argv) {
                 if (ImGui::Begin("##statsoverlay", nullptr, of)) {
                     ImGui::Text("FPS %.1f", dt > 0 ? 1.0f / dt : 0.0f);
                     ImGui::Text("Nodes %zu vis / %zu drawn", visibleNodes, drawnNodes);
-                    ImGui::Text("Points %s drawn / %s GPU",
-                                prettyCount(drawnPoints).c_str(),
-                                prettyCount(activeRenderer().pointsOnGpu()).c_str());
-                    ImGui::Text("GPU %.0f / %d MB",
-                                activeRenderer().residentBytes() / (1024.0 * 1024.0), gpuBudgetMB);
-                    ImGui::Text("Queue %zu", activeStore().pendingRequests());
+                    if (octreeActive) {
+                        ImGui::Text("Points %s drawn / %s GPU",
+                                    prettyCount(drawnPoints).c_str(),
+                                    prettyCount(activeRenderer().pointsOnGpu()).c_str());
+                        ImGui::Text("GPU %.0f / %d MB",
+                                    activeRenderer().residentBytes() / (1024.0 * 1024.0), gpuBudgetMB);
+                        ImGui::Text("Queue %zu", activeStore().pendingRequests());
+                    }
                 }
                 ImGui::End();
             }
@@ -5384,6 +5404,7 @@ int main(int argc, char** argv) {
                     if (octreeLoaded) {
                         size_t totalPend = 0;
                         for (auto& s : scene) {
+                            if (!s.store || !s.renderer) continue;   // splat clouds have neither
                             totalMB += s.renderer->residentBytes() / 1048576.0;
                             totalPts += s.store->meta().pointCount;
                             totalPend += s.store->pendingRequests();
