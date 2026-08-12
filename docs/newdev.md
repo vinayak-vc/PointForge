@@ -24,6 +24,7 @@ tree on 2026-07-06.
 | 4 | Cross-section / slice export         | DONE | branch `cross-section-slice-export` | real-model smoke: DXF/CSV/PNG exported from `PointForgeCache_direct`; 871,420 pts; PNG visually verified |
 | 5 | Annotations from phone               | DONE | branch `annotations-from-phone` | remote/local annotate mode, JSON persistence, synced PC/phone UI |
 | 6 | Multi-cloud scene                    | DONE | branch `multi-cloud-scene` (finished on `vxpc/thumbnails`) | SceneCloud vector + scene origin, Scene panel (left dock), remote `clouds` cfg + `cloud_vis` cmd + webremote card; audit fixed 6 scene-space/CSV bugs |
+| 7 | GLB (glTF 2.0) export                 | DONE | branch `testing-application` | `GlbWriter` in pfcore (points + `KHR_gaussian_splatting`), File▸Export▸GLB dialog (Ctrl+E): scope/layout/region/decimation/Y-up; `--export-glb` smoke hook; verified dynamic + static single-file on Tikal-13. FBX deferred behind same enum |
 
 **Recommended order = table order.** Rationale: 1–2 are low-coupling and ship
 user-visible value fast (1 touches only pfcore, 2 touches only RemoteServer +

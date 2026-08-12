@@ -1,5 +1,23 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-08-12) - GLB (glTF 2.0) export (branch `testing-application`)
+
+Added 3D mesh export to GLB (FBX deferred behind the same dialog enum).
+
+- **Writer**: **[GlbWriter.h](file:///c:/UnrealProject/PointForge/src/io/GlbWriter.h)** / **[GlbWriter.cpp](file:///c:/UnrealProject/PointForge/src/io/GlbWriter.cpp)** — dependency-free streaming glTF-2.0 binary writer in pfcore (JSON emitted by hand; pfcore links no JSON lib). Point clouds → `POINTS` primitive (`POSITION` f32 + `COLOR_0` u8-normalized, optional `_INTENSITY`/`_CLASSIFICATION`); Gaussian splats → **`KHR_gaussian_splatting`** (`ROTATION` reordered w,x,y,z→x,y,z,w, `SCALE`, `OPACITY`, `SH_DEGREE_0_COEF_0 = (colour-0.5)/0.2820948`). Z-up→Y-up as a single parent-node rotation (per-vertex data stays source-space, lossless); true world origin in `asset.extras`.
+- **Viewer wiring** (`main.cpp`): `SliceExportFormat::Glb`, `GlbSourceCloud`/`GlbExportSpec`/`glbExportWorker` at file scope, `startGlbExport` launcher, File▸Export▸GLB dialog (Ctrl+E) + command-palette entry, reusing the slice `sliceJobs`/progress/cancel plumbing. Dialog options: scope (all/visible/active), layout (separate nodes / merge / one file per cloud — merge fuses like-with-like), region (whole/clip box), decimation (LOD depth OR voxel + max-point budget), Y-up + intensity/class toggles.
+- **Smoke hook**: `--export-glb <out.glb>` — whole cloud, LOD-capped, ≤5M primitives, quits when done (via `sliceHookArmed`).
+- **Verified**: dynamic build (`ViitorXPCViewer_v1074.exe`) + static single-file build (`ViitorXPCViewer_v1075.exe`, 14.9 MB, no third-party DLLs). Standalone writer unit test (mixed point+splat) passes structural + KHR + Y-up + SH0/quaternion-roundtrip checks. `--export-glb` on `Tikal-13.vxpc` (both builds): exit 0, valid GLB, 5,000,000 pts, precision-safe local coords.
+- **Env note**: `C:/vcpkg` was missing; junctioned to VS-bundled vcpkg and built with `-DVCPKG_MANIFEST_INSTALL=OFF` (deps already in `build/` + `build-static/vcpkg_installed`). See memory `build-vcpkg-junction`.
+
+### Modified / new files
+- `src/io/GlbWriter.h` (NEW), `src/io/GlbWriter.cpp` (NEW)
+- `src/viewer/main.cpp`, `CMakeLists.txt`
+- `docs/architecture.md`, `docs/decisions.md`, `docs/newdev.md`, `docs/tasks.md`, `docs/ai_handoff.md`
+
+### Next recommended task
+- FBX export behind the same dialog enum (ASCII FBX = zero-dep, or Autodesk FBX SDK); reuse `glbExportWorker` decimation/scope/merge pipeline. Optional: `KHR_gaussian_splatting` importer interop check in a real viewer (draft extension).
+
 ## Session (2026-07-28) - 3D Gaussian Splatting (3DGS) Phases 1-8 Complete (branch `feat/3dgs-phase1`)
 
 Completed all **8 Phases of 3D Gaussian Splatting (3DGS)** in ViitorX PointCloud Viewer (`PointForge`):
