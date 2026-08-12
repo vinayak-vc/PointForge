@@ -287,16 +287,34 @@ Z-up→Y-up (glTF's standard up axis) is a rotation on a single **parent node** 
 per-vertex data — including splat orientations — stays in source space. The true
 world origin is recorded in `asset.extras`.
 
-The viewer wires this through the File ▸ Export ▸ GLB dialog (Ctrl+E), reusing the
-slice export's background-job / progress / cancel plumbing. Dialog options cover
-every multi-cloud scenario: **scope** (all / visible / active), **layout**
-(separate nodes in one file · merge to one mesh · one file per cloud — merge only
-fuses like-with-like), **region** (whole cloud / clip box), **decimation** (LOD
-depth cap or voxel downsample, plus a max-point budget), Y-up toggle, and an
-intensity+classification toggle. Octree clouds stream through
-`forEachPointInBox`; splat clouds iterate `SplatCloudData`. The permanent
-`--export-glb <out.glb>` smoke hook drives the whole path headlessly
-(whole-cloud, LOD-capped, ≤5M primitives) and quits when the job finishes.
+The viewer wires this through the File ▸ Export dialog (Ctrl+E; a Format combo
+selects GLB or FBX), reusing the slice export's background-job / progress /
+cancel plumbing. Dialog options cover every multi-cloud scenario: **scope**
+(all / visible / active), **layout** (separate nodes in one file · merge to one
+mesh · one file per cloud — merge only fuses like-with-like), **region** (whole
+cloud / clip box), **decimation** (LOD depth cap or voxel downsample, plus a
+max-point budget), Y-up toggle, and an intensity+classification toggle (GLB
+only). Octree clouds stream through `forEachPointInBox`; splat clouds iterate
+`SplatCloudData`. The permanent `--export-glb <out.glb>` smoke hook drives the
+whole path headlessly (whole-cloud, LOD-capped, ≤5M primitives) and quits when
+the job finishes.
+
+### FBX (ASCII)
+
+`src/io/FbxWriter.{h,cpp}` writes ASCII FBX 7400 for general DCC tools (Unity /
+Blender / Unreal). FBX has no point-cloud primitive, so — like CloudCompare —
+each cloud is a `Mesh` whose **control points are the points and which has no
+polygons**, with per-point colour on a `LayerElementColor` (`ByControlPoint` /
+`Direct`). Gaussian splats **degrade to coloured points** (centroid + diffuse
+colour); intensity/classification are dropped (no FBX slot) — GLB remains the
+lossless path. Z-up→Y-up is **baked into the vertices** (points carry no
+orientation) with `GlobalSettings.UpAxis` set to match; units are metres
+(`UnitScaleFactor = 100`); the true world origin rides in the Model's user
+properties. ASCII keeps the writer dependency-free at the cost of file size
+(bounded by the shared decimation / max-point budget). The whole pipeline is
+format-agnostic — a single generic fill loop in `meshExportWorker` drives either
+`GlbWriter` or `FbxWriter` — and the `--export-fbx <out.fbx>` smoke hook mirrors
+`--export-glb`.
 
 ## 10. Extension points (deliberate TODOs)
 

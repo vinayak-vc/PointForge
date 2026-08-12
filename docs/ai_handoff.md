@@ -1,5 +1,22 @@
 # AI Handoff - PointForge (C++ repo)
 
+## Session (2026-08-12b) - FBX (ASCII) export (branch `testing-application`)
+
+Added FBX export beside GLB; the pipeline is now format-agnostic.
+
+- **Writer**: **[FbxWriter.h](file:///c:/UnrealProject/PointForge/src/io/FbxWriter.h)** / **[FbxWriter.cpp](file:///c:/UnrealProject/PointForge/src/io/FbxWriter.cpp)** — dependency-free ASCII FBX 7400. Each cloud = a `Mesh` with control points (no polygons) + per-point `LayerElementColor` (ByControlPoint/Direct), CloudCompare-style. Splats degrade to coloured points; intensity/class dropped. Z-up→Y-up baked into vertices + `GlobalSettings.UpAxis`; metres (`UnitScaleFactor=100`); true origin in Model `PF_WorldOrigin`.
+- **Shared pipeline**: `glbExportWorker` → **`meshExportWorker`**; fill loop is now a C++17 generic lambda driving either `GlbWriter` or `FbxWriter`; branch only on `GlbExportSpec::fbx` for options/finish. Export dialog gained a Format combo (retitled "Export Mesh"); `SliceExportFormat::Fbx`; File▸Export▸FBX menu + palette entries; FBX-aware browse filter, notes, disabled intensity/class toggle.
+- **Smoke hook**: `--export-fbx <out.fbx>` (unified with `--export-glb` in one hook block).
+- **Verified**: dynamic (`v1076`) + static single-file (`v1077`). `--export-fbx` on `Tikal-13.vxpc` (both): exit 0, valid ASCII FBX 7400, UpAxis=1, 1 Geometry/1 Model/2 connections, 5,000,000 control points, Colors=points×4. ASCII is bulky (~285 MB / 5M pts) — bound via decimation/budget.
+
+### Modified / new files
+- `src/io/FbxWriter.h` (NEW), `src/io/FbxWriter.cpp` (NEW)
+- `src/viewer/main.cpp`, `CMakeLists.txt`
+- `docs/architecture.md`, `docs/decisions.md`, `docs/newdev.md`, `docs/tasks.md`, `docs/ai_handoff.md`, `CLAUDE.md`
+
+### Next recommended task
+- Optional: binary FBX (smaller files) or a faces/quad-splat mode for importers that need polygons. Real-app import check (Unity/Blender/Unreal) of both GLB + FBX.
+
 ## Session (2026-08-12) - GLB (glTF 2.0) export (branch `testing-application`)
 
 Added 3D mesh export to GLB (FBX deferred behind the same dialog enum).

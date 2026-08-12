@@ -233,6 +233,7 @@ add_library(pfcore STATIC
     src/io/E57Reader.cpp
     src/io/DxfWriter.cpp
     src/io/GlbWriter.cpp
+    src/io/FbxWriter.cpp
     src/io/SplatReader.cpp
     src/io/ReaderFactory.cpp
     src/indexer/Chunker.cpp
