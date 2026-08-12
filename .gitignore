@@ -23,3 +23,7 @@ compile_commands.json
 /src/viewer/Version.h
 
 *.zip
+
+build-dll/
+scratch/
+docs/ppt/

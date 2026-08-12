@@ -270,6 +270,34 @@ nodes to settle, writes PNG via the existing encoder, and restores camera/clip
 state. The permanent `--export-slice <prefix>` smoke hook validates all three
 formats against a real octree without manual UI clicks.
 
+### 3D mesh export — GLB (glTF 2.0)
+
+`src/io/GlbWriter.{h,cpp}` is a dependency-free streaming glTF-2.0 binary writer
+in pfcore (JSON chunk hand-emitted; pfcore links no JSON library). Point clouds
+map onto a `POINTS` primitive (`POSITION` float + `COLOR_0` unsigned-byte
+normalized, plus optional custom `_INTENSITY` / `_CLASSIFICATION` attributes);
+Gaussian splats map onto the Khronos **`KHR_gaussian_splatting`** extension
+(`POSITION` + `KHR_gaussian_splatting:{ROTATION,SCALE,OPACITY,SH_DEGREE_0_COEF_0}`
+on a `POINTS` primitive — lossless: rotation, scale, opacity and SH degree-0
+colour are all preserved). No triangulation; the data is pure points/splats.
+
+Coordinate handling keeps float precision: positions are stored relative to a
+per-cloud origin, each cloud is a child node translated by its `worldOffset`, and
+Z-up→Y-up (glTF's standard up axis) is a rotation on a single **parent node** so
+per-vertex data — including splat orientations — stays in source space. The true
+world origin is recorded in `asset.extras`.
+
+The viewer wires this through the File ▸ Export ▸ GLB dialog (Ctrl+E), reusing the
+slice export's background-job / progress / cancel plumbing. Dialog options cover
+every multi-cloud scenario: **scope** (all / visible / active), **layout**
+(separate nodes in one file · merge to one mesh · one file per cloud — merge only
+fuses like-with-like), **region** (whole cloud / clip box), **decimation** (LOD
+depth cap or voxel downsample, plus a max-point budget), Y-up toggle, and an
+intensity+classification toggle. Octree clouds stream through
+`forEachPointInBox`; splat clouds iterate `SplatCloudData`. The permanent
+`--export-glb <out.glb>` smoke hook drives the whole path headlessly
+(whole-cloud, LOD-capped, ≤5M primitives) and quits when the job finishes.
+
 ## 10. Extension points (deliberate TODOs)
 
 * **LAZ via PDAL**: `laszip_api` covers LAS/LAZ directly; swap to PDAL if you need

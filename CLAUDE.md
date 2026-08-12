@@ -61,7 +61,14 @@ Keys: LMB orbit, 2xLMB focus, RMB look, WASD+QE fly (Shift fast), wheel zoom,
 Ctrl+wheel point size, F frame, M measure, C clip, 1/3/7 view presets, 5 ortho,
 F1 shortcuts, Ctrl+P command palette, F3 stats HUD, F5 or Shift+Space hide UI,
 F9 stereoscopic SBS (hides ALL UI; F9/Esc exits), F11 fullscreen, Ctrl+O open,
-Ctrl+I convert, Ctrl+, preferences, Esc Esc quit.
+Ctrl+I convert, Ctrl+E export GLB, Ctrl+, preferences, Esc Esc quit.
+
+Export: 2D slice → DXF/PNG/CSV (Properties > Clip). 3D mesh → GLB/glTF 2.0
+(File > Export > GLB, Ctrl+E): point clouds as POINTS, Gaussian splats via
+KHR_gaussian_splatting; scope/layout(separate|merge|per-file)/region/decimation
+options; writer is `src/io/GlbWriter.{h,cpp}` in pfcore. FBX not yet implemented
+(reserved behind the same `SliceExportFormat::Glb` dialog enum). Smoke hooks:
+`--export-slice <prefix>`, `--export-glb <out.glb>`, `--export-video <out.mp4>`.
 
 `pfconvert` flags (arg parsing in src/tools/pfconvert/main.cpp; `--out` required):
 - `--out <dir>`        output octree directory (created if missing)

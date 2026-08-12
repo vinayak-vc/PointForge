@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <cctype>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -37,24 +38,43 @@ static float sigmoid(float x) {
 }
 
 SplatFileFormat SplatReader::detectFormat(const std::string& path) {
-    if (path.length() >= 6 && path.substr(path.length() - 6) == ".splat") {
-        return SplatFileFormat::SplatBinary;
-    }
-    if (path.length() >= 4 && path.substr(path.length() - 4) == ".ply") {
-        return SplatFileFormat::PlyGaussians;
+    auto endsWithCI = [](const std::string& s, const char* suffix) {
+        size_t n = std::strlen(suffix);
+        if (s.size() < n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            if (std::tolower((unsigned char)s[s.size() - n + i]) != (unsigned char)suffix[i])
+                return false;
+        }
+        return true;
+    };
+
+    // .splat is unambiguous: a gsplat-only 32-byte stride binary.
+    if (endsWithCI(path, ".splat")) return SplatFileFormat::SplatBinary;
+
+    // A .ply may be a 3DGS cloud OR a plain LiDAR/mesh PLY. Sniff the header
+    // for gaussian-specific properties before claiming it as a splat cloud.
+    if (endsWithCI(path, ".ply")) {
+        std::ifstream file(path, std::ios::binary);
+        if (file.is_open()) {
+            std::string line;
+            int guard = 0;
+            while (std::getline(file, line) && guard++ < 512) {
+                if (line.rfind("property", 0) == 0 &&
+                    (line.find("f_dc_") != std::string::npos ||
+                     line.find("scale_") != std::string::npos ||
+                     line.find("rot_")  != std::string::npos)) {
+                    return SplatFileFormat::PlyGaussians;
+                }
+                if (line.rfind("end_header", 0) == 0) break;
+            }
+        }
+        return SplatFileFormat::Unknown;  // plain PLY, not a gaussian cloud
     }
 
-    // Try reading header bytes
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) return SplatFileFormat::Unknown;
-
-    char header[14] = {0};
-    file.read(header, 14);
-    if (std::memcmp(header, "ply\n", 4) == 0 || std::memcmp(header, "ply\r\n", 5) == 0) {
-        return SplatFileFormat::PlyGaussians;
-    }
-
-    return SplatFileFormat::SplatBinary;
+    // Everything else (.vxpc packages, octree directories, LAS/E57, ...) is
+    // NOT a standalone splat file. Never default to SplatBinary here or a
+    // whole package gets mis-parsed as raw gaussians.
+    return SplatFileFormat::Unknown;
 }
 
 SplatCloudData SplatReader::loadFromFile(const std::string& path) {

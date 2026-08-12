@@ -97,9 +97,14 @@ void SplatRenderer::upload(const SplatCloudData& data) {
     records_.clear();
     records_.reserve(data.splats.size());
 
+    // Upload positions RELATIVE to the cloud centre for GPU float precision
+    // (mirrors the octree cube-centre convention). main.cpp then places the
+    // cloud with worldOffset = centre - sceneOrigin, so world = rel + centre.
     for (const auto& s : data.splats) {
         GpuSplatRecord rec;
-        rec.position = glm::vec3(s.position.x, s.position.y, s.position.z);
+        rec.position = glm::vec3((float)(s.position.x - data.center.x),
+                                 (float)(s.position.y - data.center.y),
+                                 (float)(s.position.z - data.center.z));
         rec.scale = glm::vec3(s.scale.x, s.scale.y, s.scale.z);
         rec.rot = glm::vec4(s.quaternion[0], s.quaternion[1], s.quaternion[2], s.quaternion[3]);
         rec.opacity = s.opacity;
