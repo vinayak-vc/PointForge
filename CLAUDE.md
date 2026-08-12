@@ -63,12 +63,15 @@ F1 shortcuts, Ctrl+P command palette, F3 stats HUD, F5 or Shift+Space hide UI,
 F9 stereoscopic SBS (hides ALL UI; F9/Esc exits), F11 fullscreen, Ctrl+O open,
 Ctrl+I convert, Ctrl+E export GLB, Ctrl+, preferences, Esc Esc quit.
 
-Export: 2D slice → DXF/PNG/CSV (Properties > Clip). 3D mesh → GLB/glTF 2.0
-(File > Export > GLB, Ctrl+E): point clouds as POINTS, Gaussian splats via
-KHR_gaussian_splatting; scope/layout(separate|merge|per-file)/region/decimation
-options; writer is `src/io/GlbWriter.{h,cpp}` in pfcore. FBX not yet implemented
-(reserved behind the same `SliceExportFormat::Glb` dialog enum). Smoke hooks:
-`--export-slice <prefix>`, `--export-glb <out.glb>`, `--export-video <out.mp4>`.
+Export: 2D slice → DXF/PNG/CSV (Properties > Clip). 3D mesh → GLB/glTF 2.0 or
+FBX (File > Export > GLB/FBX, Ctrl+E; Format combo in the dialog). GLB: point
+clouds as POINTS, Gaussian splats via KHR_gaussian_splatting (lossless), writer
+`src/io/GlbWriter.{h,cpp}`. FBX: ASCII 7400 vertex-only mesh + per-point colour
+(Unity/Blender/Unreal), splats degrade to points, no intensity/class, writer
+`src/io/FbxWriter.{h,cpp}`. Both share the dialog + `meshExportWorker` pipeline
+(scope/layout(separate|merge|per-file)/region/decimation) in pfcore. Smoke hooks:
+`--export-slice <prefix>`, `--export-glb <out.glb>`, `--export-fbx <out.fbx>`,
+`--export-video <out.mp4>`.
 
 `pfconvert` flags (arg parsing in src/tools/pfconvert/main.cpp; `--out` required):
 - `--out <dir>`        output octree directory (created if missing)

@@ -55,6 +55,7 @@
 #include "common/FileDialog.h"
 #include "io/DxfWriter.h"
 #include "io/GlbWriter.h"
+#include "io/FbxWriter.h"
 #include "io/PackageFormat.h"
 #include "io/SplatReader.h"
 #include "viewer/SplatRenderer.h"
@@ -264,7 +265,7 @@ struct Toast {
     bool        isError = false;
 };
 
-enum class SliceExportFormat { Dxf = 0, Png = 1, Csv = 2, Glb = 3 };
+enum class SliceExportFormat { Dxf = 0, Png = 1, Csv = 2, Glb = 3, Fbx = 4 };
 
 static int sliceAxisForBox(const AABB& box) {
     Vec3d size = box.size();
@@ -277,6 +278,7 @@ static const char* sliceFormatName(SliceExportFormat format) {
     if (format == SliceExportFormat::Dxf) return "DXF";
     if (format == SliceExportFormat::Png) return "PNG";
     if (format == SliceExportFormat::Glb) return "GLB";
+    if (format == SliceExportFormat::Fbx) return "FBX";
     return "CSV";
 }
 
@@ -370,6 +372,7 @@ struct GlbExportSpec {
     double                      voxelSize = 0.05;
     uint64_t                    maxPoints = 0;    // 0 = unlimited budget
     std::string                 sourceLabel;
+    bool                        fbx = false;      // false = GLB, true = ASCII FBX
 };
 
 // Voxel-grid dedup key: 21 bits per axis around a biased origin (~±1M voxels
@@ -386,17 +389,12 @@ static inline uint64_t glbVoxelKey(const Vec3d& p, double inv) {
 }
 
 // Runs on a worker thread. Streams each source cloud through the decimation
-// pipeline into a GlbWriter, honouring cancel/progress on the shared job.
-static void glbExportWorker(std::shared_ptr<SliceExportJob> job, GlbExportSpec spec) {
+// pipeline into a mesh writer (GLB or FBX), honouring cancel/progress on the
+// shared job. GlbWriter and FbxWriter share the same beginCloud/addPoint/
+// addSplat surface, so the fill loop is a single generic lambda; only writer
+// construction, options and finish() differ per format.
+static void meshExportWorker(std::shared_ptr<SliceExportJob> job, GlbExportSpec spec) {
     try {
-        GlbWriter writer;
-        GlbWriter::Options opts;
-        opts.yUp = spec.yUp;
-        opts.includeIntensity = spec.includeAttrs;
-        opts.includeClassification = spec.includeAttrs;
-        opts.origin = spec.origin;
-        opts.sourceName = spec.sourceLabel;
-
         uint64_t denom = 0;
         for (const GlbSourceCloud& s : spec.sources) denom += std::max<uint64_t>(s.estimate, 1);
         denom = std::max<uint64_t>(denom, 1);
@@ -413,51 +411,74 @@ static void glbExportWorker(std::shared_ptr<SliceExportJob> job, GlbExportSpec s
             return n;
         };
 
-        // Merge mode collects all like-with-like geometry under one node.
-        if (spec.merge) writer.beginCloud("Merged", Vec3d(0, 0, 0), spec.origin);
+        // Format-agnostic fill: identical calls resolve against whichever writer.
+        auto fill = [&](auto& writer) {
+            if (spec.merge) writer.beginCloud("Merged", Vec3d(0, 0, 0), spec.origin);
+            for (const GlbSourceCloud& src : spec.sources) {
+                if (job->cancelFlag.load()) break;
+                if (!spec.merge) writer.beginCloud(src.name, src.nodeTranslation, src.center);
 
-        for (const GlbSourceCloud& src : spec.sources) {
-            if (job->cancelFlag.load()) break;
-            if (!spec.merge) writer.beginCloud(src.name, src.nodeTranslation, src.center);
-
-            if (!src.isSplat && src.store) {
-                AABB box = src.region;
-                if (!src.useRegion) {
-                    const glm::dvec3 c = src.store->cubeCenter();
-                    const double h = src.store->meta().cubeSize;
-                    box.min = Vec3d(c.x - h, c.y - h, c.z - h);
-                    box.max = Vec3d(c.x + h, c.y + h, c.z + h);
-                }
-                src.store->forEachPointInBox(
-                    box, src.maxDepth, &job->cancelFlag,
-                    [&](const Point& pt) -> bool {
-                        if (spec.voxel && inv > 0.0 &&
-                            !voxels.insert(glbVoxelKey(pt.position, inv)).second)
-                            return !job->cancelFlag.load();
-                        writer.addPoint(pt.position,
-                                        (uint8_t)(pt.r >> 8), (uint8_t)(pt.g >> 8),
-                                        (uint8_t)(pt.b >> 8), pt.intensity, pt.classification);
-                        const uint64_t n = tick();
-                        if (spec.maxPoints && n >= spec.maxPoints) return false;
-                        return !job->cancelFlag.load();
-                    });
-            } else if (src.isSplat && src.splat) {
-                for (const GaussianSplat& g : src.splat->splats) {
-                    if (job->cancelFlag.load()) break;
-                    if (src.useRegion) {
-                        const Vec3d& p = g.position;
-                        if (p.x < src.region.min.x || p.x > src.region.max.x ||
-                            p.y < src.region.min.y || p.y > src.region.max.y ||
-                            p.z < src.region.min.z || p.z > src.region.max.z) continue;
+                if (!src.isSplat && src.store) {
+                    AABB box = src.region;
+                    if (!src.useRegion) {
+                        const glm::dvec3 c = src.store->cubeCenter();
+                        const double h = src.store->meta().cubeSize;
+                        box.min = Vec3d(c.x - h, c.y - h, c.z - h);
+                        box.max = Vec3d(c.x + h, c.y + h, c.z + h);
                     }
-                    if (spec.voxel && inv > 0.0 &&
-                        !voxels.insert(glbVoxelKey(g.position, inv)).second) continue;
-                    writer.addSplat(g);
-                    const uint64_t n = tick();
-                    if (spec.maxPoints && n >= spec.maxPoints) break;
+                    src.store->forEachPointInBox(
+                        box, src.maxDepth, &job->cancelFlag,
+                        [&](const Point& pt) -> bool {
+                            if (spec.voxel && inv > 0.0 &&
+                                !voxels.insert(glbVoxelKey(pt.position, inv)).second)
+                                return !job->cancelFlag.load();
+                            writer.addPoint(pt.position,
+                                            (uint8_t)(pt.r >> 8), (uint8_t)(pt.g >> 8),
+                                            (uint8_t)(pt.b >> 8), pt.intensity, pt.classification);
+                            const uint64_t n = tick();
+                            if (spec.maxPoints && n >= spec.maxPoints) return false;
+                            return !job->cancelFlag.load();
+                        });
+                } else if (src.isSplat && src.splat) {
+                    for (const GaussianSplat& g : src.splat->splats) {
+                        if (job->cancelFlag.load()) break;
+                        if (src.useRegion) {
+                            const Vec3d& p = g.position;
+                            if (p.x < src.region.min.x || p.x > src.region.max.x ||
+                                p.y < src.region.min.y || p.y > src.region.max.y ||
+                                p.z < src.region.min.z || p.z > src.region.max.z) continue;
+                        }
+                        if (spec.voxel && inv > 0.0 &&
+                            !voxels.insert(glbVoxelKey(g.position, inv)).second) continue;
+                        writer.addSplat(g);
+                        const uint64_t n = tick();
+                        if (spec.maxPoints && n >= spec.maxPoints) break;
+                    }
                 }
+                if (spec.maxPoints && job->exported.load() >= spec.maxPoints) break;
             }
-            if (spec.maxPoints && job->exported.load() >= spec.maxPoints) break;
+        };
+
+        bool ok = false;
+        std::string err;
+        if (spec.fbx) {
+            FbxWriter writer;
+            FbxWriter::Options opts;
+            opts.yUp = spec.yUp;
+            opts.origin = spec.origin;
+            opts.sourceName = spec.sourceLabel;
+            fill(writer);
+            if (!job->cancelFlag.load()) { ok = writer.finish(spec.output, opts); err = writer.error(); }
+        } else {
+            GlbWriter writer;
+            GlbWriter::Options opts;
+            opts.yUp = spec.yUp;
+            opts.includeIntensity = spec.includeAttrs;
+            opts.includeClassification = spec.includeAttrs;
+            opts.origin = spec.origin;
+            opts.sourceName = spec.sourceLabel;
+            fill(writer);
+            if (!job->cancelFlag.load()) { ok = writer.finish(spec.output, opts); err = writer.error(); }
         }
 
         if (job->cancelFlag.load()) {
@@ -466,8 +487,8 @@ static void glbExportWorker(std::shared_ptr<SliceExportJob> job, GlbExportSpec s
             job->state = SliceExportJob::State::Canceled;
             return;
         }
-        if (!writer.finish(spec.output, opts)) {
-            job->setMessage(writer.error());
+        if (!ok) {
+            job->setMessage(err);
             job->state = SliceExportJob::State::Failed;
             return;
         }
@@ -478,7 +499,7 @@ static void glbExportWorker(std::shared_ptr<SliceExportJob> job, GlbExportSpec s
         job->setMessage(std::string("Exception: ") + ex.what());
         job->state = SliceExportJob::State::Failed;
     } catch (...) {
-        job->setMessage("Unknown exception during GLB export");
+        job->setMessage("Unknown exception during mesh export");
         job->state = SliceExportJob::State::Failed;
     }
 }
@@ -539,6 +560,8 @@ int main(int argc, char** argv) {
     // the exact Export-GLB dialog code path (whole cloud, LOD-capped, <=5M pts),
     // then quit when the job finishes. Smoke-test hook for the GLB pipeline.
     std::string exportGlbOnStart;
+    // --export-fbx <out.fbx>: same as --export-glb but writes ASCII FBX.
+    std::string exportFbxOnStart;
     // Simple argument parsing
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -552,6 +575,8 @@ int main(int argc, char** argv) {
             exportSliceOnStart = argv[++i];
         } else if (strcmp(a, "--export-glb") == 0 && i + 1 < argc) {
             exportGlbOnStart = argv[++i];
+        } else if (strcmp(a, "--export-fbx") == 0 && i + 1 < argc) {
+            exportFbxOnStart = argv[++i];
         } else if (i == 1) {
             // First positional argument interpreted as initial directory
             initialDir = a;
@@ -2008,6 +2033,7 @@ int main(int argc, char** argv) {
     int   glbMaxPointsM   = 20;   // point/splat budget in millions (0 = unlimited)
     bool  glbYUp          = true; // convert Z-up -> glTF Y-up
     bool  glbIncludeAttrs = false;// _INTENSITY + _CLASSIFICATION custom attrs
+    int   glbFormatIdx    = 0;    // 0 = GLB (glTF 2.0), 1 = FBX (ASCII)
     char  glbPathBuf[512] = "";
 
     auto glbSanitize = [](const std::string& s) {
@@ -2059,17 +2085,30 @@ int main(int argc, char** argv) {
         return s;
     };
 
+    // Strip any trailing .glb/.fbx (case-insensitive) and append the format ext.
+    auto glbWithExt = [](std::string path, const char* ext) {
+        auto ends = [&](const char* e) {
+            const size_t n = strlen(e);
+            if (path.size() < n) return false;
+            for (size_t k = 0; k < n; ++k)
+                if (std::tolower((unsigned char)path[path.size() - n + k]) != e[k]) return false;
+            return true;
+        };
+        if (ends(".glb") || ends(".fbx")) path = path.substr(0, path.size() - 4);
+        return path + "." + ext;
+    };
+
     auto launchGlbJob = [&](GlbExportSpec spec, const std::string& out, uint64_t est) {
         std::shared_ptr<SliceExportJob> job = std::make_shared<SliceExportJob>();
         job->output = out;
         job->name = baseName(out);
-        job->format = SliceExportFormat::Glb;
+        job->format = spec.fbx ? SliceExportFormat::Fbx : SliceExportFormat::Glb;
         job->estimated = est;
         job->setMessage("Starting...");
         sliceJobs.push_back(job);
         showJobsPanel = true;
         spec.output = out;
-        job->worker = std::thread(glbExportWorker, job, std::move(spec));
+        job->worker = std::thread(meshExportWorker, job, std::move(spec));
     };
 
     auto startGlbExport = [&]() {
@@ -2078,9 +2117,11 @@ int main(int argc, char** argv) {
         if (useRegion) regionBox = currentSliceBox();
         const bool voxel = (glbDecimIdx == 1);
         const int maxDepth = glbDepth;
+        const bool fbx = (glbFormatIdx == 1);
+        const char* ext = fbx ? "fbx" : "glb";
         const uint64_t maxPoints = (uint64_t)std::max(0, glbMaxPointsM) * 1000000ull;
         const std::vector<int> idxs = glbScopeIndices();
-        if (idxs.empty()) { addToast("GLB export: no clouds in scope", "", true); return; }
+        if (idxs.empty()) { addToast("Mesh export: no clouds in scope", "", true); return; }
         const Vec3d origin(sceneOrigin.x, sceneOrigin.y, sceneOrigin.z);
 
         if (glbLayoutIdx == (int)GlbLayout::PerFile) {
@@ -2099,10 +2140,11 @@ int main(int argc, char** argv) {
                 spec.voxel = voxel;
                 spec.voxelSize = (double)glbVoxel;
                 spec.maxPoints = maxPoints;
+                spec.fbx = fbx;
                 spec.sourceLabel = s.name;
                 const uint64_t est = s.estimate;
                 spec.sources.push_back(std::move(s));
-                const std::string out = base + "_" + glbSanitize(spec.sourceLabel) + ".glb";
+                const std::string out = base + "_" + glbSanitize(spec.sourceLabel) + "." + ext;
                 launchGlbJob(std::move(spec), out, est);
             }
         } else {
@@ -2114,6 +2156,7 @@ int main(int argc, char** argv) {
             spec.voxel = voxel;
             spec.voxelSize = (double)glbVoxel;
             spec.maxPoints = maxPoints;
+            spec.fbx = fbx;
             spec.sourceLabel = baseName(glbPathBuf);
             uint64_t est = 0;
             for (int i : idxs) {
@@ -2121,7 +2164,7 @@ int main(int argc, char** argv) {
                 est += s.estimate;
                 spec.sources.push_back(std::move(s));
             }
-            launchGlbJob(std::move(spec), glbPathBuf, est);
+            launchGlbJob(std::move(spec), glbWithExt(glbPathBuf, ext), est);
         }
     };
 
@@ -2170,13 +2213,17 @@ int main(int argc, char** argv) {
         showJobsPanel = true;
     }
 
-    // --export-glb smoke hook: drive the Export-GLB dialog code path headlessly.
-    // Whole cloud, all clouds in scope, LOD-capped and bounded to ~5M points so
-    // the smoke output stays small; quits via sliceHookArmed once the job ends.
-    if (!exportGlbOnStart.empty() && octreeLoaded) {
-        std::string out = exportGlbOnStart;
-        if (out.size() < 4 || out.substr(out.size() - 4) != ".glb") out += ".glb";
+    // --export-glb / --export-fbx smoke hook: drive the Export dialog code path
+    // headlessly. Whole cloud, all clouds in scope, LOD-capped and bounded to
+    // ~5M primitives so the smoke output stays small; quits via sliceHookArmed
+    // once the job ends.
+    if ((!exportGlbOnStart.empty() || !exportFbxOnStart.empty()) && octreeLoaded) {
+        const bool hookFbx = exportGlbOnStart.empty();
+        const char* ext = hookFbx ? ".fbx" : ".glb";
+        std::string out = hookFbx ? exportFbxOnStart : exportGlbOnStart;
+        if (out.size() < 4 || out.substr(out.size() - 4) != ext) out += ext;
         snprintf(glbPathBuf, sizeof(glbPathBuf), "%s", out.c_str());
+        glbFormatIdx = hookFbx ? 1 : 0;
         glbScopeIdx  = (int)GlbScope::All;
         glbLayoutIdx = (int)GlbLayout::SeparateNodes;
         glbRegionIdx = 0;   // whole cloud
@@ -2189,7 +2236,8 @@ int main(int argc, char** argv) {
         glbMaxPointsM   = 5;      // bound the smoke output
         glbYUp          = true;
         glbIncludeAttrs = true;
-        logInfo("--export-glb: whole-cloud GLB (depth " + std::to_string(glbDepth) +
+        logInfo(std::string(hookFbx ? "--export-fbx" : "--export-glb") +
+                ": whole-cloud (depth " + std::to_string(glbDepth) +
                 ", <=5M primitives) -> " + out);
         startGlbExport();
         sliceHookArmed = true;
@@ -2954,9 +3002,11 @@ int main(int argc, char** argv) {
             job->notified = true;
             joinSliceJob(job);
             const SliceExportJob::State state = job->state.load();
-            // GLB exports the whole cloud, not a slice — drop the "slice" word.
-            const std::string what = job->format == SliceExportFormat::Glb
-                                   ? std::string("GLB export")
+            // Mesh exports cover the whole cloud, not a slice — drop "slice".
+            const bool isMesh = job->format == SliceExportFormat::Glb ||
+                                job->format == SliceExportFormat::Fbx;
+            const std::string what = isMesh
+                                   ? std::string(sliceFormatName(job->format)) + " export"
                                    : std::string(sliceFormatName(job->format)) + " slice export";
             if (state == SliceExportJob::State::Succeeded) {
                 addToast(what + " done: " + job->name, "", false, job->output);
@@ -3808,15 +3858,17 @@ int main(int argc, char** argv) {
                     if (ImGui::MenuItem("Convert a Scan...", "Ctrl+I")) openConvertDialog("");
                     ImGui::Separator();
                     if (ImGui::BeginMenu("Export", octreeLoaded)) {
-                        if (ImGui::MenuItem("GLB (glTF 2.0)...", "Ctrl+E")) {
-                            if (glbPathBuf[0] == 0) {
-                                std::string def = baseName(loadedDir);
-                                if (def.empty()) def = "export";
-                                snprintf(glbPathBuf, sizeof(glbPathBuf), "%s.glb", def.c_str());
-                            }
+                        auto openMeshExport = [&](int fmt, const char* ext) {
+                            glbFormatIdx = fmt;
+                            std::string def = baseName(loadedDir);
+                            if (def.empty()) def = "export";
+                            snprintf(glbPathBuf, sizeof(glbPathBuf), "%s.%s", def.c_str(), ext);
                             showGlbExportDialog = true;
-                        }
-                        ImGui::SetItemTooltip("Export loaded point clouds / Gaussian splats as a .glb mesh");
+                        };
+                        if (ImGui::MenuItem("GLB (glTF 2.0)...", "Ctrl+E")) openMeshExport(0, "glb");
+                        ImGui::SetItemTooltip("Point clouds + Gaussian splats (lossless via KHR_gaussian_splatting)");
+                        if (ImGui::MenuItem("FBX (ASCII)...")) openMeshExport(1, "fbx");
+                        ImGui::SetItemTooltip("Points as a vertex mesh + colours (Unity/Blender/Unreal). Splats degrade to points; no intensity/class.");
                         ImGui::EndMenu();
                     }
                     ImGui::Separator();
@@ -5254,8 +5306,13 @@ int main(int argc, char** argv) {
                                                vp->WorkPos.y + vp->WorkSize.y * 0.45f),
                                         ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
                 ImGui::SetNextWindowSize(ImVec2(440.0f * S, 0.0f), ImGuiCond_Appearing);
-                if (ImGui::Begin("Export GLB", &showGlbExportDialog,
+                if (ImGui::Begin("Export Mesh", &showGlbExportDialog,
                                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
+                    const char* fmtNames[] = { "GLB (glTF 2.0)", "FBX (ASCII)" };
+                    ImGui::SetNextItemWidth(240.0f * S);
+                    ImGui::Combo("Format", &glbFormatIdx, fmtNames, IM_ARRAYSIZE(fmtNames));
+                    const bool fbx = (glbFormatIdx == 1);
+
                     const char* scopeNames[] = { "All clouds", "Visible only", "Active cloud" };
                     ImGui::SetNextItemWidth(240.0f * S);
                     ImGui::Combo("Scope", &glbScopeIdx, scopeNames, IM_ARRAYSIZE(scopeNames));
@@ -5298,9 +5355,12 @@ int main(int argc, char** argv) {
                     ImGui::SliderInt("Max points (M)", &glbMaxPointsM, 0, 200);
                     ImGui::SetItemTooltip("Hard cap in millions across the whole export. 0 = unlimited.");
 
-                    ImGui::Checkbox("Convert to Y-up (glTF standard)", &glbYUp);
-                    ImGui::SetItemTooltip("Off keeps the source Z-up axis. True origin is stored in asset.extras either way.");
+                    ImGui::Checkbox("Convert to Y-up", &glbYUp);
+                    ImGui::SetItemTooltip("Off keeps the source Z-up axis. True origin is preserved either way.");
+                    ImGui::BeginDisabled(fbx);
                     ImGui::Checkbox("Include intensity + classification", &glbIncludeAttrs);
+                    ImGui::EndDisabled();
+                    if (fbx) ImGui::SetItemTooltip("GLB only - FBX carries colours only.");
 
                     const std::vector<int> idxs = glbScopeIndices();
                     const bool useRegion = (glbRegionIdx == 1);
@@ -5320,7 +5380,9 @@ int main(int argc, char** argv) {
                     if (voxel)
                         ImGui::TextDisabled("Voxel downsample will reduce this count.");
                     if (splatClouds > 0)
-                        ImGui::TextDisabled("Splats use KHR_gaussian_splatting (draft) - importer support varies.");
+                        ImGui::TextDisabled(fbx
+                            ? "Splats exported as points (colour only) - use GLB for lossless splats."
+                            : "Splats use KHR_gaussian_splatting (draft) - importer support varies.");
                     if (est > 60000000ull && !voxel && glbMaxPointsM == 0)
                         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
                                            "Large export: set a max-point budget or use voxel downsample.");
@@ -5328,9 +5390,11 @@ int main(int argc, char** argv) {
                     ImGui::Text("Output");
                     ImGui::SameLine(90.0f * S);
                     if (ImGui::Button("Browse...##glb")) {
-                        const char* filters = "glTF Binary\0*.glb\0All Files\0*.*\0";
-                        std::string defName = baseName(loadedDir) + ".glb";
-                        std::string path = pf::saveFileDialog(filters, defName.c_str(), "glb");
+                        const char* filters = fbx ? "FBX (ASCII)\0*.fbx\0All Files\0*.*\0"
+                                                  : "glTF Binary\0*.glb\0All Files\0*.*\0";
+                        const char* ext = fbx ? "fbx" : "glb";
+                        std::string defName = baseName(loadedDir) + "." + ext;
+                        std::string path = pf::saveFileDialog(filters, defName.c_str(), ext);
                         if (!path.empty()) snprintf(glbPathBuf, sizeof(glbPathBuf), "%s", path.c_str());
                     }
                     ImGui::SameLine();
@@ -5703,16 +5767,16 @@ int main(int argc, char** argv) {
                 cmds.push_back({"Open Cloud...", "Ctrl+O", [&] { browseAndLoad(); }});
                 cmds.push_back({"Open Octree Folder...", "", [&] { browseFolderAndLoad(); }});
                 cmds.push_back({"Convert a Scan...", "Ctrl+I", [&] { openConvertDialog(""); }});
-                cmds.push_back({"Export GLB (glTF 2.0)...", "Ctrl+E", [&] {
-                    if (octreeLoaded) {
-                        if (glbPathBuf[0] == 0) {
-                            std::string def = baseName(loadedDir);
-                            if (def.empty()) def = "export";
-                            snprintf(glbPathBuf, sizeof(glbPathBuf), "%s.glb", def.c_str());
-                        }
-                        showGlbExportDialog = true;
-                    }
-                }});
+                auto paletteMeshExport = [&](int fmt, const char* ext) {
+                    if (!octreeLoaded) return;
+                    glbFormatIdx = fmt;
+                    std::string def = baseName(loadedDir);
+                    if (def.empty()) def = "export";
+                    snprintf(glbPathBuf, sizeof(glbPathBuf), "%s.%s", def.c_str(), ext);
+                    showGlbExportDialog = true;
+                };
+                cmds.push_back({"Export GLB (glTF 2.0)...", "Ctrl+E", [&] { paletteMeshExport(0, "glb"); }});
+                cmds.push_back({"Export FBX (ASCII)...", "", [&] { paletteMeshExport(1, "fbx"); }});
                 cmds.push_back({"Frame All", "F", [&] { frameAllReq = true; }});
                 cmds.push_back({"Reset View", "", [&] { if (octreeLoaded) setupCamera(); }});
                 cmds.push_back({"View: Front", "1", [&] { if (octreeLoaded) camPresetFront(); }});
